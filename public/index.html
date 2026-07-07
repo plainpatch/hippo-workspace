@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hippo Agent 工作台</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="appShell">
+      <aside class="sidebar">
+        <div class="systemNav">
+          <button class="sysButton active" id="newChatBtn" type="button"><span>＋</span>新对话</button>
+          <button class="sysButton" id="searchBtn" type="button"><span>⌕</span>搜索</button>
+          <button class="sysButton" id="knowledgeBtn" type="button"><span>◎</span>知识库</button>
+          <button class="sysButton" id="mcpBtn" type="button"><span>◇</span>MCP</button>
+        </div>
+
+        <div class="projectsPane">
+          <div class="sectionLabel">项目</div>
+          <button class="projectRoot" id="createProjectBtn" type="button">
+            <span class="projectIcon">H</span>
+            <span>新建项目</span>
+          </button>
+          <div id="projectList" class="projectList"></div>
+        </div>
+
+        <div class="accountPane">
+          <button class="accountButton" id="runtimeBtn" type="button">
+            <span class="avatar">J</span>
+            <span>
+              <strong>Jimmy</strong>
+              <small id="runtimeSummary">本地运行时</small>
+            </span>
+          </button>
+          <button class="settingsButton" id="settingsBtn" type="button" title="系统设置">⚙</button>
+        </div>
+      </aside>
+
+      <main class="chatWorkspace">
+        <header class="chatHeader">
+          <div class="projectTitle">
+            <span class="titleIcon">▣</span>
+            <div>
+              <h1 id="activeProjectName">选择或创建项目</h1>
+              <p id="activeProjectMeta">项目级配置会决定默认 Agent、Skill 与 RAG 范围。</p>
+            </div>
+          </div>
+          <div class="headerActions">
+            <div id="runtimePills" class="pills"></div>
+            <button id="projectConfigBtn" type="button">项目配置</button>
+            <button id="refreshBtn" type="button">刷新</button>
+          </div>
+        </header>
+
+        <section id="chatStream" class="chatStream" aria-live="polite"></section>
+
+        <form id="composerForm" class="composer">
+          <textarea id="messageInput" name="message" rows="3" placeholder="向当前项目的 Agent 提问，或描述要执行的任务" required></textarea>
+          <div class="composerBar">
+            <div class="composerTools">
+              <button id="attachTextBtn" type="button">＋ 入库</button>
+              <label class="modeSelect">模式
+                <select name="mode">
+                  <option value="">项目默认</option>
+                  <option value="query">检索问答</option>
+                  <option value="chat">对话</option>
+                  <option value="automatic">自动</option>
+                </select>
+              </label>
+              <label class="dryRunToggle"><input name="dryRun" type="checkbox" /> 仅生成请求</label>
+            </div>
+            <button class="sendButton" type="submit">发送</button>
+          </div>
+        </form>
+      </main>
+
+      <aside id="configDrawer" class="configDrawer" aria-hidden="true">
+        <div class="drawerHeader">
+          <div>
+            <h2 id="drawerTitle">项目配置</h2>
+            <p>配置预置 Agent、默认 Skill 与 RAG 边界。</p>
+          </div>
+          <button id="closeDrawerBtn" type="button">关闭</button>
+        </div>
+
+        <form id="projectForm" class="drawerForm">
+          <input name="id" type="hidden" />
+          <label>项目名称 <input name="name" required placeholder="例如：集成 anythingllm" /></label>
+          <label>项目说明 <input name="description" placeholder="这个项目要解决什么问题" /></label>
+          <label>绑定 AnythingLLM 工作空间
+            <select name="anythingllmWorkspaceSlug" id="workspaceSelect"></select>
+          </label>
+          <label class="checkRow">
+            <input name="createAnythingllmWorkspace" type="checkbox" checked />
+            <span>未选择绑定时自动创建 AnythingLLM 工作空间</span>
+          </label>
+          <label>预置 Agent 系统提示词
+            <textarea name="systemPrompt" rows="6" placeholder="定义这个项目里的默认 Agent 应该如何工作"></textarea>
+          </label>
+          <label>默认可访问 Skill
+            <textarea name="skills" rows="5" placeholder="检索回答: 基于绑定知识库组织答案&#10;审查: 识别风险和缺失证据"></textarea>
+          </label>
+          <label>RAG 文档范围
+            <textarea name="ragDocumentNames" rows="4" placeholder="custom-documents/example.json"></textarea>
+          </label>
+          <div class="formGrid">
+            <label>默认模式
+              <select name="defaultMode">
+                <option value="query">检索问答</option>
+                <option value="chat">对话</option>
+                <option value="automatic">自动</option>
+              </select>
+            </label>
+            <label>Top N <input name="topN" type="number" min="1" value="4" /></label>
+          </div>
+          <button class="primary" type="submit">保存项目</button>
+        </form>
+
+        <div class="drawerSection">
+          <h3>知识库入库</h3>
+          <form id="quickTextForm">
+            <label>标题 <input name="title" required /></label>
+            <label>文本 <textarea name="textContent" rows="5" required></textarea></label>
+            <button type="submit">入库到当前项目</button>
+          </form>
+        </div>
+
+        <div class="drawerSection">
+          <h3>运行状态</h3>
+          <dl id="runtimeDetails" class="kv"></dl>
+        </div>
+      </aside>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

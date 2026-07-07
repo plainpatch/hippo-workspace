@@ -1,0 +1,26 @@
+{
+  "name": "hippo",
+  "version": "1.0.0",
+  "description": "This project is configured to run AnythingLLM locally with Docker Compose.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "desktop": "electron apps/desktop/main.cjs",
+    "mcp": "node src/mcp-server.js",
+    "check": "node --check src/server.js && node --check src/mcp-server.js && node --check src/mcp.js && node --check src/anythingllm-client.js && node --check src/agent-orchestrator.js && node --check apps/desktop/main.cjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "multer": "^2.2.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "electron": "^32.3.3"
+  }
+}

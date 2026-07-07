@@ -1,0 +1,40 @@
+services:
+  anythingllm:
+    image: mintplexlabs/anythingllm:latest
+    container_name: hippo-anythingllm
+    ports:
+      - "${ANYTHINGLLM_PORT:-3001}:3001"
+    cap_add:
+      - SYS_ADMIN
+    volumes:
+      - ./anythingllm/storage:/app/server/storage
+      - ./anythingllm/server.env:/app/server/.env
+    environment:
+      STORAGE_DIR: /app/server/storage
+      UID: "${ANYTHINGLLM_UID:-1000}"
+      GID: "${ANYTHINGLLM_GID:-1000}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  rag-wrapper:
+    build: .
+    container_name: hippo-rag-wrapper
+    depends_on:
+      anythingllm:
+        condition: service_healthy
+    ports:
+      - "${WRAPPER_PORT:-8787}:8787"
+    volumes:
+      - ./data:/app/data
+    environment:
+      WRAPPER_PORT: 8787
+      ANYTHINGLLM_BASE_URL: http://anythingllm:3001
+      ANYTHINGLLM_API_KEY: "${ANYTHINGLLM_API_KEY:-}"
+      AGENT_STORE_PATH: /app/data/agent-workspaces.json
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8787/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
