@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Hippo Agent Sidecar",
+  "description": "在 Chrome 侧边栏中加载 Hippo 项目，进行对话和网页知识入库。",
+  "version": "0.1.0",
+  "action": {
+    "default_title": "打开 Hippo 侧边栏"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "activeTab",
+    "contextMenus",
+    "sidePanel",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ]
+}

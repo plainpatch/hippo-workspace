@@ -19,6 +19,7 @@ const createAgentWorkspaceSchema = z.object({
   anythingllmWorkspaceName: z.string().min(1).optional(),
   createAnythingllmWorkspace: z.boolean().default(true),
   ragDocumentNames: z.array(z.string().min(1)).default([]),
+  knowledgeRefs: z.array(z.string().min(1)).default([]),
   defaultMode: z.enum(["query", "chat", "automatic"]).default("query"),
   topN: z.number().int().positive().default(4),
   scoreThreshold: z.number().min(0).max(1).optional(),
@@ -28,6 +29,7 @@ const createAgentWorkspaceSchema = z.object({
 const updateAgentWorkspaceSchema = createAgentWorkspaceSchema.partial().extend({
   skills: z.array(skillSchema).optional(),
   ragDocumentNames: z.array(z.string().min(1)).optional(),
+  knowledgeRefs: z.array(z.string().min(1)).optional(),
 });
 
 const executeAgentTaskSchema = z.object({
@@ -45,8 +47,9 @@ const updateRagScopeSchema = z.object({
 });
 
 export class AgentOrchestrator {
-  constructor({ client, storePath = config.agentStorePath }) {
+  constructor({ client, resourceManager, storePath = config.agentStorePath }) {
     this.client = client;
+    this.resourceManager = resourceManager;
     this.storePath = storePath;
   }
 
@@ -66,23 +69,35 @@ export class AgentOrchestrator {
     const payload = createAgentWorkspaceSchema.parse(input);
     const store = await this.readStore();
     const now = new Date().toISOString();
+    const projectId = randomUUID();
+    const projectWorkspace = this.resourceManager
+      ? await this.resourceManager.createProjectWorkspace({ projectId, projectName: payload.name })
+      : {};
     const anythingllmWorkspaceSlug = await this.resolveAnythingllmWorkspace(payload);
+    const knowledgeDocumentNames = this.resourceManager
+      ? await this.resourceManager.resolveKnowledgeRefs(payload.knowledgeRefs)
+      : [];
+    const ragDocumentNames = dedupe([...payload.ragDocumentNames, ...knowledgeDocumentNames]);
 
-    if (payload.ragDocumentNames.length) {
+    if (ragDocumentNames.length) {
       await this.client.updateWorkspaceEmbeddings(anythingllmWorkspaceSlug, {
-        adds: payload.ragDocumentNames,
+        adds: ragDocumentNames,
         deletes: [],
       });
     }
 
     const agentWorkspace = {
-      id: randomUUID(),
+      id: projectId,
       name: payload.name,
       description: payload.description || "",
       systemPrompt: payload.systemPrompt || "",
       skills: payload.skills,
       anythingllmWorkspaceSlug,
-      ragDocumentNames: dedupe(payload.ragDocumentNames),
+      localWorkspacePath: projectWorkspace.workspacePath || "",
+      localWorkspaceFolderName: projectWorkspace.workspaceFolderName || "",
+      knowledgeRefs: dedupe(payload.knowledgeRefs),
+      explicitRagDocumentNames: dedupe(payload.ragDocumentNames),
+      ragDocumentNames,
       defaultMode: payload.defaultMode,
       topN: payload.topN,
       scoreThreshold: payload.scoreThreshold,
@@ -119,8 +134,30 @@ export class AgentOrchestrator {
       updatedAt: new Date().toISOString(),
     };
 
-    if (payload.ragDocumentNames) {
-      updated.ragDocumentNames = dedupe(payload.ragDocumentNames);
+    const workspaceChanged = Boolean(
+      payload.anythingllmWorkspaceSlug && payload.anythingllmWorkspaceSlug !== current.anythingllmWorkspaceSlug
+    );
+
+    if (payload.knowledgeRefs || payload.ragDocumentNames || workspaceChanged) {
+      const explicitDocs = payload.ragDocumentNames || current.explicitRagDocumentNames || [];
+      const knowledgeRefs = payload.knowledgeRefs || current.knowledgeRefs || [];
+      const knowledgeDocumentNames = this.resourceManager
+        ? await this.resourceManager.resolveKnowledgeRefs(knowledgeRefs)
+        : [];
+      const nextDocumentNames = dedupe([...explicitDocs, ...knowledgeDocumentNames]);
+      const previousDocumentNames = new Set(current.ragDocumentNames || []);
+      const nextDocumentSet = new Set(nextDocumentNames);
+      await this.client.updateWorkspaceEmbeddings(updated.anythingllmWorkspaceSlug, {
+        adds: workspaceChanged
+          ? nextDocumentNames
+          : nextDocumentNames.filter((name) => !previousDocumentNames.has(name)),
+        deletes: workspaceChanged
+          ? []
+          : [...previousDocumentNames].filter((name) => !nextDocumentSet.has(name)),
+      });
+      updated.knowledgeRefs = dedupe(knowledgeRefs);
+      updated.explicitRagDocumentNames = dedupe(explicitDocs);
+      updated.ragDocumentNames = nextDocumentNames;
     }
 
     store.agentWorkspaces[index] = updated;
@@ -153,8 +190,13 @@ export class AgentOrchestrator {
       ...current.ragDocumentNames.filter((name) => !deletes.has(name)),
       ...payload.adds,
     ]);
+    const explicitRagDocumentNames = dedupe([
+      ...(current.explicitRagDocumentNames || []).filter((name) => !deletes.has(name)),
+      ...payload.adds,
+    ]);
     const updated = {
       ...current,
+      explicitRagDocumentNames,
       ragDocumentNames,
       updatedAt: new Date().toISOString(),
     };
@@ -248,13 +290,17 @@ export function buildAgentMessage(agentWorkspace, task, context = undefined) {
     `你正在以定制智能体「${agentWorkspace.name}」的身份执行任务。`,
     agentWorkspace.description ? `智能体说明：\n${agentWorkspace.description}` : "",
     agentWorkspace.systemPrompt ? `系统指令：\n${agentWorkspace.systemPrompt}` : "",
-    agentWorkspace.skills.length
+    agentWorkspace.skills?.length
       ? `允许使用的技能：\n${agentWorkspace.skills.map(formatSkill).join("\n")}`
       : "允许使用的技能：未显式配置。",
     `RAG 边界：只能把绑定的 AnythingLLM 工作空间「${agentWorkspace.anythingllmWorkspaceSlug}」作为知识范围。`,
-    agentWorkspace.ragDocumentNames.length
+    agentWorkspace.ragDocumentNames?.length
       ? `配置的文档范围：\n${agentWorkspace.ragDocumentNames.map((name) => `- ${name}`).join("\n")}`
       : "配置的文档范围：绑定工作空间内当前已索引的全部文档。",
+    agentWorkspace.knowledgeRefs?.length
+      ? `关联的系统知识库：\n${agentWorkspace.knowledgeRefs.map((name) => `- ${name}`).join("\n")}`
+      : "",
+    agentWorkspace.localWorkspacePath ? `本地项目工作区：\n${agentWorkspace.localWorkspacePath}` : "",
     context ? `运行时上下文：\n${JSON.stringify(context, null, 2)}` : "",
     `任务：\n${task}`,
   ];

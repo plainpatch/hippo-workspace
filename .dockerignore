@@ -1,5 +1,6 @@
 node_modules
 .npm-cache
 anythingllm/storage
+resources
 .env
 npm-debug.log

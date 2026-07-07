@@ -11,6 +11,8 @@ export const config = {
   anythingllmApiKey: process.env.ANYTHINGLLM_API_KEY || "",
   agentStorePath:
     process.env.AGENT_STORE_PATH || path.join(process.cwd(), "data", "agent-workspaces.json"),
+  resourceRootPath:
+    process.env.RESOURCE_ROOT_PATH || path.join(process.cwd(), "resources"),
 };
 
 function normalizeBaseUrl(value) {

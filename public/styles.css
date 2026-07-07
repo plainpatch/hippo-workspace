@@ -644,6 +644,73 @@ dd {
   font-size: 14px;
 }
 
+.knowledgePicker {
+  display: grid;
+  gap: 9px;
+}
+
+.knowledgePicker strong {
+  color: #e7e7e7;
+  font-size: 12px;
+}
+
+.knowledgePicker p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.knowledgeTree {
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  padding: 6px;
+  background: #1d1d1d;
+}
+
+.knowledgeNode {
+  min-height: 30px;
+  display: grid !important;
+  grid-template-columns: 16px 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px !important;
+  margin: 0;
+  padding: 4px 6px 4px calc(6px + var(--depth));
+  border-radius: 6px;
+  color: #dcdcdc !important;
+  font-weight: 500 !important;
+}
+
+.knowledgeNode:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.knowledgeNode input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+}
+
+.knowledgeNode span {
+  color: var(--muted);
+}
+
+.knowledgeNode strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.knowledgeNode small {
+  color: var(--faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .kv {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);

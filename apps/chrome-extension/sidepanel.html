@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hippo Agent</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <main class="panel">
+      <header class="topbar">
+        <div>
+          <h1>Hippo Agent</h1>
+          <p id="statusLine">连接本地工作台中</p>
+        </div>
+        <button id="openAppBtn" type="button">工作台</button>
+      </header>
+
+      <section class="projectBar">
+        <label>项目
+          <select id="projectSelect">
+            <option value="">选择项目</option>
+          </select>
+        </label>
+        <button id="reloadBtn" type="button">刷新</button>
+      </section>
+
+      <nav class="tabs" aria-label="功能选项卡">
+        <button class="tab active" data-tab="chat" type="button">对话</button>
+        <button class="tab" data-tab="clip" type="button">剪藏</button>
+        <button class="tab" data-tab="settings" type="button">设置</button>
+      </nav>
+
+      <section id="chatTab" class="tabPanel active">
+        <div id="chatStream" class="chatStream" aria-live="polite"></div>
+        <form id="chatForm" class="composer">
+          <textarea id="messageInput" rows="4" placeholder="选择项目后开始对话"></textarea>
+          <div class="composerBar">
+            <label class="inlineControl">
+              <input id="dryRunInput" type="checkbox" />
+              仅生成请求
+            </label>
+            <button id="sendBtn" class="primary" type="submit">发送</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="clipTab" class="tabPanel">
+        <div class="section">
+          <label>知识库目录
+            <input id="knowledgeDirInput" placeholder="浏览器剪藏/产品资料" />
+          </label>
+          <label>标题
+            <input id="titleInput" placeholder="使用当前页面标题" />
+          </label>
+          <label>剪藏内容
+            <select id="captureModeSelect">
+              <option value="selection">优先选中文本</option>
+              <option value="page">页面正文摘要</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="section preview">
+          <div class="sectionHeader">
+            <strong>预览</strong>
+            <button id="refreshSourceBtn" type="button">重取页面</button>
+          </div>
+          <textarea id="previewText" rows="12" placeholder="选中网页内容后打开侧边栏，或切换为页面正文摘要。"></textarea>
+        </div>
+
+        <button id="clipBtn" class="primary" type="button">入库并关联当前项目</button>
+      </section>
+
+      <section id="settingsTab" class="tabPanel">
+        <div class="section">
+          <label>Wrapper 地址
+            <input id="wrapperUrlInput" placeholder="http://localhost:8787" />
+          </label>
+          <button id="saveSettingsBtn" type="button">保存配置</button>
+        </div>
+        <dl id="projectDetails" class="details"></dl>
+      </section>
+    </main>
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

@@ -101,8 +101,15 @@
           <label>默认可访问 Skill
             <textarea name="skills" rows="5" placeholder="检索回答: 基于绑定知识库组织答案&#10;审查: 识别风险和缺失证据"></textarea>
           </label>
-          <label>RAG 文档范围
-            <textarea name="ragDocumentNames" rows="4" placeholder="custom-documents/example.json"></textarea>
+          <div class="knowledgePicker">
+            <div>
+              <strong>关联系统知识库</strong>
+              <p>勾选目录或文件，项目会通过引用加载对应知识范围。</p>
+            </div>
+            <div id="knowledgeTree" class="knowledgeTree"></div>
+          </div>
+          <label>补充 AnythingLLM 文档名
+            <textarea name="ragDocumentNames" rows="3" placeholder="可选：custom-documents/example.json"></textarea>
           </label>
           <div class="formGrid">
             <label>默认模式
@@ -118,11 +125,12 @@
         </form>
 
         <div class="drawerSection">
-          <h3>知识库入库</h3>
+          <h3>系统知识库入库</h3>
           <form id="quickTextForm">
+            <label>知识库目录 <input name="relativeDir" placeholder="例如：平台/AnythingLLM" /></label>
             <label>标题 <input name="title" required /></label>
             <label>文本 <textarea name="textContent" rows="5" required></textarea></label>
-            <button type="submit">入库到当前项目</button>
+            <button type="submit">入库到系统知识库</button>
           </form>
         </div>
 

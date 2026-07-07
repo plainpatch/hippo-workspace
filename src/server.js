@@ -10,13 +10,15 @@ import { config } from "./config.js";
 import { createMcpServer } from "./mcp.js";
 import { createAnythingLlmClient } from "./shared.js";
 import { AgentOrchestrator } from "./agent-orchestrator.js";
+import { ResourceManager } from "./resource-manager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "..", "public");
 const upload = multer({ storage: multer.memoryStorage() });
 const app = express();
 const client = createAnythingLlmClient();
-const agentOrchestrator = new AgentOrchestrator({ client });
+const resourceManager = new ResourceManager({ client });
+const agentOrchestrator = new AgentOrchestrator({ client, resourceManager });
 const mcpSessions = new Map();
 
 app.use(express.json({ limit: "10mb" }));
@@ -32,9 +34,40 @@ app.delete("/mcp", asyncHandler(handleMcpSessionRequest));
 
 app.get("/api/status", asyncHandler(async (_req, res) => {
   res.json({
-    wrapper: { ok: true, port: config.wrapperPort, agentStorePath: config.agentStorePath },
+    wrapper: {
+      ok: true,
+      port: config.wrapperPort,
+      agentStorePath: config.agentStorePath,
+      resources: await resourceManager.getStatus(),
+    },
     anythingllm: await client.status(),
   });
+}));
+
+app.get("/api/resources", asyncHandler(async (_req, res) => {
+  res.json(await resourceManager.getStatus());
+}));
+
+app.get("/api/knowledge", asyncHandler(async (_req, res) => {
+  res.json(await resourceManager.listKnowledgeTree());
+}));
+
+app.post("/api/knowledge/folders", asyncHandler(async (req, res) => {
+  res.json(await resourceManager.createKnowledgeFolder(req.body.path || ""));
+}));
+
+app.post("/api/knowledge/text", asyncHandler(async (req, res) => {
+  res.json(await resourceManager.ingestKnowledgeText(req.body));
+}));
+
+app.post("/api/knowledge/upload", upload.single("file"), asyncHandler(async (req, res) => {
+  if (!req.file) throw new AnythingLlmError("Missing multipart file field.", 400);
+  res.json(await resourceManager.ingestKnowledgeFile({
+    fileBuffer: req.file.buffer,
+    fileName: req.file.originalname,
+    relativeDir: req.body.relativeDir || "",
+    metadata: parseMetadata(req.body.metadata),
+  }));
 }));
 
 app.get("/api/agent-workspaces", asyncHandler(async (_req, res) => {

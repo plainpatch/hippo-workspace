@@ -1,6 +1,7 @@
 const state = {
   projects: [],
   workspaces: [],
+  knowledge: null,
   status: null,
   activeProjectId: null,
   messages: [],
@@ -30,7 +31,7 @@ function bindEvents() {
 
 async function refreshAll() {
   await checkStatus();
-  await Promise.allSettled([loadProjects(), loadWorkspaces()]);
+  await Promise.allSettled([loadProjects(), loadWorkspaces(), loadKnowledge()]);
 }
 
 async function checkStatus() {
@@ -68,6 +69,12 @@ async function loadWorkspaces() {
   const workspaces = data.workspaces || data.workspace || data;
   state.workspaces = Array.isArray(workspaces) ? workspaces : [];
   renderWorkspaceOptions();
+}
+
+async function loadKnowledge() {
+  const data = await request("/api/knowledge");
+  state.knowledge = data;
+  renderKnowledgeTree(getActiveProject()?.knowledgeRefs || []);
 }
 
 function renderProjectList() {
@@ -120,14 +127,14 @@ function renderActiveProject() {
   }
 
   name.textContent = project.name;
-  meta.textContent = `${project.anythingllmWorkspaceSlug} · ${project.defaultMode || "query"} · ${(project.skills || []).length} 个 Skill`;
+  meta.textContent = `${project.localWorkspaceFolderName || project.anythingllmWorkspaceSlug} · ${project.defaultMode || "query"} · ${(project.skills || []).length} 个 Skill · ${(project.knowledgeRefs || []).length} 个知识引用`;
   configButton.textContent = "项目配置";
   input.disabled = false;
   input.placeholder = `向「${project.name}」提问，或描述要执行的任务`;
   if (!state.messages.length) {
     state.messages = [{
       role: "assistant",
-      text: `当前项目已绑定 AnythingLLM 工作空间「${project.anythingllmWorkspaceSlug}」。可以直接提问，或在“项目配置”里调整预置 Agent 和 Skill。`,
+      text: `当前项目已绑定 AnythingLLM 工作空间「${project.anythingllmWorkspaceSlug}」，本地工作区为「${project.localWorkspacePath || "未记录"}」。可以在“项目配置”里调整预置 Agent、Skill 和系统知识库引用。`,
     }];
     renderMessages();
   }
@@ -154,6 +161,18 @@ function renderWorkspaceOptions() {
     )
   ).join("");
   document.getElementById("workspaceSelect").innerHTML = options;
+}
+
+function renderKnowledgeTree(selectedRefs = []) {
+  const target = document.getElementById("knowledgeTree");
+  if (!target) return;
+  const tree = state.knowledge?.tree;
+  if (!tree || !tree.children?.length) {
+    target.innerHTML = `<div class="emptyBlock">系统知识库暂无内容。可先在下方入库文本，或通过 API 上传文件。</div>`;
+    return;
+  }
+  const selected = new Set(selectedRefs || []);
+  target.innerHTML = tree.children.map((item) => renderKnowledgeNode(item, selected, 0)).join("");
 }
 
 function renderRuntimePills(items) {
@@ -184,6 +203,7 @@ async function saveProject(event) {
     skills: parseSkills(form.get("skills")),
     anythingllmWorkspaceSlug: form.get("anythingllmWorkspaceSlug") || undefined,
     createAnythingllmWorkspace: Boolean(form.get("createAnythingllmWorkspace")),
+    knowledgeRefs: [...formNode.querySelectorAll("[name='knowledgeRefs']:checked")].map((item) => item.value),
     ragDocumentNames: splitLinesOrComma(form.get("ragDocumentNames")),
     defaultMode: form.get("defaultMode"),
     topN: Number(form.get("topN") || 4),
@@ -240,19 +260,26 @@ async function sendMessage(event) {
 async function uploadTextToProject(event) {
   event.preventDefault();
   const project = getActiveProject();
-  if (!project) {
-    toast("请先选择项目。", true);
-    return;
-  }
   const formNode = event.currentTarget;
   const form = new FormData(formNode);
-  await submitJson("/api/documents/raw", {
+  const relativeDir = String(form.get("relativeDir") || "").trim();
+  const data = await submitJson("/api/knowledge/text", {
+    relativeDir,
+    title: form.get("title"),
     textContent: form.get("textContent"),
-    addToWorkspaces: [project.anythingllmWorkspaceSlug],
-    metadata: { title: form.get("title") },
+    metadata: project ? { projectId: project.id } : {},
   });
+  if (project) {
+    const refs = new Set([...(project.knowledgeRefs || []), relativeDir || data.relativePath]);
+    await request(`/api/agent-workspaces/${encodeURIComponent(project.id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ knowledgeRefs: [...refs] }),
+    });
+  }
   formNode.reset();
-  toast("文档已入库到当前项目。");
+  await Promise.allSettled([loadProjects(), loadKnowledge()]);
+  toast(project ? "文档已入库到系统知识库，并关联当前项目。" : "文档已入库到系统知识库。");
 }
 
 function openProjectForm(project = undefined) {
@@ -267,7 +294,7 @@ function openProjectForm(project = undefined) {
     form.elements.systemPrompt.value = active.systemPrompt || "";
     form.elements.skills.value = (active.skills || []).map(formatSkillLine).join("\n");
     form.elements.anythingllmWorkspaceSlug.value = active.anythingllmWorkspaceSlug || "";
-    form.elements.ragDocumentNames.value = (active.ragDocumentNames || []).join("\n");
+    form.elements.ragDocumentNames.value = (active.explicitRagDocumentNames || []).join("\n");
     form.elements.defaultMode.value = active.defaultMode || "query";
     form.elements.topN.value = active.topN || 4;
     form.elements.createAnythingllmWorkspace.checked = false;
@@ -277,6 +304,7 @@ function openProjectForm(project = undefined) {
     form.elements.defaultMode.value = "query";
     form.elements.topN.value = 4;
   }
+  renderKnowledgeTree(active?.knowledgeRefs || []);
   setDrawerOpen(true);
 }
 
@@ -367,6 +395,29 @@ function parseSkills(value) {
 
 function formatSkillLine(skill) {
   return skill.description ? `${skill.name}: ${skill.description}` : skill.name;
+}
+
+function renderKnowledgeNode(item, selected, depth) {
+  const checked = selected.has(item.path) ? "checked" : "";
+  const indent = depth * 14;
+  const count = item.type === "folder" ? countKnowledgeDocs(item) : item.documentNames?.length || 0;
+  const children = item.children?.length
+    ? `<div class="knowledgeChildren">${item.children.map((child) => renderKnowledgeNode(child, selected, depth + 1)).join("")}</div>`
+    : "";
+  return `
+    <label class="knowledgeNode ${item.type}" style="--depth:${indent}px">
+      <input name="knowledgeRefs" type="checkbox" value="${escapeHtml(item.path)}" ${checked} />
+      <span>${item.type === "folder" ? "▸" : "·"}</span>
+      <strong>${escapeHtml(item.name)}</strong>
+      <small>${count} 文档</small>
+    </label>
+    ${children}
+  `;
+}
+
+function countKnowledgeDocs(item) {
+  if (item.type === "file") return item.documentNames?.length || 0;
+  return (item.children || []).reduce((sum, child) => sum + countKnowledgeDocs(child), 0);
 }
 
 function splitLines(value) {

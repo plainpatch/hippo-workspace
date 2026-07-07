@@ -44,6 +44,27 @@ The console supports:
 - workspace vector search
 - listing documents and workspaces
 - custom agent workspaces with system prompts, skills, bound RAG scope, and task execution
+- fixed local resource directories for project workspaces and system knowledge references
+
+## Resource directory model
+
+The app uses one fixed resource root:
+
+```text
+resources/
+  projects/    # one local workspace folder per Hippo project
+  knowledge/   # system-level knowledge base tree
+```
+
+When a project is created, Hippo creates a folder under `resources/projects/` and creates or binds an AnythingLLM workspace for that project.
+
+The knowledge base is system-level. Use nested folders under `resources/knowledge/` to manage categories, teams, products, or document layers. Projects do not own those files directly. They save references to selected knowledge folders or files through `knowledgeRefs`, and the wrapper resolves those references to AnythingLLM document names before syncing the project's AnythingLLM workspace embeddings.
+
+The Docker wrapper mounts the resource root at `/app/resources`:
+
+```yaml
+./resources:/app/resources
+```
 
 ## Run as a local desktop app
 
@@ -61,6 +82,49 @@ Runtime dependencies are still local:
 - AnythingLLM at `ANYTHINGLLM_BASE_URL`
 - `ANYTHINGLLM_API_KEY` in `.env`
 - Ollama for local embeddings when using the configured `bge-m3:latest` embedding model
+
+## Chrome extension
+
+The companion Chrome extension lives in `apps/chrome-extension`. It opens as a Chrome side panel, loads Hippo projects, provides a project-scoped chat surface, and clips the current page or selected text into the Hippo system knowledge base.
+
+One-click developer install:
+
+```sh
+npm run install:chrome-extension
+```
+
+This validates the extension and starts Chrome, Edge, or Chromium with a dedicated local profile at `.chrome-extension-profile` and the unpacked extension loaded. It does not modify your primary browser profile.
+
+Manual install:
+
+1. Open `chrome://extensions`.
+2. Enable Developer mode.
+3. Click "Load unpacked".
+4. Select `apps/chrome-extension`.
+
+Default connection:
+
+```text
+http://localhost:8787
+```
+
+Side panel capabilities:
+
+- select and load a Hippo project
+- chat with the selected project's agent
+- pass the current page title and URL as runtime context during chat
+- read the current page title, URL, selected text, and page text summary
+- save content into `resources/knowledge/<目录>`
+- optionally associate the knowledge directory with a Hippo project
+- open the local Hippo workbench
+
+Context menu:
+
+- select text on a page
+- right click
+- choose "保存选中文本到 Hippo 知识库"
+
+The context menu uses the default knowledge directory and default project selected in the side panel.
 
 ## Run the wrapper locally without Docker
 
@@ -126,10 +190,12 @@ Exposed MCP tools:
 The wrapper also provides a higher-level custom agent workspace abstraction. An agent workspace binds local orchestration metadata to an AnythingLLM workspace:
 
 - local agent workspace id, name, and description
+- local workspace folder under `resources/projects/`
 - bound AnythingLLM `workspaceSlug`
 - predefined system prompt
 - allowed skills list
-- configured RAG document scope
+- selected system knowledge references
+- resolved RAG document scope
 - default execution mode: `query`, `chat`, or `automatic`
 
 Create an agent workspace:
@@ -147,6 +213,7 @@ curl -X POST http://localhost:8787/api/agent-workspaces \
       }
     ],
     "anythingllmWorkspaceSlug": "existing-anythingllm-workspace",
+    "knowledgeRefs": ["platform/anythingllm"],
     "ragDocumentNames": ["custom-documents/example.json"],
     "defaultMode": "query",
     "topN": 4
@@ -154,6 +221,26 @@ curl -X POST http://localhost:8787/api/agent-workspaces \
 ```
 
 If `anythingllmWorkspaceSlug` is omitted, the wrapper creates a matching AnythingLLM workspace first.
+
+Create a system knowledge folder:
+
+```sh
+curl -X POST http://localhost:8787/api/knowledge/folders \
+  -H 'Content-Type: application/json' \
+  -d '{ "path": "platform/anythingllm" }'
+```
+
+Ingest text into the system knowledge base:
+
+```sh
+curl -X POST http://localhost:8787/api/knowledge/text \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "relativeDir": "platform/anythingllm",
+    "title": "接入说明",
+    "textContent": "AnythingLLM 接入说明..."
+  }'
+```
 
 Execute a task through an agent workspace:
 

@@ -4,6 +4,8 @@ anythingllm/server.env
 node_modules/
 .npm-cache/
 .playwright-cli/
+.chrome-extension-profile/
 output/
 data/
+resources/
 npm-debug.log*

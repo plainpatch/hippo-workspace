@@ -27,11 +27,13 @@ services:
       - "${WRAPPER_PORT:-8787}:8787"
     volumes:
       - ./data:/app/data
+      - ./resources:/app/resources
     environment:
       WRAPPER_PORT: 8787
       ANYTHINGLLM_BASE_URL: http://anythingllm:3001
       ANYTHINGLLM_API_KEY: "${ANYTHINGLLM_API_KEY:-}"
       AGENT_STORE_PATH: /app/data/agent-workspaces.json
+      RESOURCE_ROOT_PATH: /app/resources
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:8787/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
