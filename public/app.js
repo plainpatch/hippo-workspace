@@ -7,6 +7,7 @@ const state = {
   activeConversationId: null,
   conversations: [],
   collapsedProjectIds: new Set(),
+  selectedKnowledgePath: "",
   currentView: "chat",
   messages: [],
 };
@@ -27,16 +28,17 @@ refreshAll();
 function bindEvents() {
   const messageInput = document.getElementById("messageInput");
   document.getElementById("refreshBtn").addEventListener("click", refreshAll);
-  document.getElementById("newChatBtn").addEventListener("click", () => createConversationForActiveProject());
-  document.getElementById("searchBtn").addEventListener("click", () => toast("搜索入口已预留。"));
+  document.getElementById("projectHomeBtn").addEventListener("click", renderActiveProject);
+  document.getElementById("searchBtn")?.addEventListener("click", () => toast("搜索入口已预留。"));
   document.getElementById("agentsBtn").addEventListener("click", showAgentsPage);
-  document.getElementById("knowledgeBtn").addEventListener("click", openDrawer);
+  document.getElementById("knowledgeBtn").addEventListener("click", showKnowledgePage);
   document.getElementById("mcpBtn").addEventListener("click", showMcpMessage);
   document.getElementById("runtimeBtn").addEventListener("click", showRuntimeMessage);
   document.getElementById("settingsBtn").addEventListener("click", openDrawer);
   document.getElementById("createProjectBtn").addEventListener("click", () => openProjectForm());
   document.getElementById("projectConfigBtn").addEventListener("click", () => {
     if (state.currentView === "agents") openAgentForm();
+    else if (state.currentView === "knowledge") focusKnowledgeCreateAction();
     else openProjectForm(getActiveProject());
   });
   document.getElementById("closeDrawerBtn").addEventListener("click", closeDrawer);
@@ -93,7 +95,7 @@ async function loadProjects() {
     state.messages = [];
     renderProjectList();
   }
-  renderActiveProject();
+  if (state.currentView === "chat") renderActiveProject();
 }
 
 async function loadConversations(projectId) {
@@ -120,6 +122,7 @@ async function loadKnowledge() {
   const data = await request("/api/knowledge");
   state.knowledge = data;
   renderProjectKnowledgeTree([]);
+  if (state.currentView === "knowledge") renderKnowledgeManager();
 }
 
 function renderProjectList() {
@@ -215,6 +218,8 @@ function renderConversationList() {
 
 function renderActiveProject() {
   state.currentView = "chat";
+  setActiveSystemNav("chat");
+  document.getElementById("composerForm").classList.remove("hidden");
   renderAgentOptions();
   const project = getActiveProject();
   const name = document.getElementById("activeProjectName");
@@ -268,6 +273,8 @@ function renderMessages() {
 
 function showAgentsPage() {
   state.currentView = "agents";
+  setActiveSystemNav("agents");
+  document.getElementById("composerForm").classList.add("hidden");
   document.getElementById("activeProjectName").textContent = "智能体";
   document.getElementById("activeProjectMeta").textContent = "Agent 类似可选插件包，可以预置提示词和多个 Skill；不加载 Agent 也能执行。";
   document.getElementById("projectConfigBtn").textContent = "新建 Agent";
@@ -292,6 +299,274 @@ function showAgentsPage() {
       const agent = state.agents.find((item) => item.id === button.dataset.agentId);
       if (agent) openAgentForm(agent);
     });
+  });
+}
+
+function showKnowledgePage() {
+  state.currentView = "knowledge";
+  setActiveSystemNav("knowledge");
+  closeDrawer();
+  document.getElementById("composerForm").classList.add("hidden");
+  document.getElementById("activeProjectName").textContent = "知识库";
+  document.getElementById("activeProjectMeta").textContent = "系统路径 knowledge 下的两级目录：一级知识库表示领域类型，二级主题表示领域下的细分知识类型。";
+  document.getElementById("projectConfigBtn").textContent = "新建主题";
+  renderKnowledgeManager();
+}
+
+function focusKnowledgeCreateAction() {
+  const selected = state.selectedKnowledgePath;
+  if (selected?.includes("/")) {
+    state.selectedKnowledgePath = selected.split("/")[0];
+    renderKnowledgeManager();
+  }
+  document.querySelector("#knowledgeTopicForm input[name='name']")?.focus();
+  if (!document.querySelector("#knowledgeTopicForm input[name='name']")) {
+    document.getElementById("knowledgeDomainForm")?.classList.remove("hidden");
+    document.getElementById("knowledgeDomainName")?.focus();
+  }
+}
+
+function renderKnowledgeManager() {
+  const stream = document.getElementById("chatStream");
+  const tree = state.knowledge?.tree;
+  const domains = Array.isArray(tree?.children)
+    ? tree.children.filter((item) => item.type === "folder")
+    : [];
+  const selectedNode = findKnowledgeNode(state.selectedKnowledgePath, domains) || domains[0] || null;
+  state.selectedKnowledgePath = selectedNode?.path || "";
+  stream.innerHTML = `
+    <section class="knowledgeManager">
+      <aside class="knowledgeTreePane">
+        <div class="knowledgeTreeHeader">
+          <h2>知识库</h2>
+          <button id="newKnowledgeDomainBtn" type="button">新建</button>
+        </div>
+        <form id="knowledgeDomainForm" class="knowledgeQuickForm hidden">
+          <label>领域类型 <input id="knowledgeDomainName" name="name" required placeholder="例如：网关平台" /></label>
+          <label>描述 <textarea name="description" rows="3" required placeholder="说明这个领域覆盖的文档范围"></textarea></label>
+          <button class="primary" type="submit">创建知识库</button>
+        </form>
+        <div class="knowledgeTreeList">
+          ${domains.length ? domains.map((domain) => renderKnowledgeTreeItem(domain, selectedNode?.path || "")).join("") : `<div class="emptyBlock">还没有知识库。</div>`}
+        </div>
+      </aside>
+      <section class="knowledgeDetailPane">
+        ${selectedNode ? renderKnowledgeDetail(selectedNode, domains) : renderEmptyKnowledgeDetail()}
+      </section>
+    </section>
+  `;
+  document.getElementById("knowledgeDomainForm")?.addEventListener("submit", saveKnowledgeDomain);
+  document.getElementById("newKnowledgeDomainBtn")?.addEventListener("click", () => {
+    document.getElementById("knowledgeDomainForm")?.classList.toggle("hidden");
+    document.getElementById("knowledgeDomainName")?.focus();
+  });
+  document.getElementById("knowledgeTopicForm")?.addEventListener("submit", saveKnowledgeTopic);
+  stream.querySelectorAll("[data-knowledge-meta-path]").forEach((form) => {
+    form.addEventListener("submit", saveKnowledgeMetadata);
+  });
+  stream.querySelectorAll("[data-knowledge-node-path]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedKnowledgePath = button.dataset.knowledgeNodePath;
+      renderKnowledgeManager();
+    });
+  });
+  stream.scrollTop = 0;
+}
+
+function renderKnowledgeTreeItem(domain, selectedPath) {
+  const topics = getKnowledgeTopics(domain);
+  const isActive = domain.path === selectedPath;
+  return `
+    <div class="knowledgeTreeGroup">
+      <button class="knowledgeTreeNode domain ${isActive ? "active" : ""}" data-knowledge-node-path="${escapeHtml(domain.path)}" type="button">
+        <span>▾</span>
+        <strong>${escapeHtml(domain.title || domain.name)}</strong>
+        <small>${topics.length}</small>
+      </button>
+      <div class="knowledgeTreeChildren">
+        ${topics.map((topic) => `
+          <button class="knowledgeTreeNode topic ${topic.path === selectedPath ? "active" : ""}" data-knowledge-node-path="${escapeHtml(topic.path)}" type="button">
+            <span></span>
+            <strong>${escapeHtml(topic.title || topic.name)}</strong>
+            <small>${countKnowledgeDocs(topic)}</small>
+          </button>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderKnowledgeDetail(node, domains) {
+  const isDomain = node.level === 1;
+  const topics = isDomain ? getKnowledgeTopics(node) : [];
+  const documents = collectKnowledgeDocuments(node);
+  return `
+    <div class="knowledgeDetailHeader">
+      <div>
+        <span>${isDomain ? "一级知识库" : "二级主题"}</span>
+        <h2>${escapeHtml(node.title || node.name)}</h2>
+      </div>
+      <small>${node.path}</small>
+    </div>
+    ${renderKnowledgeMetadataForm(node, `${isDomain ? `${topics.length} 主题 · ` : ""}${documents.length} 文档`)}
+    ${isDomain ? renderKnowledgeTopicCreator(node) : ""}
+    <div class="knowledgeDetailSection">
+      <h3>${isDomain ? "目录列表" : "文档列表"}</h3>
+      ${isDomain ? renderKnowledgeTopicDirectory(topics) : renderKnowledgeDocumentList(documents)}
+    </div>
+    <div class="knowledgeDetailSection">
+      <h3>相关配置</h3>
+      <dl class="knowledgeConfigList">
+        <dt>路径</dt><dd>${escapeHtml(node.path)}</dd>
+        <dt>层级</dt><dd>${isDomain ? "一级知识库 / 领域类型" : "二级主题 / 细分知识类型"}</dd>
+        <dt>项目授权</dt><dd>${isDomain ? "项目引用此一级知识库后，检索包含其下主题。" : "二级主题作为检索 tag 辅助过滤，不单独授权。"}</dd>
+        <dt>文档数</dt><dd>${documents.length}</dd>
+      </dl>
+    </div>
+  `;
+}
+
+function renderEmptyKnowledgeDetail() {
+  return `
+    <div class="knowledgeEmptyDetail">
+      <h2>还没有知识库</h2>
+      <p>在左侧新建一级知识库，再为其添加二级主题。</p>
+    </div>
+  `;
+}
+
+function renderKnowledgeTopicCreator(domain) {
+  return `
+    <form id="knowledgeTopicForm" class="knowledgeInlineForm">
+      <input name="domainPath" type="hidden" value="${escapeHtml(domain.path)}" />
+      <label>新建主题 <input name="name" required placeholder="例如：部署运维" /></label>
+      <label>描述 <textarea name="description" rows="2" required placeholder="说明这个主题下应放哪些资料"></textarea></label>
+      <button class="primary" type="submit">创建主题</button>
+    </form>
+  `;
+}
+
+function renderKnowledgeTopicDirectory(topics) {
+  if (!topics.length) return `<div class="knowledgeTopicEmpty">还没有二级主题。</div>`;
+  return `
+    <div class="knowledgeDirectoryList">
+      ${topics.map((topic) => `
+        <button class="knowledgeDirectoryItem" data-knowledge-node-path="${escapeHtml(topic.path)}" type="button">
+          <strong>${escapeHtml(topic.title || topic.name)}</strong>
+          <span>${escapeHtml(topic.description || "未填写描述")}</span>
+          <small>${countKnowledgeDocs(topic)} 文档</small>
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderKnowledgeDocumentList(documents) {
+  if (!documents.length) return `<div class="knowledgeTopicEmpty">暂无文档。</div>`;
+  return `
+    <div class="knowledgeDirectoryList">
+      ${documents.map((doc) => `
+        <div class="knowledgeDirectoryItem static">
+          <strong>${escapeHtml(doc.name)}</strong>
+          <span>${escapeHtml(doc.path)}</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderKnowledgeMetadataForm(item, summary) {
+  const typeLabel = item.level === 1 ? "一级知识库" : "二级主题";
+  const title = item.title || item.name;
+  return `
+    <form class="knowledgeMetaForm" data-knowledge-meta-path="${escapeHtml(item.path)}">
+      <div class="knowledgeMetaHeader">
+        <strong>${escapeHtml(`${typeLabel} · ${title}`)}</strong>
+        <small>${escapeHtml(summary)}</small>
+      </div>
+      <div class="knowledgeMetaFields">
+        <label>名称 <input name="name" required value="${escapeHtml(title)}" /></label>
+        <label>描述 <textarea name="description" rows="2" required>${escapeHtml(item.description || "")}</textarea></label>
+        <button type="submit">保存</button>
+      </div>
+    </form>
+  `;
+}
+
+function findKnowledgeNode(pathValue, domains) {
+  if (!pathValue) return null;
+  for (const domain of domains) {
+    if (domain.path === pathValue) return domain;
+    const topic = getKnowledgeTopics(domain).find((item) => item.path === pathValue);
+    if (topic) return topic;
+  }
+  return null;
+}
+
+function getKnowledgeTopics(domain) {
+  return Array.isArray(domain?.children) ? domain.children.filter((item) => item.type === "folder") : [];
+}
+
+function collectKnowledgeDocuments(item) {
+  if (!item) return [];
+  if (item.type === "file") return [item];
+  const children = Array.isArray(item.children) ? item.children : [];
+  return children.flatMap(collectKnowledgeDocuments);
+}
+
+async function saveKnowledgeDomain(event) {
+  event.preventDefault();
+  const formNode = event.currentTarget;
+  const form = new FormData(formNode);
+  await submitJson("/api/knowledge/domains", {
+    name: form.get("name"),
+    description: form.get("description"),
+  }, false);
+  formNode.reset();
+  state.knowledge = await request("/api/knowledge");
+  renderProjectKnowledgeTree([]);
+  renderKnowledgeManager();
+  toast("知识库已创建。");
+}
+
+async function saveKnowledgeTopic(event) {
+  event.preventDefault();
+  const formNode = event.currentTarget;
+  const form = new FormData(formNode);
+  await submitJson("/api/knowledge/topics", {
+    domainPath: form.get("domainPath"),
+    name: form.get("name"),
+    description: form.get("description"),
+  }, false);
+  formNode.reset();
+  state.knowledge = await request("/api/knowledge");
+  renderProjectKnowledgeTree([]);
+  renderKnowledgeManager();
+  toast("主题已创建。");
+}
+
+async function saveKnowledgeMetadata(event) {
+  event.preventDefault();
+  const formNode = event.currentTarget;
+  const form = new FormData(formNode);
+  await request("/api/knowledge/folders", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      drawerPath: formNode.dataset.knowledgeMetaPath,
+      name: form.get("name"),
+      description: form.get("description"),
+    }),
+  });
+  state.knowledge = await request("/api/knowledge");
+  renderProjectKnowledgeTree([]);
+  renderKnowledgeManager();
+  toast("知识库元信息已保存。");
+}
+
+function setActiveSystemNav(view) {
+  document.querySelectorAll("[data-system-view]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.systemView === view);
   });
 }
 

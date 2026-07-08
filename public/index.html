@@ -10,12 +10,11 @@
     <div class="appShell">
       <aside class="sidebar">
         <div class="systemNav">
-          <button class="sysButton active" id="newChatBtn" type="button"><span>+</span>新对话</button>
-          <button class="sysButton" id="createProjectBtn" type="button"><span>P</span>新建项目</button>
-          <button class="sysButton" id="searchBtn" type="button"><span>/</span>搜索</button>
-          <button class="sysButton" id="agentsBtn" type="button"><span>A</span>智能体</button>
-          <button class="sysButton" id="knowledgeBtn" type="button"><span>K</span>知识库</button>
+          <button class="sysButton active" id="projectHomeBtn" data-system-view="chat" type="button"><span>▣</span>项目</button>
+          <button class="sysButton" id="knowledgeBtn" data-system-view="knowledge" type="button"><span>K</span>知识库</button>
+          <button class="sysButton" id="agentsBtn" data-system-view="agents" type="button"><span>A</span>智能体</button>
           <button class="sysButton" id="mcpBtn" type="button"><span>M</span>MCP</button>
+          <button class="sysButton" id="createProjectBtn" type="button"><span>+</span>新建项目</button>
         </div>
 
         <div class="projectsPane">
@@ -164,6 +163,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js" type="module"></script>
+    <script src="/app.js?v=knowledge-manager" type="module"></script>
   </body>
 </html>

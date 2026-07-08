@@ -64,6 +64,42 @@ export class ResourceManager {
     return { path: safePath, absolutePath: target, drawer };
   }
 
+  async createKnowledgeDomain({ name, description, metadata = {} } = {}) {
+    const displayName = requireNonEmpty(name, "Knowledge domain name is required.");
+    const drawerDescription = requireNonEmpty(description, "Knowledge domain description is required.");
+    const safePath = slugify(displayName);
+    return this.createKnowledgeFolder(safePath, {
+      name: displayName,
+      description: drawerDescription,
+      metadata,
+    });
+  }
+
+  async createKnowledgeTopic({ domainPath, name, description, metadata = {} } = {}) {
+    const primaryPath = assertPrimaryDrawerPath(domainPath);
+    if (!primaryPath) throw new ResourceManagerError("Knowledge domain is required.", 400);
+    const displayName = requireNonEmpty(name, "Knowledge topic name is required.");
+    const topicDescription = requireNonEmpty(description, "Knowledge topic description is required.");
+    await this.ensureDrawerExists(primaryPath);
+    const topicPath = path.posix.join(primaryPath, slugify(displayName));
+    return this.createKnowledgeFolder(topicPath, {
+      name: displayName,
+      description: topicDescription,
+      metadata,
+    });
+  }
+
+  async updateKnowledgeDrawer({ drawerPath, name, description, metadata = {} } = {}) {
+    const safePath = assertDrawerPath(drawerPath);
+    if (!safePath) throw new ResourceManagerError("Knowledge drawer path is required.", 400);
+    await this.ensureDrawerExists(safePath);
+    return this.upsertDrawerMetadata(safePath, {
+      name: name ? String(name).trim() : undefined,
+      description: description !== undefined ? String(description).trim() : undefined,
+      metadata,
+    });
+  }
+
   async ingestKnowledgeText({ relativeDir = "", title, textContent, metadata = {} }) {
     if (!this.client) throw new ResourceManagerError("AnythingLLM client is required for ingestion.", 500);
     await this.ensureBaseDirectories();
@@ -198,6 +234,15 @@ export class ResourceManager {
     return undefined;
   }
 
+  async ensureDrawerExists(relativePath) {
+    const safePath = assertDrawerPath(relativePath);
+    const index = await this.readKnowledgeIndex();
+    if (!index.drawers[safePath]) {
+      throw new ResourceManagerError(`Knowledge drawer ${safePath} was not found.`, 404);
+    }
+    return index.drawers[safePath];
+  }
+
   async readKnowledgeIndex() {
     await this.ensureBaseDirectories();
     try {
@@ -238,10 +283,15 @@ async function readTree(root, current, index) {
     const relativePath = toPosix(path.relative(root, absolutePath));
     if (entry.isDirectory()) {
       const childTree = await readTree(root, absolutePath, index);
+      const drawer = index.drawers[relativePath] || {};
       children.push({
         type: "folder",
         name: entry.name,
         path: relativePath,
+        title: drawer.name || entry.name,
+        description: drawer.description || "",
+        level: relativePath ? relativePath.split("/").length : 0,
+        metadata: drawer.metadata || {},
         children: childTree.children,
       });
     } else if (entry.isFile()) {
@@ -279,6 +329,12 @@ function assertPrimaryDrawerPath(value) {
   const normalized = assertSafeRelativePath(value);
   if (!normalized) return "";
   return normalized.split("/")[0];
+}
+
+function requireNonEmpty(value, message) {
+  const text = String(value || "").trim();
+  if (!text) throw new ResourceManagerError(message, 400);
+  return text;
 }
 
 function isSelectedProjectKnowledgePath(relativePath, selected, selectedTags) {

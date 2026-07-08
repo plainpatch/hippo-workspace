@@ -74,6 +74,18 @@ app.post("/api/knowledge/folders", asyncHandler(async (req, res) => {
   res.json(await resourceManager.createKnowledgeFolder(req.body.path || "", req.body.metadata || req.body));
 }));
 
+app.patch("/api/knowledge/folders", asyncHandler(async (req, res) => {
+  res.json(await resourceManager.updateKnowledgeDrawer(req.body));
+}));
+
+app.post("/api/knowledge/domains", asyncHandler(async (req, res) => {
+  res.json(await resourceManager.createKnowledgeDomain(req.body));
+}));
+
+app.post("/api/knowledge/topics", asyncHandler(async (req, res) => {
+  res.json(await resourceManager.createKnowledgeTopic(req.body));
+}));
+
 app.post("/api/knowledge/text", asyncHandler(async (req, res) => {
   res.json(await resourceManager.ingestKnowledgeText(req.body));
 }));
