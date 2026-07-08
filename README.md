@@ -1,6 +1,8 @@
 # hippo
 
-This project is configured to run AnythingLLM locally with Docker Compose and includes a wrapper service for RAG administration and MCP access.
+Hippo is an Agent App shell for project-scoped agent orchestration. It is designed to adapt agent runtimes such as Codex, Claude, or Hermes; the current runtime adapter is Codex. AnythingLLM is used only as the current RAG provider and is intentionally hidden behind a provider abstraction.
+
+See [docs/refactor-roadmap.md](docs/refactor-roadmap.md) for the active requirement alignment, current code drift, and phased refactor targets.
 
 ## Start AnythingLLM
 
@@ -37,28 +39,28 @@ Open the wrapper console at http://localhost:8787.
 
 The console supports:
 
-- creating workspaces
-- uploading raw text, URLs, and files
-- adding and removing documents from workspace embeddings
-- workspace RAG chat
-- workspace vector search
-- listing documents and workspaces
-- custom agent workspaces with system prompts, skills, bound RAG scope, and task execution
-- fixed local resource directories for project workspaces and system knowledge references
+- creating Hippo projects under the app system path
+- creating global Agent definitions
+- enabling global Agents per project
+- assigning first-level knowledge drawers to projects
+- ingesting raw text and files into the system knowledge base
+- project-scoped chat through the configured runtime
+- project-scoped RAG search through the configured RAG provider
 
 ## Resource directory model
 
-The app uses one fixed resource root:
+The app uses one system resource root, configurable through app settings and environment variables:
 
 ```text
-resources/
-  projects/    # one local workspace folder per Hippo project
-  knowledge/   # system-level knowledge base tree
+~/.hippo/
+  projects/    # one local directory per Hippo project
+  knowledge/   # system-level knowledge drawers
+  agents/      # global agent and project store
 ```
 
-When a project is created, Hippo creates a folder under `resources/projects/` and creates or binds an AnythingLLM workspace for that project.
+When a project is created, Hippo creates a folder under the app-managed `projects/` directory. Projects reference global agents and first-level knowledge drawers.
 
-The knowledge base is system-level. Use nested folders under `resources/knowledge/` to manage categories, teams, products, or document layers. Projects do not own those files directly. They save references to selected knowledge folders or files through `knowledgeRefs`, and the wrapper resolves those references to AnythingLLM document names before syncing the project's AnythingLLM workspace embeddings.
+The knowledge base is system-level. It uses a controlled drawer model under `knowledge/`: first-level drawers are authorization boundaries, while second-level drawers are tags for filtering. Projects do not own those files directly. A project grants RAG access by listing first-level drawers in `knowledgeDrawerRefs`.
 
 The Docker wrapper mounts the resource root at `/app/resources`:
 
@@ -168,43 +170,47 @@ http://localhost:8787/mcp
 
 Exposed MCP tools:
 
-- `anythingllm_status`
-- `anythingllm_list_workspaces`
-- `anythingllm_create_workspace`
-- `anythingllm_list_documents`
-- `anythingllm_upload_text_document`
-- `anythingllm_upload_url`
-- `anythingllm_upload_file`
-- `anythingllm_update_workspace_embeddings`
-- `anythingllm_workspace_chat`
-- `anythingllm_vector_search`
-- `anythingllm_remove_documents`
-- `agent_list_workspaces`
-- `agent_create_workspace`
-- `agent_get_workspace`
-- `agent_update_rag_scope`
-- `agent_execute_task`
+- `hippo_get_settings`
+- `hippo_list_projects`
+- `hippo_create_project`
+- `hippo_get_project`
+- `hippo_update_project`
+- `hippo_list_agents`
+- `hippo_create_agent`
+- `hippo_get_agent`
+- `hippo_project_knowledge`
+- `hippo_project_rag_search`
+- `hippo_execute_project_task`
 
 ## Agent orchestration layer
 
-The wrapper also provides a higher-level custom agent workspace abstraction. An agent workspace binds local orchestration metadata to an AnythingLLM workspace:
+The wrapper separates projects from agents:
 
-- local agent workspace id, name, and description
-- local workspace folder under `resources/projects/`
-- bound AnythingLLM `workspaceSlug`
-- predefined system prompt
-- allowed skills list
-- selected system knowledge references
-- resolved RAG document scope
-- default execution mode: `query`, `chat`, or `automatic`
+- project: name, description, app-managed local directory, enabled global agents, and authorized first-level knowledge drawers
+- agent: name, description, system prompt, runtime, skills, MCP access, and optional extra RAG document names
+- task execution: runs inside a selected project and may load one project-enabled agent for that turn
 
-Create an agent workspace:
+Create a project:
 
 ```sh
-curl -X POST http://localhost:8787/api/agent-workspaces \
+curl -X POST http://localhost:8787/api/projects \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "docs-project",
+    "description": "Documentation project",
+    "agentIds": ["<agent-id>"],
+    "knowledgeDrawerRefs": ["platform"]
+  }'
+```
+
+Create an agent:
+
+```sh
+curl -X POST http://localhost:8787/api/agents \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "docs-agent",
+    "description": "Answers from selected documentation knowledge",
     "systemPrompt": "Only answer from the configured knowledge base. Say when evidence is missing.",
     "skills": [
       {
@@ -212,22 +218,20 @@ curl -X POST http://localhost:8787/api/agent-workspaces \
         "description": "Summarize retrieved technical material into concise action items."
       }
     ],
-    "anythingllmWorkspaceSlug": "existing-anythingllm-workspace",
-    "knowledgeRefs": ["platform/anythingllm"],
+    "mcpServers": ["hippo-system"],
+    "runtimeId": "codex",
     "ragDocumentNames": ["custom-documents/example.json"],
     "defaultMode": "query",
     "topN": 4
   }'
 ```
 
-If `anythingllmWorkspaceSlug` is omitted, the wrapper creates a matching AnythingLLM workspace first.
-
 Create a system knowledge folder:
 
 ```sh
 curl -X POST http://localhost:8787/api/knowledge/folders \
   -H 'Content-Type: application/json' \
-  -d '{ "path": "platform/anythingllm" }'
+  -d '{ "path": "platform/anythingllm", "description": "AnythingLLM integration docs" }'
 ```
 
 Ingest text into the system knowledge base:
@@ -242,29 +246,19 @@ curl -X POST http://localhost:8787/api/knowledge/text \
   }'
 ```
 
-Execute a task through an agent workspace:
+Execute a task in a workspace and load an agent for this turn:
 
 ```sh
-curl -X POST http://localhost:8787/api/agent-workspaces/<agent-workspace-id>/execute \
+curl -X POST http://localhost:8787/api/projects/<project-id>/execute \
   -H 'Content-Type: application/json' \
   -d '{
+    "agentId": "<agent-id>",
     "task": "根据知识库说明这个模块的接入步骤。",
     "mode": "query"
   }'
 ```
 
-Update the RAG scope:
-
-```sh
-curl -X POST http://localhost:8787/api/agent-workspaces/<agent-workspace-id>/rag-scope \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "adds": ["custom-documents/new-doc.json"],
-    "deletes": []
-  }'
-```
-
-Agent workspace definitions are persisted at `data/agent-workspaces.json` on the host through the wrapper container volume.
+Project and agent definitions are persisted under the configured app home, by default `~/.hippo/agents/agent-store.json`.
 
 ## Stop
 

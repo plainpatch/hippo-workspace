@@ -11,14 +11,27 @@ import { createMcpServer } from "./mcp.js";
 import { createAnythingLlmClient } from "./shared.js";
 import { AgentOrchestrator } from "./agent-orchestrator.js";
 import { ResourceManager } from "./resource-manager.js";
+import { AppSettingsService } from "./app-settings.js";
+import { createRagProvider } from "./rag-provider.js";
+import { RuntimeRegistry } from "./runtime-adapter.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "..", "public");
 const upload = multer({ storage: multer.memoryStorage() });
 const app = express();
 const client = createAnythingLlmClient();
-const resourceManager = new ResourceManager({ client });
-const agentOrchestrator = new AgentOrchestrator({ client, resourceManager });
+const appSettings = new AppSettingsService();
+const settings = appSettings.getSettings();
+const ragProvider = createRagProvider({ id: settings.ragProviderId, client });
+const resourceManager = new ResourceManager({ client: ragProvider });
+const runtimeRegistry = new RuntimeRegistry({ settings });
+const agentOrchestrator = new AgentOrchestrator({
+  client,
+  ragProvider,
+  resourceManager,
+  runtimeRegistry,
+  settings,
+});
 const mcpSessions = new Map();
 
 app.use(express.json({ limit: "10mb" }));
@@ -38,11 +51,16 @@ app.get("/api/status", asyncHandler(async (_req, res) => {
       ok: true,
       port: config.wrapperPort,
       agentStorePath: config.agentStorePath,
+      settings,
       resources: await resourceManager.getStatus(),
     },
-    anythingllm: await client.status(),
+    anythingllm: await ragProvider.status(),
   });
 }));
+
+app.get("/api/settings", (_req, res) => {
+  res.json({ settings });
+});
 
 app.get("/api/resources", asyncHandler(async (_req, res) => {
   res.json(await resourceManager.getStatus());
@@ -53,7 +71,7 @@ app.get("/api/knowledge", asyncHandler(async (_req, res) => {
 }));
 
 app.post("/api/knowledge/folders", asyncHandler(async (req, res) => {
-  res.json(await resourceManager.createKnowledgeFolder(req.body.path || ""));
+  res.json(await resourceManager.createKnowledgeFolder(req.body.path || "", req.body.metadata || req.body));
 }));
 
 app.post("/api/knowledge/text", asyncHandler(async (req, res) => {
@@ -70,78 +88,91 @@ app.post("/api/knowledge/upload", upload.single("file"), asyncHandler(async (req
   }));
 }));
 
-app.get("/api/agent-workspaces", asyncHandler(async (_req, res) => {
-  res.json(await agentOrchestrator.listAgentWorkspaces());
+app.get("/api/projects", asyncHandler(async (_req, res) => {
+  res.json(await agentOrchestrator.listProjects());
 }));
 
-app.post("/api/agent-workspaces", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.createAgentWorkspace(req.body));
+app.get("/api/agents", asyncHandler(async (_req, res) => {
+  res.json(await agentOrchestrator.listAgents());
 }));
 
-app.get("/api/agent-workspaces/:id", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.getAgentWorkspace(req.params.id));
+app.post("/api/agents", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.createAgent(req.body));
 }));
 
-app.patch("/api/agent-workspaces/:id", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.updateAgentWorkspace(req.params.id, req.body));
+app.get("/api/agents/:id", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.getAgent(req.params.id));
 }));
 
-app.delete("/api/agent-workspaces/:id", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.deleteAgentWorkspace(req.params.id));
+app.patch("/api/agents/:id", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.updateAgent(req.params.id, req.body));
 }));
 
-app.post("/api/agent-workspaces/:id/rag-scope", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.updateRagScope(req.params.id, req.body));
+app.delete("/api/agents/:id", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.deleteAgent(req.params.id));
 }));
 
-app.post("/api/agent-workspaces/:id/execute", asyncHandler(async (req, res) => {
+app.post("/api/projects", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.createProject(req.body));
+}));
+
+app.get("/api/projects/:id", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.getProject(req.params.id));
+}));
+
+app.patch("/api/projects/:id", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.updateProject(req.params.id, req.body));
+}));
+
+app.delete("/api/projects/:id", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.deleteProject(req.params.id));
+}));
+
+app.get("/api/projects/:id/conversations", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.listConversations(req.params.id));
+}));
+
+app.post("/api/projects/:id/conversations", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.createConversation(req.params.id, req.body));
+}));
+
+app.get("/api/projects/:id/conversations/:conversationId", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.getConversation(req.params.id, req.params.conversationId));
+}));
+
+app.patch("/api/projects/:id/conversations/:conversationId", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.updateConversation(req.params.id, req.params.conversationId, req.body));
+}));
+
+app.delete("/api/projects/:id/conversations/:conversationId", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.deleteConversation(req.params.id, req.params.conversationId));
+}));
+
+app.post("/api/projects/:id/execute", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.executeAgentTask(req.params.id, req.body));
 }));
 
-app.get("/api/workspaces", asyncHandler(async (_req, res) => {
-  res.json(await client.listWorkspaces());
-}));
+app.post("/api/projects/:id/execute/stream", asyncHandler(async (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
 
-app.post("/api/workspaces", asyncHandler(async (req, res) => {
-  res.json(await client.createWorkspace(req.body));
-}));
+  const send = (event) => {
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+  };
 
-app.get("/api/documents", asyncHandler(async (_req, res) => {
-  res.json(await client.listDocuments());
-}));
-
-app.post("/api/documents/raw", asyncHandler(async (req, res) => {
-  res.json(await client.uploadRawText(req.body));
-}));
-
-app.post("/api/documents/link", asyncHandler(async (req, res) => {
-  res.json(await client.uploadLink(req.body));
-}));
-
-app.post("/api/documents/upload", upload.single("file"), asyncHandler(async (req, res) => {
-  if (!req.file) throw new AnythingLlmError("Missing multipart file field.", 400);
-  res.json(await client.uploadFile({
-    fileBuffer: req.file.buffer,
-    fileName: req.file.originalname,
-    addToWorkspaces: req.body.addToWorkspaces,
-    metadata: parseMetadata(req.body.metadata),
-  }));
-}));
-
-app.delete("/api/documents", asyncHandler(async (req, res) => {
-  res.json(await client.removeDocuments(req.body.names || []));
-}));
-
-app.post("/api/workspaces/:slug/update-embeddings", asyncHandler(async (req, res) => {
-  res.json(await client.updateWorkspaceEmbeddings(req.params.slug, req.body));
-}));
-
-app.post("/api/workspaces/:slug/chat", asyncHandler(async (req, res) => {
-  res.json(await client.workspaceChat(req.params.slug, req.body));
-}));
-
-app.post("/api/workspaces/:slug/vector-search", asyncHandler(async (req, res) => {
-  res.json(await client.vectorSearch(req.params.slug, req.body));
+  try {
+    await agentOrchestrator.streamAgentTask(req.params.id, req.body, send);
+  } catch (error) {
+    send({
+      type: "error",
+      error: error.message || "Unexpected stream error.",
+      details: error.details || error.issues,
+    });
+  } finally {
+    res.end();
+  }
 }));
 
 app.use(express.static(publicDir));

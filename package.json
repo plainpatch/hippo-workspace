@@ -9,7 +9,7 @@
     "desktop": "electron apps/desktop/main.cjs",
     "mcp": "node src/mcp-server.js",
     "install:chrome-extension": "node scripts/install-chrome-extension.mjs",
-    "check": "node --check src/server.js && node --check src/mcp-server.js && node --check src/mcp.js && node --check src/anythingllm-client.js && node --check src/agent-orchestrator.js && node --check src/resource-manager.js && node --check apps/desktop/main.cjs && node --check apps/chrome-extension/sidepanel.js && node --check apps/chrome-extension/background.js && node --check scripts/install-chrome-extension.mjs"
+    "check": "node --check src/server.js && node --check src/mcp-server.js && node --check src/mcp.js && node --check src/anythingllm-client.js && node --check src/agent-orchestrator.js && node --check src/resource-manager.js && node --check src/app-settings.js && node --check src/rag-provider.js && node --check src/runtime-adapter.js && node --check apps/desktop/main.cjs && node --check apps/chrome-extension/sidepanel.js && node --check apps/chrome-extension/background.js && node --check scripts/install-chrome-extension.mjs"
   },
   "keywords": [],
   "author": "",

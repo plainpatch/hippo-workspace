@@ -4,8 +4,9 @@ const http = require("node:http");
 const path = require("node:path");
 
 const repoRoot = path.resolve(__dirname, "..", "..");
-const port = Number(process.env.WRAPPER_PORT || 8787);
-const appUrl = `http://127.0.0.1:${port}`;
+const preferredPort = Number(process.env.WRAPPER_PORT || 8787);
+let port = preferredPort;
+let appUrl = `http://127.0.0.1:${port}`;
 let sidecar = null;
 let mainWindow = null;
 
@@ -38,7 +39,10 @@ app.on("activate", () => {
 });
 
 async function ensureWrapperRunning() {
-  if (await isHealthy()) return;
+  if (process.env.HIPPO_REUSE_EXISTING_WRAPPER === "1" && await isHealthy(appUrl)) return;
+
+  port = process.env.WRAPPER_PORT ? preferredPort : await findAvailablePort(preferredPort);
+  appUrl = `http://127.0.0.1:${port}`;
 
   sidecar = spawn(process.execPath, ["src/server.js"], {
     cwd: repoRoot,
@@ -46,7 +50,6 @@ async function ensureWrapperRunning() {
       ...process.env,
       WRAPPER_PORT: String(port),
       ANYTHINGLLM_BASE_URL: process.env.ANYTHINGLLM_BASE_URL || "http://localhost:3001",
-      AGENT_STORE_PATH: process.env.AGENT_STORE_PATH || path.join(repoRoot, "data", "agent-workspaces.json"),
     },
     stdio: "ignore",
   });
@@ -85,7 +88,7 @@ function waitForHealth(timeoutMs) {
   const startedAt = Date.now();
   return new Promise((resolve) => {
     const tick = async () => {
-      if (await isHealthy()) return resolve(true);
+      if (await isHealthy(appUrl)) return resolve(true);
       if (Date.now() - startedAt > timeoutMs) return resolve(false);
       setTimeout(tick, 300);
     };
@@ -93,13 +96,34 @@ function waitForHealth(timeoutMs) {
   });
 }
 
-function isHealthy() {
+async function findAvailablePort(startAt) {
+  for (let candidate = startAt; candidate < startAt + 20; candidate += 1) {
+    if (!(await isPortListening(candidate))) return candidate;
+  }
+  throw new Error(`No available wrapper port found from ${startAt} to ${startAt + 19}.`);
+}
+
+function isHealthy(url) {
   return new Promise((resolve) => {
-    const req = http.get(`${appUrl}/api/health`, (res) => {
+    const req = http.get(`${url}/api/health`, (res) => {
       res.resume();
       resolve(res.statusCode >= 200 && res.statusCode < 300);
     });
     req.setTimeout(800, () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.on("error", () => resolve(false));
+  });
+}
+
+function isPortListening(candidate) {
+  return new Promise((resolve) => {
+    const req = http.get(`http://127.0.0.1:${candidate}/api/health`, (res) => {
+      res.resume();
+      resolve(true);
+    });
+    req.setTimeout(300, () => {
       req.destroy();
       resolve(false);
     });

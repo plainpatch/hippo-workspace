@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { config } from "./config.js";
+import { RuntimeRegistry } from "./runtime-adapter.js";
 
 const skillSchema = z.object({
   name: z.string().min(1),
@@ -10,94 +11,120 @@ const skillSchema = z.object({
   instructions: z.string().optional(),
 });
 
-const createAgentWorkspaceSchema = z.object({
+const createProjectSchema = z.object({
+  name: z.string().min(1),
+  description: z.string().optional(),
+  agentIds: z.array(z.string().min(1)).default([]),
+  knowledgeDrawerRefs: z.array(z.string().min(1)).default([]),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+const updateProjectSchema = z.object({
+  name: z.string().min(1).optional(),
+  description: z.string().optional(),
+  agentIds: z.array(z.string().min(1)).optional(),
+  knowledgeDrawerRefs: z.array(z.string().min(1)).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+const messageSchema = z.object({
+  role: z.enum(["user", "assistant", "system"]),
+  text: z.string(),
+  createdAt: z.string().optional(),
+});
+
+const createConversationSchema = z.object({
+  title: z.string().optional(),
+  messages: z.array(messageSchema).default([]),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+const updateConversationSchema = z.object({
+  title: z.string().optional(),
+  messages: z.array(messageSchema).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+const createAgentSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
   systemPrompt: z.string().optional(),
   skills: z.array(skillSchema).default([]),
-  anythingllmWorkspaceSlug: z.string().min(1).optional(),
-  anythingllmWorkspaceName: z.string().min(1).optional(),
-  createAnythingllmWorkspace: z.boolean().default(true),
+  mcpServers: z.array(z.string().min(1)).default([]),
+  runtimeId: z.string().min(1).default(config.defaultRuntimeId),
   ragDocumentNames: z.array(z.string().min(1)).default([]),
-  knowledgeRefs: z.array(z.string().min(1)).default([]),
   defaultMode: z.enum(["query", "chat", "automatic"]).default("query"),
   topN: z.number().int().positive().default(4),
   scoreThreshold: z.number().min(0).max(1).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
-const updateAgentWorkspaceSchema = createAgentWorkspaceSchema.partial().extend({
+const updateAgentSchema = createAgentSchema.partial().extend({
   skills: z.array(skillSchema).optional(),
+  mcpServers: z.array(z.string().min(1)).optional(),
+  runtimeId: z.string().min(1).optional(),
   ragDocumentNames: z.array(z.string().min(1)).optional(),
-  knowledgeRefs: z.array(z.string().min(1)).optional(),
 });
 
 const executeAgentTaskSchema = z.object({
   task: z.string().min(1),
+  agentId: z.string().optional(),
   mode: z.enum(["query", "chat", "automatic"]).optional(),
   sessionId: z.string().optional(),
   reset: z.boolean().optional(),
   dryRun: z.boolean().optional(),
   context: z.record(z.string(), z.unknown()).optional(),
-});
-
-const updateRagScopeSchema = z.object({
-  adds: z.array(z.string().min(1)).default([]),
-  deletes: z.array(z.string().min(1)).default([]),
+  knowledgeTags: z.array(z.string().min(1)).default([]),
 });
 
 export class AgentOrchestrator {
-  constructor({ client, resourceManager, storePath = config.agentStorePath }) {
+  constructor({
+    client,
+    ragProvider,
+    resourceManager,
+    runtimeRegistry,
+    settings = {},
+    storePath = config.agentStorePath,
+  }) {
     this.client = client;
+    this.ragProvider = ragProvider || client;
     this.resourceManager = resourceManager;
+    this.runtimeRegistry = runtimeRegistry || new RuntimeRegistry({ settings });
+    this.settings = settings;
     this.storePath = storePath;
   }
 
-  async listAgentWorkspaces() {
+  async listProjects() {
     const store = await this.readStore();
-    return { agentWorkspaces: store.agentWorkspaces };
+    return { projects: store.projects };
   }
 
-  async getAgentWorkspace(id) {
+  async listAgents() {
     const store = await this.readStore();
-    const workspace = store.agentWorkspaces.find((item) => item.id === id);
-    if (!workspace) throw new AgentOrchestratorError(`Agent workspace ${id} was not found.`, 404);
-    return { agentWorkspace: workspace };
+    return { agents: store.agents };
   }
 
-  async createAgentWorkspace(input) {
-    const payload = createAgentWorkspaceSchema.parse(input);
+  async getAgent(id) {
+    const store = await this.readStore();
+    const agent = store.agents.find((item) => item.id === id);
+    if (!agent) throw new AgentOrchestratorError(`Agent ${id} was not found.`, 404);
+    return { agent };
+  }
+
+  async createAgent(input) {
+    const payload = createAgentSchema.parse(input);
     const store = await this.readStore();
     const now = new Date().toISOString();
-    const projectId = randomUUID();
-    const projectWorkspace = this.resourceManager
-      ? await this.resourceManager.createProjectWorkspace({ projectId, projectName: payload.name })
-      : {};
-    const anythingllmWorkspaceSlug = await this.resolveAnythingllmWorkspace(payload);
-    const knowledgeDocumentNames = this.resourceManager
-      ? await this.resourceManager.resolveKnowledgeRefs(payload.knowledgeRefs)
-      : [];
-    const ragDocumentNames = dedupe([...payload.ragDocumentNames, ...knowledgeDocumentNames]);
-
-    if (ragDocumentNames.length) {
-      await this.client.updateWorkspaceEmbeddings(anythingllmWorkspaceSlug, {
-        adds: ragDocumentNames,
-        deletes: [],
-      });
-    }
-
-    const agentWorkspace = {
-      id: projectId,
+    const agent = {
+      id: randomUUID(),
       name: payload.name,
       description: payload.description || "",
       systemPrompt: payload.systemPrompt || "",
       skills: payload.skills,
-      anythingllmWorkspaceSlug,
-      localWorkspacePath: projectWorkspace.workspacePath || "",
-      localWorkspaceFolderName: projectWorkspace.workspaceFolderName || "",
-      knowledgeRefs: dedupe(payload.knowledgeRefs),
+      mcpServers: dedupe(payload.mcpServers),
+      runtimeId: payload.runtimeId,
       explicitRagDocumentNames: dedupe(payload.ragDocumentNames),
-      ragDocumentNames,
+      ragDocumentNames: dedupe(payload.ragDocumentNames),
       defaultMode: payload.defaultMode,
       topN: payload.topN,
       scoreThreshold: payload.scoreThreshold,
@@ -105,19 +132,18 @@ export class AgentOrchestrator {
       createdAt: now,
       updatedAt: now,
     };
-
-    store.agentWorkspaces.push(agentWorkspace);
+    store.agents.push(agent);
     await this.writeStore(store);
-    return { agentWorkspace };
+    return { agent };
   }
 
-  async updateAgentWorkspace(id, input) {
-    const payload = updateAgentWorkspaceSchema.parse(input);
+  async updateAgent(id, input) {
+    const payload = updateAgentSchema.parse(input);
     const store = await this.readStore();
-    const index = store.agentWorkspaces.findIndex((item) => item.id === id);
-    if (index === -1) throw new AgentOrchestratorError(`Agent workspace ${id} was not found.`, 404);
-
-    const current = store.agentWorkspaces[index];
+    const index = store.agents.findIndex((item) => item.id === id);
+    if (index === -1) throw new AgentOrchestratorError(`Agent ${id} was not found.`, 404);
+    const current = store.agents[index];
+    const explicitDocs = payload.ragDocumentNames || current.explicitRagDocumentNames || [];
     const updated = {
       ...current,
       ...definedOnly({
@@ -125,130 +151,312 @@ export class AgentOrchestrator {
         description: payload.description,
         systemPrompt: payload.systemPrompt,
         skills: payload.skills,
-        anythingllmWorkspaceSlug: payload.anythingllmWorkspaceSlug,
+        mcpServers: payload.mcpServers,
+        runtimeId: payload.runtimeId,
         defaultMode: payload.defaultMode,
         topN: payload.topN,
         scoreThreshold: payload.scoreThreshold,
         metadata: payload.metadata,
       }),
+      explicitRagDocumentNames: dedupe(explicitDocs),
+      ragDocumentNames: dedupe(explicitDocs),
       updatedAt: new Date().toISOString(),
     };
-
-    const workspaceChanged = Boolean(
-      payload.anythingllmWorkspaceSlug && payload.anythingllmWorkspaceSlug !== current.anythingllmWorkspaceSlug
-    );
-
-    if (payload.knowledgeRefs || payload.ragDocumentNames || workspaceChanged) {
-      const explicitDocs = payload.ragDocumentNames || current.explicitRagDocumentNames || [];
-      const knowledgeRefs = payload.knowledgeRefs || current.knowledgeRefs || [];
-      const knowledgeDocumentNames = this.resourceManager
-        ? await this.resourceManager.resolveKnowledgeRefs(knowledgeRefs)
-        : [];
-      const nextDocumentNames = dedupe([...explicitDocs, ...knowledgeDocumentNames]);
-      const previousDocumentNames = new Set(current.ragDocumentNames || []);
-      const nextDocumentSet = new Set(nextDocumentNames);
-      await this.client.updateWorkspaceEmbeddings(updated.anythingllmWorkspaceSlug, {
-        adds: workspaceChanged
-          ? nextDocumentNames
-          : nextDocumentNames.filter((name) => !previousDocumentNames.has(name)),
-        deletes: workspaceChanged
-          ? []
-          : [...previousDocumentNames].filter((name) => !nextDocumentSet.has(name)),
-      });
-      updated.knowledgeRefs = dedupe(knowledgeRefs);
-      updated.explicitRagDocumentNames = dedupe(explicitDocs);
-      updated.ragDocumentNames = nextDocumentNames;
-    }
-
-    store.agentWorkspaces[index] = updated;
+    store.agents[index] = updated;
     await this.writeStore(store);
-    return { agentWorkspace: updated };
+    return { agent: updated };
   }
 
-  async deleteAgentWorkspace(id) {
+  async deleteAgent(id) {
     const store = await this.readStore();
-    const next = store.agentWorkspaces.filter((item) => item.id !== id);
-    if (next.length === store.agentWorkspaces.length) {
-      throw new AgentOrchestratorError(`Agent workspace ${id} was not found.`, 404);
+    const next = store.agents.filter((item) => item.id !== id);
+    if (next.length === store.agents.length) {
+      throw new AgentOrchestratorError(`Agent ${id} was not found.`, 404);
     }
-    store.agentWorkspaces = next;
+    store.agents = next;
     await this.writeStore(store);
     return { deleted: true, id };
   }
 
-  async updateRagScope(id, input) {
-    const payload = updateRagScopeSchema.parse(input);
+  async getProject(id) {
     const store = await this.readStore();
-    const index = store.agentWorkspaces.findIndex((item) => item.id === id);
-    if (index === -1) throw new AgentOrchestratorError(`Agent workspace ${id} was not found.`, 404);
+    const project = store.projects.find((item) => item.id === id);
+    if (!project) throw new AgentOrchestratorError(`Project ${id} was not found.`, 404);
+    return { project };
+  }
 
-    const current = store.agentWorkspaces[index];
-    await this.client.updateWorkspaceEmbeddings(current.anythingllmWorkspaceSlug, payload);
+  async listConversations(projectId) {
+    const store = await this.readStore();
+    this.findProject(store, projectId);
+    const conversations = store.conversations
+      .filter((conversation) => conversation.projectId === projectId)
+      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+    return { conversations };
+  }
 
-    const deletes = new Set(payload.deletes);
-    const ragDocumentNames = dedupe([
-      ...current.ragDocumentNames.filter((name) => !deletes.has(name)),
-      ...payload.adds,
-    ]);
-    const explicitRagDocumentNames = dedupe([
-      ...(current.explicitRagDocumentNames || []).filter((name) => !deletes.has(name)),
-      ...payload.adds,
-    ]);
+  async getConversation(projectId, conversationId) {
+    const store = await this.readStore();
+    this.findProject(store, projectId);
+    const conversation = store.conversations.find((item) =>
+      item.projectId === projectId && item.id === conversationId
+    );
+    if (!conversation) {
+      throw new AgentOrchestratorError(`Conversation ${conversationId} was not found.`, 404);
+    }
+    return { conversation };
+  }
+
+  async createConversation(projectId, input = {}) {
+    const payload = createConversationSchema.parse(input);
+    const store = await this.readStore();
+    this.findProject(store, projectId);
+    const now = new Date().toISOString();
+    const conversation = {
+      id: randomUUID(),
+      projectId,
+      title: payload.title || deriveConversationTitle(payload.messages) || "新对话",
+      messages: normalizeMessages(payload.messages),
+      metadata: payload.metadata || {},
+      createdAt: now,
+      updatedAt: now,
+    };
+    store.conversations.push(conversation);
+    await this.writeStore(store);
+    return { conversation };
+  }
+
+  async updateConversation(projectId, conversationId, input = {}) {
+    const payload = updateConversationSchema.parse(input);
+    const store = await this.readStore();
+    this.findProject(store, projectId);
+    const index = store.conversations.findIndex((item) =>
+      item.projectId === projectId && item.id === conversationId
+    );
+    if (index === -1) {
+      throw new AgentOrchestratorError(`Conversation ${conversationId} was not found.`, 404);
+    }
+    const current = store.conversations[index];
+    const messages = payload.messages ? normalizeMessages(payload.messages) : current.messages;
     const updated = {
       ...current,
-      explicitRagDocumentNames,
-      ragDocumentNames,
+      ...definedOnly({
+        title: payload.title || deriveConversationTitle(messages),
+        messages: payload.messages ? messages : undefined,
+        metadata: payload.metadata,
+      }),
       updatedAt: new Date().toISOString(),
     };
-    store.agentWorkspaces[index] = updated;
+    store.conversations[index] = updated;
     await this.writeStore(store);
-    return { agentWorkspace: updated };
+    return { conversation: updated };
+  }
+
+  async deleteConversation(projectId, conversationId) {
+    const store = await this.readStore();
+    this.findProject(store, projectId);
+    const next = store.conversations.filter((item) =>
+      !(item.projectId === projectId && item.id === conversationId)
+    );
+    if (next.length === store.conversations.length) {
+      throw new AgentOrchestratorError(`Conversation ${conversationId} was not found.`, 404);
+    }
+    store.conversations = next;
+    await this.writeStore(store);
+    return { deleted: true, id: conversationId };
+  }
+
+  async createProject(input) {
+    const payload = createProjectSchema.parse(input);
+    const store = await this.readStore();
+    const now = new Date().toISOString();
+    const projectId = randomUUID();
+    const projectDirectory = this.resourceManager
+      ? await this.resourceManager.createProjectWorkspace({ projectId, projectName: payload.name })
+      : {};
+    const anythingllmWorkspaceSlug = await this.resolveAnythingllmWorkspace(payload);
+
+    const project = {
+      id: projectId,
+      name: payload.name,
+      description: payload.description || "",
+      agentIds: dedupe(payload.agentIds),
+      knowledgeDrawerRefs: dedupe(payload.knowledgeDrawerRefs.map(primaryDrawer)),
+      anythingllmWorkspaceSlug,
+      localWorkspacePath: projectDirectory.workspacePath || "",
+      localWorkspaceFolderName: projectDirectory.workspaceFolderName || "",
+      metadata: payload.metadata || {},
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    store.projects.push(project);
+    await this.writeStore(store);
+    return { project };
+  }
+
+  async updateProject(id, input) {
+    const payload = updateProjectSchema.parse(input);
+    const store = await this.readStore();
+    const index = store.projects.findIndex((item) => item.id === id);
+    if (index === -1) throw new AgentOrchestratorError(`Project ${id} was not found.`, 404);
+
+    const current = store.projects[index];
+    const updated = {
+      ...current,
+      ...definedOnly({
+        name: payload.name,
+        description: payload.description,
+        agentIds: payload.agentIds ? dedupe(payload.agentIds) : undefined,
+        knowledgeDrawerRefs: payload.knowledgeDrawerRefs
+          ? dedupe(payload.knowledgeDrawerRefs.map(primaryDrawer))
+          : undefined,
+        metadata: payload.metadata,
+      }),
+      updatedAt: new Date().toISOString(),
+    };
+
+    store.projects[index] = updated;
+    await this.writeStore(store);
+    return { project: updated };
+  }
+
+  async deleteProject(id) {
+    const store = await this.readStore();
+    const next = store.projects.filter((item) => item.id !== id);
+    if (next.length === store.projects.length) {
+      throw new AgentOrchestratorError(`Project ${id} was not found.`, 404);
+    }
+    store.projects = next;
+    store.conversations = store.conversations.filter((conversation) => conversation.projectId !== id);
+    await this.writeStore(store);
+    return { deleted: true, id };
   }
 
   async executeAgentTask(id, input) {
+    const prepared = await this.prepareAgentTask(id, input);
+    const { payload, project, agent, request, retrieval } = prepared;
+
+    if (payload.dryRun) {
+      return { project, agent, request, dryRun: true };
+    }
+
+    const runtime = this.runtimeRegistry.getRuntime(request.runtimeId);
+    const result = await runtime.execute({
+      project,
+      agent,
+      prompt: request.message,
+      sessionId: payload.sessionId,
+      reset: payload.reset,
+    });
+
+    return { project, agent, request, retrieval, result };
+  }
+
+  async streamAgentTask(id, input, onEvent) {
+    const prepared = await this.prepareAgentTask(id, input);
+    const { payload, project, agent, request, retrieval } = prepared;
+
+    onEvent?.({ type: "prepared", project, agent, request, retrieval });
+
+    if (payload.dryRun) {
+      const result = { dryRun: true, text: `已生成编排请求：\n\n${request.message}` };
+      onEvent?.({ type: "done", project, agent, request, retrieval, result });
+      return { project, agent, request, retrieval, result };
+    }
+
+    const runtime = this.runtimeRegistry.getRuntime(request.runtimeId);
+    const result = runtime.stream
+      ? await runtime.stream({
+          project,
+          agent,
+          prompt: request.message,
+          sessionId: payload.sessionId,
+          reset: payload.reset,
+          onEvent,
+        })
+      : await runtime.execute({
+          project,
+          agent,
+          prompt: request.message,
+          sessionId: payload.sessionId,
+          reset: payload.reset,
+        });
+
+    onEvent?.({ type: "done", project, agent, request, retrieval, result });
+    return { project, agent, request, retrieval, result };
+  }
+
+  async prepareAgentTask(id, input) {
     const payload = executeAgentTaskSchema.parse(input);
-    const { agentWorkspace } = await this.getAgentWorkspace(id);
-    const mode = payload.mode || agentWorkspace.defaultMode || "query";
-    const message = buildAgentMessage(agentWorkspace, payload.task, payload.context);
+    const { project } = await this.getProject(id);
+    const agent = payload.agentId ? (await this.getAgent(payload.agentId)).agent : undefined;
+    if (agent && !project.agentIds?.includes(agent.id)) {
+      throw new AgentOrchestratorError(
+        `Agent ${agent.id} is not enabled for project ${project.id}.`,
+        403
+      );
+    }
+
+    const projectDocumentNames = this.resourceManager
+      ? await this.resourceManager.resolveKnowledgeForProject({
+          drawerRefs: project.knowledgeDrawerRefs || [],
+          tags: payload.knowledgeTags,
+        })
+      : [];
+    const ragDocumentNames = dedupe([
+      ...projectDocumentNames,
+      ...(agent?.explicitRagDocumentNames || agent?.ragDocumentNames || []),
+    ]);
+
+    if (ragDocumentNames.length) {
+      if (this.ragProvider.updateWorkspaceEmbeddings) {
+        await this.ragProvider.updateWorkspaceEmbeddings(project.anythingllmWorkspaceSlug, {
+          adds: ragDocumentNames,
+          deletes: [],
+        });
+      } else {
+        await this.client.updateWorkspaceEmbeddings(project.anythingllmWorkspaceSlug, {
+          adds: ragDocumentNames,
+          deletes: [],
+        });
+      }
+    }
+    const mode = payload.mode || agent?.defaultMode || "chat";
+    const retrieval = ragDocumentNames.length
+      ? await this.retrieveRag({
+          workspaceSlug: project.anythingllmWorkspaceSlug,
+          query: payload.task,
+          topN: agent?.topN || 4,
+          scoreThreshold: agent?.scoreThreshold,
+        })
+      : { skipped: true, reason: "project-has-no-knowledge-drawers", results: [] };
+    const message = buildAgentMessage(project, agent, payload.task, payload.context, {
+      runtimeId: agent?.runtimeId || this.settings.defaultRuntimeId || config.defaultRuntimeId,
+      ragDocumentNames,
+      retrieval,
+      knowledgeTags: payload.knowledgeTags,
+    });
     const request = {
-      workspaceSlug: agentWorkspace.anythingllmWorkspaceSlug,
+      runtimeId: agent?.runtimeId || this.settings.defaultRuntimeId || config.defaultRuntimeId,
+      projectId: project.id,
+      workspaceSlug: project.anythingllmWorkspaceSlug,
       mode,
       message,
       sessionId: payload.sessionId,
       reset: payload.reset,
     };
+    return { payload, project, agent, request, retrieval };
+  }
 
-    if (payload.dryRun) {
-      return { agentWorkspace, request, dryRun: true };
-    }
-
-    const result = await this.client.workspaceChat(agentWorkspace.anythingllmWorkspaceSlug, {
-      message,
-      mode,
-      sessionId: payload.sessionId,
-      reset: payload.reset,
-    });
-
-    return { agentWorkspace, request, result };
+  async retrieveRag(payload) {
+    if (this.ragProvider.retrieve) return this.ragProvider.retrieve(payload);
+    return this.client.vectorSearch(payload.workspaceSlug, payload);
   }
 
   async resolveAnythingllmWorkspace(payload) {
-    if (payload.anythingllmWorkspaceSlug) return payload.anythingllmWorkspaceSlug;
-    if (!payload.createAnythingllmWorkspace) {
-      throw new AgentOrchestratorError(
-        "anythingllmWorkspaceSlug is required when createAnythingllmWorkspace is false.",
-        400
-      );
-    }
-
-    const workspaceName = payload.anythingllmWorkspaceName || payload.name;
-    const response = await this.client.createWorkspace({
-      name: workspaceName,
-      chatMode: payload.defaultMode === "chat" ? "chat" : "query",
-      topN: payload.topN,
-      similarityThreshold: payload.scoreThreshold,
-      openAiPrompt: payload.systemPrompt,
-    });
+    const response = this.ragProvider.ensureWorkspace
+      ? await this.ragProvider.ensureWorkspace({ name: payload.name })
+      : await this.client.createWorkspace({ name: payload.name, chatMode: "chat" });
     const slug = extractWorkspaceSlug(response);
     if (!slug) {
       throw new AgentOrchestratorError("AnythingLLM workspace was created but no slug was returned.", 502, response);
@@ -261,11 +469,13 @@ export class AgentOrchestrator {
       const content = await fs.readFile(this.storePath, "utf8");
       const store = JSON.parse(content);
       return {
-        version: 1,
-        agentWorkspaces: Array.isArray(store.agentWorkspaces) ? store.agentWorkspaces : [],
+        version: 2,
+        projects: normalizeProjects(store.projects || store.agentWorkspaces),
+        agents: normalizeAgents(store.agents),
+        conversations: normalizeConversations(store.conversations),
       };
     } catch (error) {
-      if (error.code === "ENOENT") return { version: 1, agentWorkspaces: [] };
+      if (error.code === "ENOENT") return { version: 2, projects: [], agents: [], conversations: [] };
       throw error;
     }
   }
@@ -273,6 +483,12 @@ export class AgentOrchestrator {
   async writeStore(store) {
     await fs.mkdir(path.dirname(this.storePath), { recursive: true });
     await fs.writeFile(this.storePath, `${JSON.stringify(store, null, 2)}\n`);
+  }
+
+  findProject(store, projectId) {
+    const project = store.projects.find((item) => item.id === projectId);
+    if (!project) throw new AgentOrchestratorError(`Project ${projectId} was not found.`, 404);
+    return project;
   }
 }
 
@@ -285,22 +501,34 @@ export class AgentOrchestratorError extends Error {
   }
 }
 
-export function buildAgentMessage(agentWorkspace, task, context = undefined) {
+export function buildAgentMessage(project, agent, task, context = undefined, options = {}) {
   const sections = [
-    `你正在以定制智能体「${agentWorkspace.name}」的身份执行任务。`,
-    agentWorkspace.description ? `智能体说明：\n${agentWorkspace.description}` : "",
-    agentWorkspace.systemPrompt ? `系统指令：\n${agentWorkspace.systemPrompt}` : "",
-    agentWorkspace.skills?.length
-      ? `允许使用的技能：\n${agentWorkspace.skills.map(formatSkill).join("\n")}`
-      : "允许使用的技能：未显式配置。",
-    `RAG 边界：只能把绑定的 AnythingLLM 工作空间「${agentWorkspace.anythingllmWorkspaceSlug}」作为知识范围。`,
-    agentWorkspace.ragDocumentNames?.length
-      ? `配置的文档范围：\n${agentWorkspace.ragDocumentNames.map((name) => `- ${name}`).join("\n")}`
-      : "配置的文档范围：绑定工作空间内当前已索引的全部文档。",
-    agentWorkspace.knowledgeRefs?.length
-      ? `关联的系统知识库：\n${agentWorkspace.knowledgeRefs.map((name) => `- ${name}`).join("\n")}`
+    `你正在 Hippo project「${project.name}」中执行任务。`,
+    project.description ? `Project 说明：\n${project.description}` : "",
+    `当前 runtime：${options.runtimeId || agent?.runtimeId || config.defaultRuntimeId}`,
+    agent ? `本次加载的全局 Agent：${agent.name}` : "本次未加载 Agent，使用通用助手执行。",
+    agent?.description ? `Agent 说明：\n${agent.description}` : "",
+    agent?.systemPrompt ? `Agent 系统指令：\n${agent.systemPrompt}` : "",
+    agent?.skills?.length
+      ? `Agent 可使用技能：\n${agent.skills.map(formatSkill).join("\n")}`
+      : agent ? "Agent 可使用技能：未显式配置。" : "",
+    agent?.mcpServers?.length
+      ? `Agent 可访问 MCP：\n${agent.mcpServers.map((name) => `- ${name}`).join("\n")}`
+      : agent ? "Agent 可访问 MCP：未显式配置。" : "",
+    agent
+      ? `RAG 授权边界：只能使用当前 project 引用的一级知识抽屉。AnythingLLM 仅作为检索 provider，不作为对话 runtime。`
+      : "当前未加载 Agent；仍需遵守 project 的知识抽屉授权边界。",
+    project.knowledgeDrawerRefs?.length
+      ? `Project 可访问的一级知识抽屉：\n${project.knowledgeDrawerRefs.map((name) => `- ${name}`).join("\n")}`
+      : "Project 未引用任何一级知识抽屉。",
+    options.knowledgeTags?.length
+      ? `本次二级 tag 过滤：\n${options.knowledgeTags.map((name) => `- ${name}`).join("\n")}`
       : "",
-    agentWorkspace.localWorkspacePath ? `本地项目工作区：\n${agentWorkspace.localWorkspacePath}` : "",
+    options.ragDocumentNames?.length
+      ? `本次可检索文档：\n${options.ragDocumentNames.map((name) => `- ${name}`).join("\n")}`
+      : "本次没有可检索文档。",
+    options.retrieval ? `RAG 检索结果：\n${JSON.stringify(options.retrieval, null, 2)}` : "",
+    project.localWorkspacePath ? `本地项目目录：\n${project.localWorkspacePath}` : "",
     context ? `运行时上下文：\n${JSON.stringify(context, null, 2)}` : "",
     `任务：\n${task}`,
   ];
@@ -309,11 +537,30 @@ export function buildAgentMessage(agentWorkspace, task, context = undefined) {
 
 export function agentSchemas() {
   return {
-    createAgentWorkspaceSchema,
-    updateAgentWorkspaceSchema,
+    createProjectSchema,
+    updateProjectSchema,
+    createConversationSchema,
+    updateConversationSchema,
+    createAgentSchema,
+    updateAgentSchema,
     executeAgentTaskSchema,
-    updateRagScopeSchema,
   };
+}
+
+function deriveConversationTitle(messages = []) {
+  const firstUserMessage = messages.find((message) => message.role === "user" && message.text?.trim());
+  if (!firstUserMessage) return "";
+  const compact = firstUserMessage.text.trim().replace(/\s+/g, " ");
+  return compact.length > 28 ? `${compact.slice(0, 28)}...` : compact;
+}
+
+function normalizeMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+  return messages.map((message) => ({
+    role: ["user", "assistant", "system"].includes(message.role) ? message.role : "assistant",
+    text: String(message.text || ""),
+    createdAt: message.createdAt || new Date().toISOString(),
+  }));
 }
 
 function extractWorkspaceSlug(response) {
@@ -331,4 +578,43 @@ function dedupe(items) {
 
 function definedOnly(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined));
+}
+
+function primaryDrawer(value) {
+  return String(value || "").replaceAll("\\", "/").split("/").filter(Boolean)[0] || "";
+}
+
+function normalizeProjects(projects) {
+  if (!Array.isArray(projects)) return [];
+  return projects.map((project) => ({
+    ...project,
+    agentIds: Array.isArray(project.agentIds) ? project.agentIds : [],
+    knowledgeDrawerRefs: Array.isArray(project.knowledgeDrawerRefs)
+      ? dedupe(project.knowledgeDrawerRefs.map(primaryDrawer))
+      : [],
+  }));
+}
+
+function normalizeAgents(agents) {
+  if (!Array.isArray(agents)) return [];
+  return agents.map((agent) => {
+    const { knowledgeRefs, ...current } = agent;
+    return {
+      ...current,
+      mcpServers: Array.isArray(current.mcpServers) ? current.mcpServers : [],
+      runtimeId: current.runtimeId || config.defaultRuntimeId,
+      explicitRagDocumentNames: current.explicitRagDocumentNames || current.ragDocumentNames || [],
+      ragDocumentNames: current.ragDocumentNames || current.explicitRagDocumentNames || [],
+    };
+  });
+}
+
+function normalizeConversations(conversations) {
+  if (!Array.isArray(conversations)) return [];
+  return conversations.map((conversation) => ({
+    ...conversation,
+    title: conversation.title || deriveConversationTitle(conversation.messages) || "新对话",
+    messages: normalizeMessages(conversation.messages),
+    metadata: conversation.metadata || {},
+  }));
 }

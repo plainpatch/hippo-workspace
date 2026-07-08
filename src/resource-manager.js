@@ -51,35 +51,42 @@ export class ResourceManager {
     return {
       rootPath: this.knowledgeDir,
       tree,
+      drawers: buildDrawerList(index),
       documents: index.documents,
     };
   }
 
-  async createKnowledgeFolder(relativePath) {
-    const safePath = assertSafeRelativePath(relativePath);
+  async createKnowledgeFolder(relativePath, metadata = {}) {
+    const safePath = assertDrawerPath(relativePath);
     const target = path.join(this.knowledgeDir, safePath);
     await fs.mkdir(target, { recursive: true });
-    return { path: safePath, absolutePath: target };
+    const drawer = await this.upsertDrawerMetadata(safePath, metadata);
+    return { path: safePath, absolutePath: target, drawer };
   }
 
   async ingestKnowledgeText({ relativeDir = "", title, textContent, metadata = {} }) {
     if (!this.client) throw new ResourceManagerError("AnythingLLM client is required for ingestion.", 500);
     await this.ensureBaseDirectories();
-    const safeDir = relativeDir ? assertSafeRelativePath(relativeDir) : "";
+    const safeDir = relativeDir ? assertDrawerPath(relativeDir) : "";
     const fileName = `${slugify(title || "note")}-${Date.now()}.md`;
     const relativePath = safeDir ? path.posix.join(safeDir, fileName) : fileName;
     const absolutePath = path.join(this.knowledgeDir, relativePath);
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
     await fs.writeFile(absolutePath, String(textContent || ""), "utf8");
 
-    const response = await this.client.uploadRawText({
-      textContent,
-      metadata: { title, sourcePath: relativePath, ...metadata },
-    });
+    const response = this.client.ingestText
+      ? await this.client.ingestText({ textContent, metadata: { title, sourcePath: relativePath, ...metadata } })
+      : await this.client.uploadRawText({
+          textContent,
+          metadata: { title, sourcePath: relativePath, ...metadata },
+        });
     const documentNames = extractDocumentNames(response);
+    await this.ensureDrawerMetadata(safeDir, metadata);
     await this.recordKnowledgeDocument(relativePath, {
       title: title || fileName,
       type: "text",
+      drawer: getPrimaryDrawer(relativePath),
+      tags: getSecondaryTags(relativePath),
       documentNames,
       anythingllmResponse: response,
     });
@@ -89,22 +96,31 @@ export class ResourceManager {
   async ingestKnowledgeFile({ relativeDir = "", fileBuffer, fileName, metadata = {} }) {
     if (!this.client) throw new ResourceManagerError("AnythingLLM client is required for ingestion.", 500);
     await this.ensureBaseDirectories();
-    const safeDir = relativeDir ? assertSafeRelativePath(relativeDir) : "";
+    const safeDir = relativeDir ? assertDrawerPath(relativeDir) : "";
     const safeName = path.basename(fileName || `file-${Date.now()}`);
     const relativePath = safeDir ? path.posix.join(safeDir, safeName) : safeName;
     const absolutePath = path.join(this.knowledgeDir, relativePath);
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
     await fs.writeFile(absolutePath, fileBuffer);
 
-    const response = await this.client.uploadFile({
-      fileBuffer,
-      fileName: safeName,
-      metadata: { sourcePath: relativePath, ...metadata },
-    });
+    const response = this.client.ingestFile
+      ? await this.client.ingestFile({
+          fileBuffer,
+          fileName: safeName,
+          metadata: { sourcePath: relativePath, ...metadata },
+        })
+      : await this.client.uploadFile({
+          fileBuffer,
+          fileName: safeName,
+          metadata: { sourcePath: relativePath, ...metadata },
+        });
     const documentNames = extractDocumentNames(response);
+    await this.ensureDrawerMetadata(safeDir, metadata);
     await this.recordKnowledgeDocument(relativePath, {
       title: safeName,
       type: "file",
+      drawer: getPrimaryDrawer(relativePath),
+      tags: getSecondaryTags(relativePath),
       documentNames,
       anythingllmResponse: response,
     });
@@ -118,6 +134,8 @@ export class ResourceManager {
       relativePath,
       title: value.title || path.basename(relativePath),
       type: value.type || "file",
+      drawer: value.drawer || getPrimaryDrawer(relativePath),
+      tags: value.tags || getSecondaryTags(relativePath),
       documentNames: value.documentNames || [],
       updatedAt: new Date().toISOString(),
     };
@@ -126,15 +144,58 @@ export class ResourceManager {
   }
 
   async resolveKnowledgeRefs(refs = []) {
+    return this.resolveKnowledgeForProject({ drawerRefs: refs });
+  }
+
+  async resolveKnowledgeForProject({ drawerRefs = [], tags = [] } = {}) {
     const index = await this.readKnowledgeIndex();
-    const selected = new Set((refs || []).filter(Boolean));
+    const selected = new Set((drawerRefs || []).map(assertPrimaryDrawerPath).filter(Boolean));
+    const selectedTags = new Set((tags || []).filter(Boolean));
     const documentNames = [];
     for (const [relativePath, item] of Object.entries(index.documents)) {
-      if (isSelectedKnowledgePath(relativePath, selected)) {
+      if (isSelectedProjectKnowledgePath(relativePath, selected, selectedTags)) {
         documentNames.push(...(item.documentNames || []));
       }
     }
     return dedupe(documentNames);
+  }
+
+  async listProjectKnowledge({ drawerRefs = [] } = {}) {
+    const index = await this.readKnowledgeIndex();
+    const selected = new Set((drawerRefs || []).map(assertPrimaryDrawerPath).filter(Boolean));
+    return {
+      drawers: buildDrawerList(index).filter((drawer) => selected.has(drawer.path)),
+      documents: Object.values(index.documents).filter((item) =>
+        isSelectedProjectKnowledgePath(item.relativePath, selected, new Set())
+      ),
+    };
+  }
+
+  async upsertDrawerMetadata(relativePath, metadata = {}) {
+    const safePath = assertDrawerPath(relativePath);
+    const index = await this.readKnowledgeIndex();
+    const now = new Date().toISOString();
+    index.drawers[safePath] = {
+      path: safePath,
+      level: safePath.split("/").length,
+      name: metadata.name || index.drawers[safePath]?.name || path.posix.basename(safePath),
+      description: metadata.description || index.drawers[safePath]?.description || "",
+      enabled: metadata.enabled ?? index.drawers[safePath]?.enabled ?? true,
+      metadata: metadata.metadata || index.drawers[safePath]?.metadata || {},
+      updatedAt: now,
+      createdAt: index.drawers[safePath]?.createdAt || now,
+    };
+    await this.writeKnowledgeIndex(index);
+    return index.drawers[safePath];
+  }
+
+  async ensureDrawerMetadata(relativePath, metadata = {}) {
+    const safePath = relativePath ? assertDrawerPath(relativePath) : "";
+    if (!safePath) return undefined;
+    const parts = safePath.split("/");
+    await this.upsertDrawerMetadata(parts[0], metadata.drawer || {});
+    if (parts[1]) return this.upsertDrawerMetadata(safePath, metadata.tag || {});
+    return undefined;
   }
 
   async readKnowledgeIndex() {
@@ -144,10 +205,11 @@ export class ResourceManager {
       const index = JSON.parse(content);
       return {
         version: 1,
+        drawers: index.drawers && typeof index.drawers === "object" ? index.drawers : {},
         documents: index.documents && typeof index.documents === "object" ? index.documents : {},
       };
     } catch (error) {
-      if (error.code === "ENOENT") return { version: 1, documents: {} };
+      if (error.code === "ENOENT") return { version: 1, drawers: {}, documents: {} };
       throw error;
     }
   }
@@ -175,11 +237,12 @@ async function readTree(root, current, index) {
     const absolutePath = path.join(current, entry.name);
     const relativePath = toPosix(path.relative(root, absolutePath));
     if (entry.isDirectory()) {
+      const childTree = await readTree(root, absolutePath, index);
       children.push({
         type: "folder",
         name: entry.name,
         path: relativePath,
-        children: await readTree(root, absolutePath, index),
+        children: childTree.children,
       });
     } else if (entry.isFile()) {
       children.push({
@@ -202,13 +265,28 @@ function assertSafeRelativePath(value) {
   return normalized;
 }
 
-function isSelectedKnowledgePath(relativePath, selected) {
-  if (!selected.size) return false;
-  for (const item of selected) {
-    const normalized = assertSafeRelativePath(item);
-    if (relativePath === normalized || relativePath.startsWith(`${normalized}/`)) return true;
+function assertDrawerPath(value) {
+  const normalized = assertSafeRelativePath(value);
+  if (!normalized) return "";
+  const parts = normalized.split("/");
+  if (parts.length > 2) {
+    throw new ResourceManagerError("Knowledge paths only support a primary drawer and optional secondary tag.", 400);
   }
-  return false;
+  return normalized;
+}
+
+function assertPrimaryDrawerPath(value) {
+  const normalized = assertSafeRelativePath(value);
+  if (!normalized) return "";
+  return normalized.split("/")[0];
+}
+
+function isSelectedProjectKnowledgePath(relativePath, selected, selectedTags) {
+  if (!selected.size) return false;
+  const drawer = getPrimaryDrawer(relativePath);
+  if (!selected.has(drawer)) return false;
+  if (!selectedTags.size) return true;
+  return getSecondaryTags(relativePath).some((tag) => selectedTags.has(tag));
 }
 
 function extractDocumentNames(response) {
@@ -249,4 +327,41 @@ function toPosix(value) {
 
 function dedupe(items) {
   return [...new Set(items.filter(Boolean))];
+}
+
+function getPrimaryDrawer(relativePath) {
+  return assertSafeRelativePath(relativePath).split("/")[0] || "";
+}
+
+function getSecondaryTags(relativePath) {
+  const parts = assertSafeRelativePath(relativePath).split("/");
+  return parts.length > 2 ? [parts[1]] : parts.length === 2 && !parts[1].includes(".") ? [parts[1]] : [];
+}
+
+function buildDrawerList(index) {
+  const drawers = { ...(index.drawers || {}) };
+  for (const item of Object.values(index.documents || {})) {
+    if (item.drawer && !drawers[item.drawer]) {
+      drawers[item.drawer] = {
+        path: item.drawer,
+        level: 1,
+        name: item.drawer,
+        description: "",
+        enabled: true,
+      };
+    }
+    for (const tag of item.tags || []) {
+      const tagPath = `${item.drawer}/${tag}`;
+      if (!drawers[tagPath]) {
+        drawers[tagPath] = {
+          path: tagPath,
+          level: 2,
+          name: tag,
+          description: "",
+          enabled: true,
+        };
+      }
+    }
+  }
+  return Object.values(drawers).sort((a, b) => a.path.localeCompare(b.path));
 }

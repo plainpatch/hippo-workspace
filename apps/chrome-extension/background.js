@@ -3,6 +3,7 @@
     wrapperUrl: "http://localhost:8787",
     defaultKnowledgeDir: "浏览器剪藏",
     defaultProjectId: "",
+    defaultAgentId: "",
   };
 
   chrome.runtime.onInstalled.addListener(() => {
@@ -45,25 +46,12 @@
         },
       });
 
-      if (settings.defaultProjectId) {
-        await attachKnowledgeRef(settings, settings.defaultProjectId, relativeDir || result.relativePath);
-      }
       await setBadge("OK", "#10b981");
     } catch (error) {
       console.error(error);
       await setBadge("ERR", "#ef4444");
     }
   });
-
-  async function attachKnowledgeRef(settings, projectId, ref) {
-    const current = await request(settings, `/api/agent-workspaces/${encodeURIComponent(projectId)}`);
-    const project = current.agentWorkspace;
-    const refs = [...new Set([...(project.knowledgeRefs || []), ref].filter(Boolean))];
-    await request(settings, `/api/agent-workspaces/${encodeURIComponent(projectId)}`, {
-      method: "PATCH",
-      body: { knowledgeRefs: refs },
-    });
-  }
 
   async function request(settings, path, options = {}) {
     const headers = { ...(options.headers || {}) };

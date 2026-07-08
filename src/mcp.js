@@ -2,208 +2,124 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { createAnythingLlmClient, jsonContent } from "./shared.js";
 import { AgentOrchestrator } from "./agent-orchestrator.js";
+import { ResourceManager } from "./resource-manager.js";
+import { AppSettingsService } from "./app-settings.js";
+import { createRagProvider } from "./rag-provider.js";
+import { RuntimeRegistry } from "./runtime-adapter.js";
 
 export function createMcpServer() {
   const client = createAnythingLlmClient();
-  const agentOrchestrator = new AgentOrchestrator({ client });
+  const appSettings = new AppSettingsService();
+  const settings = appSettings.getSettings();
+  const ragProvider = createRagProvider({ id: settings.ragProviderId, client });
+  const resourceManager = new ResourceManager({ client: ragProvider });
+  const runtimeRegistry = new RuntimeRegistry({ settings });
+  const agentOrchestrator = new AgentOrchestrator({
+    client,
+    ragProvider,
+    resourceManager,
+    runtimeRegistry,
+    settings,
+  });
 
   const server = new McpServer({
-    name: "anythingllm-rag-wrapper",
-    version: "0.1.0",
+    name: "hippo-system",
+    version: "0.2.0",
   });
 
   server.registerTool(
-    "anythingllm_status",
+    "hippo_get_settings",
     {
-      title: "AnythingLLM status",
-      description: "Check wrapper connectivity and AnythingLLM API authentication.",
+      title: "Get Hippo settings",
+      description: "Return app system paths, selected runtime, and selected RAG provider.",
     },
-    async () => jsonContent(await client.status())
+    async () => jsonContent({ settings })
   );
 
   server.registerTool(
-    "anythingllm_list_workspaces",
+    "hippo_list_projects",
     {
-      title: "List workspaces",
-      description: "List AnythingLLM workspaces.",
+      title: "List projects",
+      description: "List Hippo projects managed under the app system path.",
     },
-    async () => jsonContent(await client.listWorkspaces())
+    async () => {
+      return jsonContent(await agentOrchestrator.listProjects());
+    }
   );
 
   server.registerTool(
-    "anythingllm_create_workspace",
+    "hippo_create_project",
     {
-      title: "Create workspace",
-      description: "Create a new AnythingLLM workspace.",
+      title: "Create project",
+      description:
+        "Create a Hippo project with optional global agent references and first-level knowledge drawer references.",
       inputSchema: {
         name: z.string().min(1),
-        chatMode: z.enum(["chat", "query"]).optional(),
-        similarityThreshold: z.number().min(0).max(1).optional(),
-        topN: z.number().int().positive().optional(),
-        openAiPrompt: z.string().optional(),
-      },
-    },
-    async (args) => jsonContent(await client.createWorkspace(args))
-  );
-
-  server.registerTool(
-    "anythingllm_list_documents",
-    {
-      title: "List documents",
-      description: "List documents stored in AnythingLLM.",
-    },
-    async () => jsonContent(await client.listDocuments())
-  );
-
-  server.registerTool(
-    "anythingllm_upload_text_document",
-    {
-      title: "Upload text document",
-      description: "Create a document from raw text and optionally embed it into workspaces.",
-      inputSchema: {
-        title: z.string().min(1),
-        textContent: z.string().min(1),
-        workspaceSlugs: z.array(z.string()).optional(),
+        description: z.string().optional(),
+        agentIds: z.array(z.string()).default([]),
+        knowledgeDrawerRefs: z.array(z.string()).default([]),
         metadata: z.record(z.string(), z.unknown()).optional(),
       },
     },
-    async ({ title, textContent, workspaceSlugs, metadata }) =>
-      jsonContent(
-        await client.uploadRawText({
-          textContent,
-          addToWorkspaces: workspaceSlugs,
-          metadata: { title, ...(metadata || {}) },
-        })
-      )
+    async (args) => {
+      return jsonContent(await agentOrchestrator.createProject(args));
+    }
   );
 
   server.registerTool(
-    "anythingllm_upload_url",
+    "hippo_get_project",
     {
-      title: "Upload URL",
-      description: "Ask AnythingLLM to scrape a URL and optionally embed it into workspaces.",
+      title: "Get project",
+      description: "Get a Hippo project by id.",
       inputSchema: {
-        url: z.string().url(),
-        workspaceSlugs: z.array(z.string()).optional(),
-        scraperHeaders: z.record(z.string(), z.string()).optional(),
+        projectId: z.string().min(1),
+      },
+    },
+    async ({ projectId }) => {
+      return jsonContent(await agentOrchestrator.getProject(projectId));
+    }
+  );
+
+  server.registerTool(
+    "hippo_update_project",
+    {
+      title: "Update project",
+      description: "Update project metadata, enabled global agents, and first-level knowledge drawer references.",
+      inputSchema: {
+        projectId: z.string().min(1),
+        name: z.string().min(1).optional(),
+        description: z.string().optional(),
+        agentIds: z.array(z.string()).optional(),
+        knowledgeDrawerRefs: z.array(z.string()).optional(),
         metadata: z.record(z.string(), z.unknown()).optional(),
       },
     },
-    async ({ url, workspaceSlugs, scraperHeaders, metadata }) =>
-      jsonContent(
-        await client.uploadLink({
-          link: url,
-          addToWorkspaces: workspaceSlugs,
-          scraperHeaders,
-          metadata,
-        })
-      )
+    async ({ projectId, ...payload }) => {
+      return jsonContent(await agentOrchestrator.updateProject(projectId, payload));
+    }
   );
 
   server.registerTool(
-    "anythingllm_upload_file",
+    "hippo_list_agents",
     {
-      title: "Upload local file",
-      description: "Upload a local file path to AnythingLLM and optionally embed it into workspaces.",
-      inputSchema: {
-        filePath: z.string().min(1),
-        workspaceSlugs: z.array(z.string()).optional(),
-        metadata: z.record(z.string(), z.unknown()).optional(),
-      },
+      title: "List agents",
+      description: "List global Hippo agent definitions.",
     },
-    async ({ filePath, workspaceSlugs, metadata }) =>
-      jsonContent(
-        await client.uploadFile({
-          filePath,
-          addToWorkspaces: workspaceSlugs,
-          metadata,
-        })
-      )
+    async () => jsonContent(await agentOrchestrator.listAgents())
   );
 
   server.registerTool(
-    "anythingllm_update_workspace_embeddings",
+    "hippo_create_agent",
     {
-      title: "Update workspace embeddings",
-      description: "Add or remove document names from a workspace embedding set.",
-      inputSchema: {
-        workspaceSlug: z.string().min(1),
-        adds: z.array(z.string()).default([]),
-        deletes: z.array(z.string()).default([]),
-      },
-    },
-    async ({ workspaceSlug, adds, deletes }) =>
-      jsonContent(await client.updateWorkspaceEmbeddings(workspaceSlug, { adds, deletes }))
-  );
-
-  server.registerTool(
-    "anythingllm_workspace_chat",
-    {
-      title: "Workspace RAG chat",
-      description: "Ask an AnythingLLM workspace. Use mode=query for retrieval-grounded Q&A.",
-      inputSchema: {
-        workspaceSlug: z.string().min(1),
-        message: z.string().min(1),
-        mode: z.enum(["query", "chat", "automatic"]).default("query"),
-        sessionId: z.string().optional(),
-        reset: z.boolean().optional(),
-      },
-    },
-    async ({ workspaceSlug, ...payload }) =>
-      jsonContent(await client.workspaceChat(workspaceSlug, payload))
-  );
-
-  server.registerTool(
-    "anythingllm_vector_search",
-    {
-      title: "Vector search",
-      description: "Run vector similarity search against an AnythingLLM workspace.",
-      inputSchema: {
-        workspaceSlug: z.string().min(1),
-        query: z.string().min(1),
-        topN: z.number().int().positive().default(4),
-        scoreThreshold: z.number().min(0).max(1).optional(),
-      },
-    },
-    async ({ workspaceSlug, ...payload }) =>
-      jsonContent(await client.vectorSearch(workspaceSlug, payload))
-  );
-
-  server.registerTool(
-    "anythingllm_remove_documents",
-    {
-      title: "Remove documents",
-      description: "Permanently remove documents from AnythingLLM by document name.",
-      inputSchema: {
-        names: z.array(z.string()).min(1),
-      },
-    },
-    async ({ names }) => jsonContent(await client.removeDocuments(names))
-  );
-
-  server.registerTool(
-    "agent_list_workspaces",
-    {
-      title: "List agent workspaces",
-      description: "List custom agent workspaces managed by the orchestration layer.",
-    },
-    async () => jsonContent(await agentOrchestrator.listAgentWorkspaces())
-  );
-
-  server.registerTool(
-    "agent_create_workspace",
-    {
-      title: "Create agent workspace",
-      description:
-        "Create a custom agent workspace and bind it to an AnythingLLM workspace. If no AnythingLLM slug is provided, one will be created.",
+      title: "Create agent",
+      description: "Create a global agent definition with runtime, skills, MCP access, and behavior description.",
       inputSchema: {
         name: z.string().min(1),
         description: z.string().optional(),
         systemPrompt: z.string().optional(),
         skills: z.array(skillInputSchema()).default([]),
-        anythingllmWorkspaceSlug: z.string().optional(),
-        anythingllmWorkspaceName: z.string().optional(),
-        createAnythingllmWorkspace: z.boolean().default(true),
+        mcpServers: z.array(z.string()).default([]),
+        runtimeId: z.string().default("codex"),
         ragDocumentNames: z.array(z.string()).default([]),
         defaultMode: z.enum(["query", "chat", "automatic"]).default("query"),
         topN: z.number().int().positive().default(4),
@@ -211,55 +127,103 @@ export function createMcpServer() {
         metadata: z.record(z.string(), z.unknown()).optional(),
       },
     },
-    async (args) => jsonContent(await agentOrchestrator.createAgentWorkspace(args))
+    async (args) => jsonContent(await agentOrchestrator.createAgent(args))
   );
 
   server.registerTool(
-    "agent_get_workspace",
+    "hippo_get_agent",
     {
-      title: "Get agent workspace",
-      description: "Get a custom agent workspace definition by id.",
+      title: "Get agent",
+      description: "Get a global agent definition by id.",
       inputSchema: {
-        id: z.string().min(1),
+        agentId: z.string().min(1),
       },
     },
-    async ({ id }) => jsonContent(await agentOrchestrator.getAgentWorkspace(id))
+    async ({ agentId }) => jsonContent(await agentOrchestrator.getAgent(agentId))
   );
 
   server.registerTool(
-    "agent_update_rag_scope",
+    "hippo_project_knowledge",
     {
-      title: "Update agent RAG scope",
+      title: "Get project knowledge scope",
       description:
-        "Add or remove document names from the bound AnythingLLM workspace and update the custom agent workspace scope record.",
+        "Return the first-level knowledge drawers and indexed documents a Hippo project is authorized to access.",
       inputSchema: {
-        id: z.string().min(1),
-        adds: z.array(z.string()).default([]),
-        deletes: z.array(z.string()).default([]),
+        projectId: z.string().min(1),
       },
     },
-    async ({ id, adds, deletes }) =>
-      jsonContent(await agentOrchestrator.updateRagScope(id, { adds, deletes }))
+    async ({ projectId }) => {
+      const { project } = await agentOrchestrator.getProject(projectId);
+      return jsonContent({
+        project,
+        knowledge: await resourceManager.listProjectKnowledge({
+          drawerRefs: project.knowledgeDrawerRefs || [],
+        }),
+      });
+    }
   );
 
   server.registerTool(
-    "agent_execute_task",
+    "hippo_project_rag_search",
     {
-      title: "Execute agent task",
+      title: "Project-scoped RAG search",
       description:
-        "Execute a task through a custom agent workspace. The orchestrator injects system prompt, allowed skills, and bound AnythingLLM RAG scope.",
+        "Run RAG retrieval through the configured provider, constrained to the project's first-level knowledge drawer references. Secondary drawers are optional tags.",
       inputSchema: {
-        id: z.string().min(1),
+        projectId: z.string().min(1),
+        query: z.string().min(1),
+        tags: z.array(z.string()).default([]),
+        topN: z.number().int().positive().default(4),
+        scoreThreshold: z.number().min(0).max(1).optional(),
+      },
+    },
+    async ({ projectId, query, tags, topN, scoreThreshold }) => {
+      const { project } = await agentOrchestrator.getProject(projectId);
+      const documentNames = await resourceManager.resolveKnowledgeForProject({
+        drawerRefs: project.knowledgeDrawerRefs || [],
+        tags,
+      });
+      if (documentNames.length) {
+        await ragProvider.updateWorkspaceEmbeddings(project.anythingllmWorkspaceSlug, {
+          adds: documentNames,
+          deletes: [],
+        });
+      }
+      return jsonContent({
+        project,
+        documentNames,
+        result: documentNames.length
+          ? await ragProvider.retrieve({
+              workspaceSlug: project.anythingllmWorkspaceSlug,
+              query,
+              topN,
+              scoreThreshold,
+            })
+          : { skipped: true, reason: "project-has-no-authorized-documents", results: [] },
+      });
+    }
+  );
+
+  server.registerTool(
+    "hippo_execute_project_task",
+    {
+      title: "Execute project task",
+      description:
+        "Execute a task in a Hippo project using the selected runtime and an optional project-enabled global agent.",
+      inputSchema: {
+        projectId: z.string().min(1),
+        agentId: z.string().optional(),
         task: z.string().min(1),
         mode: z.enum(["query", "chat", "automatic"]).optional(),
         sessionId: z.string().optional(),
         reset: z.boolean().optional(),
         dryRun: z.boolean().optional(),
         context: z.record(z.string(), z.unknown()).optional(),
+        knowledgeTags: z.array(z.string()).default([]),
       },
     },
-    async ({ id, ...payload }) =>
-      jsonContent(await agentOrchestrator.executeAgentTask(id, payload))
+    async ({ projectId, ...payload }) =>
+      jsonContent(await agentOrchestrator.executeAgentTask(projectId, payload))
   );
 
   return server;

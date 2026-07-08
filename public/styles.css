@@ -1,24 +1,24 @@
 :root {
   color-scheme: dark;
-  --app-bg: #111314;
-  --sidebar-bg: #1b252c;
-  --sidebar-bg-2: #20292e;
-  --sidebar-active: rgba(255, 255, 255, 0.11);
-  --sidebar-hover: rgba(255, 255, 255, 0.08);
-  --main-bg: #151515;
-  --panel-bg: #242424;
-  --panel-bg-2: #2d2d2d;
-  --line: rgba(255, 255, 255, 0.09);
-  --line-strong: rgba(255, 255, 255, 0.16);
-  --text: #ececec;
-  --muted: #a4a4a4;
-  --faint: #777;
-  --accent: #f97316;
+  --app-bg: #0f0f0f;
+  --sidebar-bg: #171717;
+  --sidebar-active: #272727;
+  --sidebar-hover: #222222;
+  --main-bg: #111111;
+  --panel-bg: #202020;
+  --panel-bg-2: #2a2a2a;
+  --line: rgba(255, 255, 255, 0.08);
+  --line-strong: rgba(255, 255, 255, 0.14);
+  --text: #f1f1f1;
+  --muted: #a7a7a7;
+  --faint: #737373;
+  --accent: #f4f4f5;
   --accent-2: #10b981;
   --danger: #ef4444;
   --warning: #f59e0b;
   --radius: 8px;
-  --sidebar-width: 320px;
+  --sidebar-width: 312px;
+  --chat-width: 920px;
 }
 
 * {
@@ -34,7 +34,7 @@ body {
   margin: 0;
   min-width: 320px;
   overflow: hidden;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Segoe UI", sans-serif;
   color: var(--text);
   background: var(--app-bg);
 }
@@ -81,8 +81,8 @@ textarea {
 input:focus,
 textarea:focus,
 select:focus {
-  border-color: rgba(249, 115, 22, 0.9);
-  box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.18);
+  border-color: rgba(255, 255, 255, 0.28);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.08);
 }
 
 h1,
@@ -106,78 +106,90 @@ dd {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) auto;
   border-right: 1px solid var(--line);
-  background:
-    radial-gradient(circle at 8% 0%, rgba(30, 83, 110, 0.46), transparent 36%),
-    linear-gradient(160deg, var(--sidebar-bg), var(--sidebar-bg-2) 58%, #202322);
-  color: #e8edf0;
+  background: #1a1b1b;
+  color: #ebebeb;
 }
 
 .systemNav {
-  display: grid;
-  gap: 8px;
-  padding: 22px 12px 18px;
+  display: none;
 }
 
 .sysButton {
-  width: 100%;
-  min-height: 34px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 7px 10px;
-  color: #d9e2e7;
-  text-align: left;
-  font-weight: 650;
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  padding: 0;
+  color: #e1e1e1;
+  overflow: hidden;
+  text-indent: -999px;
+  white-space: nowrap;
 }
 
 .sysButton span {
-  width: 22px;
+  text-indent: 0;
+  width: 24px;
+  height: 24px;
   display: inline-grid;
   place-items: center;
-  color: #c9d5dc;
-  font-size: 17px;
+  border-radius: 6px;
+  color: #d7d7d7;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 13px;
+  font-weight: 750;
 }
 
 .sysButton:hover,
 .sysButton.active {
-  background: var(--sidebar-hover);
+  background: var(--sidebar-active);
 }
 
 .projectsPane {
+  grid-row: 1;
   min-height: 0;
   overflow: auto;
-  padding: 8px 10px 12px;
+  padding: 12px 8px 9px 15px;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+  background: linear-gradient(90deg, #474b4e 0%, #474b4e 16%, #43474a 42%, #2a2c2d 70%, #272728 100%);
 }
 
 .sectionLabel {
-  margin: 16px 8px 8px;
-  color: rgba(232, 237, 240, 0.47);
-  font-size: 13px;
+  margin: 12px 9px 6px;
+  color: #8d8d8d;
+  font-size: 11px;
   font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
 }
 
 .projectRoot,
-.projectItem {
+.projectItem,
+.projectOptionsButton,
+.projectNewConversationButton {
   width: 100%;
-  min-height: 36px;
+  min-height: 38px;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 10px;
+  border-radius: 8px;
+  padding: 8px 9px;
   text-align: left;
 }
 
 .projectRoot {
   margin-bottom: 8px;
-  color: #e9eff2;
-  font-weight: 700;
+  color: #eeeeee;
+  font-size: 14px;
+  font-weight: 620;
 }
 
 .projectRoot:hover,
-.projectItem:hover,
-.projectItem.active {
+.projectRow:hover,
+.projectRow.active {
   background: var(--sidebar-active);
 }
 
@@ -190,32 +202,108 @@ dd {
   display: grid;
   place-items: center;
   border-radius: 6px;
-  color: #eafffb;
-  background: rgba(15, 118, 110, 0.94);
+  color: #f4f4f5;
+  background: #333333;
   font-size: 13px;
   font-weight: 800;
 }
 
 .projectGlyph,
 .titleIcon {
-  background: transparent;
-  color: #c6cdd1;
-  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: #232323;
+  color: #d5d5d5;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.projectRow .projectGlyph {
+  width: 14px;
+  height: 14px;
+  display: block;
+  color: #f1f1f1;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .projectList {
   display: grid;
-  gap: 2px;
+  gap: 5px;
+}
+
+.projectGroup {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.projectRow {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 23px 23px;
+  align-items: center;
+  min-height: 30px;
+  border-radius: 10px;
+  padding: 0 9px 0 7px;
+  color: #e7e7e7;
+}
+
+.projectRow.active {
+  background: rgba(255, 255, 255, 0.07);
 }
 
 .projectItem {
   color: #e3e7ea;
 }
 
-.projectItem > span:last-child {
+.projectRow .projectItem {
   min-width: 0;
+  min-height: 30px;
   display: grid;
-  gap: 2px;
+  grid-template-columns: 16px minmax(0, auto) 13px;
+  justify-content: start;
+  align-items: center;
+  gap: 7px;
+  border-radius: 8px 0 0 8px;
+  padding: 0;
+}
+
+.projectOptionsButton,
+.projectNewConversationButton {
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  justify-content: center;
+  padding: 0;
+  border-radius: 6px;
+  color: #eeeeee;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.95;
+}
+
+.projectRow:hover .projectOptionsButton,
+.projectRow:hover .projectNewConversationButton,
+.projectRow.active .projectOptionsButton,
+.projectRow.active .projectNewConversationButton,
+.projectOptionsButton:focus-visible {
+  opacity: 1;
+}
+
+.projectOptionsButton:hover,
+.projectNewConversationButton:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.projectNewConversationButton {
+  position: relative;
+}
+
+.projectName {
+  min-width: 0;
+  display: block;
 }
 
 .projectItem strong,
@@ -227,12 +315,137 @@ dd {
 }
 
 .projectItem strong {
-  font-size: 15px;
+  font-size: 14px;
+  line-height: 1.1;
+  font-weight: 400;
+  letter-spacing: 0;
 }
 
-.projectItem small {
-  color: rgba(232, 237, 240, 0.57);
+.projectChevron {
+  color: #e1e1e1;
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 120ms ease;
+}
+
+.projectRow.collapsed .projectChevron {
+  transform: rotate(-90deg);
+}
+
+.projectActionIcon {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.projectOptionsButton .projectActionIcon {
+  fill: currentColor;
+  stroke: none;
+}
+
+.conversationList {
+  display: grid;
+  gap: 0;
+  margin: 0 0 5px 17px;
+}
+
+.conversationItem {
+  position: relative;
+  width: 100%;
+  min-height: 31px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  border-radius: 8px;
+  padding: 4px 9px 4px 15px;
+  color: #e4e5e5;
+  text-align: left;
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.conversationItem:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.conversationItem.active {
+  color: #e4e5e5;
+}
+
+.conversationItem span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversationItem small {
+  color: #9fa0a0;
+  font-size: 13.5px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.conversationActions {
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: none;
+  gap: 9px;
+  color: #cfd0d0;
+}
+
+.conversationItem:hover .conversationActions {
+  display: inline-flex;
+}
+
+.conversationItem:hover small {
+  display: none;
+}
+
+.pinIcon,
+.archiveIcon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.conversationEmpty {
+  padding: 6px 8px 6px 15px;
+  color: #777777;
   font-size: 12px;
+}
+
+.conversationMore {
+  width: max-content;
+  min-height: 20px;
+  margin: 3px 0 0 15px;
+  padding: 0;
+  color: #a4a5a5;
+  font-size: 12px;
+  font-weight: 400;
+  text-align: left;
+}
+
+.conversationMore:hover {
+  color: #d7d8d8;
 }
 
 .emptyBlock {
@@ -242,14 +455,29 @@ dd {
   line-height: 1.55;
 }
 
+.emptyCreateProject {
+  width: max-content;
+  min-height: 34px;
+  margin: 0 8px;
+  padding: 6px 10px;
+  border-color: rgba(255, 255, 255, 0.14);
+  color: #d8d8d8;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.emptyCreateProject:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
 .accountPane {
+  grid-row: 2;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 36px;
   gap: 8px;
   align-items: center;
-  padding: 12px;
+  padding: 10px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(0, 0, 0, 0.08);
+  background: #171717;
 }
 
 .accountButton {
@@ -273,7 +501,7 @@ dd {
   display: grid;
   place-items: center;
   border-radius: 50%;
-  background: #2d9cdb;
+  background: #3f3f46;
   color: white;
   font-size: 12px;
   font-weight: 800;
@@ -301,13 +529,14 @@ dd {
   width: 36px;
   height: 36px;
   padding: 0;
+  border-radius: 8px;
 }
 
 .chatWorkspace {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: 56px minmax(0, 1fr) auto;
+  grid-template-rows: 54px minmax(0, 1fr) auto;
   background: var(--main-bg);
 }
 
@@ -317,9 +546,9 @@ dd {
   align-items: center;
   justify-content: space-between;
   gap: 18px;
-  padding: 0 22px;
+  padding: 0 18px;
   border-bottom: 1px solid var(--line);
-  background: #151515;
+  background: rgba(17, 17, 17, 0.96);
 }
 
 .projectTitle {
@@ -334,7 +563,8 @@ dd {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 17px;
+  font-size: 15px;
+  font-weight: 620;
   line-height: 1.2;
 }
 
@@ -365,7 +595,7 @@ dd {
   min-height: 30px;
   padding: 5px 10px;
   border-color: var(--line-strong);
-  background: #242424;
+  background: #1e1e1e;
 }
 
 .headerActions button:hover,
@@ -380,10 +610,10 @@ dd {
   display: inline-flex;
   align-items: center;
   border: 1px solid var(--line-strong);
-  border-radius: 999px;
+  border-radius: 7px;
   padding: 2px 9px;
   color: #d8d8d8;
-  background: #222;
+  background: #1c1c1c;
   font-size: 12px;
 }
 
@@ -405,7 +635,7 @@ dd {
 .chatStream {
   min-height: 0;
   overflow: auto;
-  padding: 32px clamp(24px, 7vw, 84px) 24px;
+  padding: 34px clamp(18px, 6vw, 76px) 24px;
 }
 
 .chatStream:empty::before {
@@ -418,11 +648,11 @@ dd {
 }
 
 .message {
-  max-width: 980px;
-  margin: 0 auto 28px;
+  max-width: var(--chat-width);
+  margin: 0 auto 30px;
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 13px;
 }
 
 .messageAvatar {
@@ -432,13 +662,13 @@ dd {
   place-items: center;
   border-radius: 50%;
   color: white;
-  background: #2c7a7b;
+  background: #2f2f2f;
   font-size: 12px;
   font-weight: 800;
 }
 
 .message.user .messageAvatar {
-  background: #3a82f6;
+  background: #3f3f46;
 }
 
 .messageBody {
@@ -450,42 +680,44 @@ dd {
 .messageMeta {
   color: var(--muted);
   font-size: 12px;
+  font-weight: 620;
 }
 
 .messageText {
-  color: #f0f0f0;
+  color: #f3f3f3;
   font-size: 15px;
-  line-height: 1.7;
+  line-height: 1.68;
   overflow-wrap: anywhere;
 }
 
 .message.user .messageText {
   display: inline-block;
   max-width: 100%;
-  border-radius: var(--radius);
-  padding: 10px 12px;
-  background: #252525;
+  border-radius: 14px;
+  padding: 9px 12px;
+  background: #222222;
 }
 
 .composer {
-  width: min(980px, calc(100vw - var(--sidebar-width) - 76px));
-  margin: 0 auto 22px;
+  width: min(var(--chat-width), calc(100vw - var(--sidebar-width) - 56px));
+  margin: 0 auto 18px;
   border: 1px solid var(--line-strong);
-  border-radius: 16px;
-  padding: 14px 16px 12px;
-  background: #2b2b2b;
-  box-shadow: 0 18px 52px rgba(0, 0, 0, 0.25);
+  border-radius: 22px;
+  padding: 13px 13px 10px 16px;
+  background: #242424;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.34);
 }
 
 .composer textarea {
-  min-height: 70px;
+  min-height: 32px;
   max-height: 180px;
   border: 0;
   border-radius: 0;
   padding: 0;
   background: transparent;
   box-shadow: none;
-  color: #f2f2f2;
+  color: #f4f4f5;
+  resize: none;
 }
 
 .composer textarea:focus {
@@ -497,20 +729,20 @@ dd {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding-top: 12px;
+  padding-top: 9px;
 }
 
 .composerTools {
   min-width: 0;
   flex-wrap: wrap;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .composerTools button,
 .sendButton {
-  min-height: 32px;
-  padding: 5px 10px;
+  min-height: 30px;
+  padding: 5px 9px;
   border-color: transparent;
   color: #ececec;
   background: transparent;
@@ -527,11 +759,12 @@ dd {
 }
 
 .modeSelect select {
-  width: 112px;
-  min-height: 30px;
+  width: 108px;
+  min-height: 28px;
   padding: 4px 8px;
   border-color: rgba(255, 255, 255, 0.12);
-  background: #242424;
+  border-radius: 8px;
+  background: #1e1e1e;
 }
 
 .dryRunToggle {
@@ -545,20 +778,35 @@ dd {
 .checkRow input {
   width: 15px;
   height: 15px;
-  accent-color: var(--accent);
+  accent-color: #f4f4f5;
 }
 
-.sendButton,
+.sendButton {
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border-color: rgba(255, 255, 255, 0.82);
+  background: #f4f4f5;
+  color: #111111;
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1;
+}
+
 .primary {
-  border-color: rgba(249, 115, 22, 0.78);
-  background: var(--accent);
-  color: #fff;
+  border-color: rgba(255, 255, 255, 0.82);
+  background: #f4f4f5;
+  color: #111111;
   font-weight: 700;
 }
 
 .sendButton:hover,
 .primary:hover {
-  background: #fb7f24;
+  background: #ffffff;
 }
 
 .configDrawer {
@@ -574,11 +822,15 @@ dd {
   background: #202020;
   box-shadow: -24px 0 60px rgba(0, 0, 0, 0.38);
   transform: translateX(100%);
+  visibility: hidden;
+  pointer-events: none;
   transition: transform 180ms ease;
 }
 
 .configDrawer.open {
   transform: translateX(0);
+  visibility: visible;
+  pointer-events: auto;
 }
 
 .drawerHeader {
@@ -604,6 +856,10 @@ dd {
 .drawerSection {
   display: grid;
   gap: 12px;
+}
+
+.hidden {
+  display: none !important;
 }
 
 .drawerForm {
@@ -709,6 +965,123 @@ dd {
   color: var(--faint);
   font-size: 11px;
   white-space: nowrap;
+}
+
+.agentList {
+  display: grid;
+  gap: 6px;
+}
+
+.agentCheck {
+  display: grid !important;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px !important;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: #1d1d1d;
+}
+
+.agentCheck input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--accent);
+}
+
+.agentCheck span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.agentCheck strong,
+.agentCheck small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agentCheck small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.agentItem {
+  width: 100%;
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  text-align: left;
+  border-color: var(--line-strong);
+  background: #1d1d1d;
+}
+
+.agentItem strong,
+.agentItem small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agentItem small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.agentPageHeader,
+.agentCards {
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+.agentPageHeader {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
+.agentCards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.agentCard {
+  min-height: 112px;
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  padding: 12px;
+  border-color: var(--line-strong);
+  background: #202020;
+  text-align: left;
+}
+
+.agentCard strong,
+.agentCard span,
+.agentCard small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agentCard strong {
+  font-size: 15px;
+}
+
+.agentCard span {
+  color: #dedede;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.agentCard small {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .kv {
