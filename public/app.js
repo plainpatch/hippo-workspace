@@ -1000,6 +1000,7 @@ async function sendMessage(event) {
     contextSummary: form.get("contextStrategy") === "manual-summary"
       ? String(form.get("contextSummary") || "").trim()
       : "",
+    sandboxMode: form.get("sandboxMode") || undefined,
   };
   const turnMetadata = buildTurnMetadata(project, conversation, payload);
   state.messages.push({ role: "user", text: task, runId, metadata: { ...turnMetadata, messageRole: "user" } });
@@ -1029,6 +1030,7 @@ async function sendMessage(event) {
           agentName: event.agent?.name || "",
           runtimeId: event.request?.runtimeId || turnMetadata.runtimeId,
           contextPolicy: event.request?.contextPolicy,
+          sandboxMode: event.request?.runtimeOptions?.sandboxMode || turnMetadata.sandboxMode || "",
           status: payload.dryRun ? "dry-run" : "running",
         });
         if (event.agentRun) assistantMessage.agentRunSummary = summarizeAgentRun(event.agentRun);
@@ -1053,6 +1055,7 @@ async function sendMessage(event) {
           status: data.agentRun?.status || "completed",
           runtimeSession: data.result?.runtimeSession,
           runtimeId: data.result?.runtimeId || data.request?.runtimeId || assistantMessage.metadata?.runtimeId,
+          sandboxMode: data.result?.runtimeSession?.runtimeOptions?.sandboxMode || data.request?.runtimeOptions?.sandboxMode || assistantMessage.metadata?.sandboxMode || "",
           agentRunId: data.agentRun?.id || "",
           agentRunStatus: data.agentRun?.status || "",
         });
@@ -1115,6 +1118,7 @@ function buildTurnMetadata(project, conversation, payload) {
     contextStrategy: payload.contextStrategy || "runtime",
     contextSummary: payload.contextSummary || "",
     contextSummaryProvided: Boolean(payload.contextSummary),
+    sandboxMode: payload.sandboxMode || state.status?.wrapper?.settings?.runtimes?.codex?.sandboxMode || "",
     dryRun: Boolean(payload.dryRun),
     createdAt: new Date().toISOString(),
   });

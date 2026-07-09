@@ -77,6 +77,14 @@
                   <option value="manual-summary">摘要</option>
                 </select>
               </label>
+              <label class="modeSelect">权限
+                <select name="sandboxMode" id="sandboxModeSelect">
+                  <option value="">默认</option>
+                  <option value="read-only">只读</option>
+                  <option value="workspace-write">工作区写入</option>
+                  <option value="danger-full-access">完全访问</option>
+                </select>
+              </label>
               <label class="dryRunToggle"><input name="dryRun" type="checkbox" /> 仅生成请求</label>
               <button id="stopExecutionBtn" class="stopExecutionButton hidden" type="button" title="停止当前运行">停止</button>
             </div>
@@ -222,6 +230,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=settings-page" type="module"></script>
+    <script src="/app.js?v=turn-sandbox-control" type="module"></script>
   </body>
 </html>

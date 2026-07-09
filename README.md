@@ -283,7 +283,8 @@ curl -X POST http://localhost:8787/api/workspaces/<workspace-id>/execute \
     "task": "根据知识库说明这个模块的接入步骤。",
     "mode": "query",
     "sessionId": "<hippo-conversation-id>",
-    "contextStrategy": "runtime"
+    "contextStrategy": "runtime",
+    "sandboxMode": "workspace-write"
   }'
 ```
 
@@ -292,6 +293,8 @@ Hippo conversations are root sessions. For the Codex runtime, Hippo stores the C
 - `runtime`: keep Codex's runtime-managed multi-turn context.
 - `reset`: start a fresh Codex runtime session for the turn.
 - `manual-summary`: start a fresh Codex runtime session and inject `contextSummary` into the prompt as the compressed prior context.
+
+`sandboxMode` can override the default Codex sandbox for one turn. Supported values are `read-only`, `workspace-write`, and `danger-full-access`.
 
 Workspace and agent definitions are persisted under the configured app home, by default `~/.hippo/agents/agent-store.json`.
 

@@ -113,6 +113,7 @@ const executeAgentTaskSchema = z.object({
   context: z.record(z.string(), z.unknown()).optional(),
   contextStrategy: z.enum(["runtime", "reset", "manual-summary"]).optional(),
   contextSummary: z.string().optional(),
+  sandboxMode: z.enum(["workspace-write", "read-only", "danger-full-access"]).optional(),
   knowledgeTags: z.array(z.string().min(1)).default([]),
   knowledgeTopicRefs: z.array(z.string().min(1)).default([]),
 });
@@ -612,6 +613,7 @@ export class AgentOrchestrator {
         reset: request.reset,
         runId: request.runId,
         contextPolicy: request.contextPolicy,
+        runtimeOptions: request.runtimeOptions,
       });
       await this.persistRuntimeSession(project.id, payload.sessionId, result.runtimeSession, agent?.id, result.runId);
       const completedRun = await this.completeAgentRun(project.id, agentRun.id, {
@@ -679,6 +681,7 @@ export class AgentOrchestrator {
             reset: request.reset,
             runId: request.runId,
             contextPolicy: request.contextPolicy,
+            runtimeOptions: request.runtimeOptions,
             onEvent: tracedEvent,
           })
         : await runtime.execute({
@@ -689,6 +692,7 @@ export class AgentOrchestrator {
             reset: request.reset,
             runId: request.runId,
             contextPolicy: request.contextPolicy,
+            runtimeOptions: request.runtimeOptions,
           });
 
       await this.persistRuntimeSession(project.id, payload.sessionId, result.runtimeSession, agent?.id, result.runId);
@@ -779,12 +783,14 @@ export class AgentOrchestrator {
       knowledgeIndex,
     });
     const contextPolicy = buildContextPolicy(payload, rootSession);
+    const runtimeOptions = buildRuntimeOptions(payload);
     const message = buildAgentMessage(project, agent, payload.task, payload.context, {
       runtimeId: agent?.runtimeId || this.settings.defaultRuntimeId || config.defaultRuntimeId,
       knowledgeIndex,
       retrieval,
       knowledgeTags: payload.knowledgeTags,
       contextPolicy,
+      runtimeOptions,
     });
     const request = {
       runtimeId: agent?.runtimeId || this.settings.defaultRuntimeId || config.defaultRuntimeId,
@@ -796,6 +802,7 @@ export class AgentOrchestrator {
       sessionId: payload.sessionId,
       reset: payload.reset || contextPolicy.strategy === "reset" || contextPolicy.strategy === "manual-summary",
       contextPolicy,
+      runtimeOptions,
     };
     return { payload, project, agent, request, retrieval, rootSession };
   }
@@ -1060,6 +1067,7 @@ export class AgentOrchestrator {
           strategy: "reset",
           summary: `DAG node ${nodeRun.nodeId} runs in an isolated runtime session under root run ${runId}.`,
         },
+        runtimeOptions: request.runtimeOptions,
       });
       const updated = await this.updateAgentRun(project.id, runId, (current, now) => {
         const currentNode = current.nodeRuns[nodeRunId];
@@ -1318,6 +1326,7 @@ export function buildAgentMessage(project, agent, task, context = undefined, opt
     options.contextPolicy?.strategy
       ? `会话上下文策略：${formatContextPolicy(options.contextPolicy)}`
       : "",
+    options.runtimeOptions?.sandboxMode ? `本轮 Codex sandbox 权限：${options.runtimeOptions.sandboxMode}` : "",
     project.localWorkspacePath ? `本地工作区目录：\n${project.localWorkspacePath}` : "",
     context ? `运行时上下文：\n${JSON.stringify(context, null, 2)}` : "",
     `任务：\n${task}`,
@@ -1405,6 +1414,18 @@ function buildContextPolicy(payload, rootSession) {
     runtimeProvider: "codex",
     previousRuntimeSessionId: strategy === "runtime" ? previousRuntimeSession?.sessionId || "" : "",
   };
+}
+
+function buildRuntimeOptions(payload) {
+  return stripEmptyObject({
+    sandboxMode: ["workspace-write", "read-only", "danger-full-access"].includes(payload.sandboxMode)
+      ? payload.sandboxMode
+      : "",
+  });
+}
+
+function stripEmptyObject(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== ""));
 }
 
 function dedupe(items) {

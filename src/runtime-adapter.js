@@ -21,10 +21,10 @@ export class CodexRuntimeAdapter {
     this.serviceTier = serviceTier;
   }
 
-  async execute({ project, agent, prompt, rootSession, reset = false, runId = randomUUID(), contextPolicy } = {}) {
+  async execute({ project, agent, prompt, rootSession, reset = false, runId = randomUUID(), contextPolicy, runtimeOptions } = {}) {
     const outputPath = path.join(os.tmpdir(), `hippo-codex-${Date.now()}-${process.pid}.txt`);
     const existingSessionId = reset ? "" : getExistingCodexSessionId(rootSession);
-    const args = this.buildArgs(project, outputPath, { existingSessionId });
+    const args = this.buildArgs(project, outputPath, { existingSessionId, runtimeOptions });
     args.push("-");
 
     const events = [];
@@ -60,14 +60,15 @@ export class CodexRuntimeAdapter {
         resumedFromSessionId: existingSessionId,
         status: events.length ? "active" : "ephemeral",
         contextPolicy,
+        runtimeOptions: normalizeRuntimeOptions(runtimeOptions, this),
       }),
     };
   }
 
-  async stream({ project, agent, prompt, rootSession, reset = false, runId = randomUUID(), contextPolicy, onEvent } = {}) {
+  async stream({ project, agent, prompt, rootSession, reset = false, runId = randomUUID(), contextPolicy, runtimeOptions, onEvent } = {}) {
     const outputPath = path.join(os.tmpdir(), `hippo-codex-${Date.now()}-${process.pid}.txt`);
     const existingSessionId = reset ? "" : getExistingCodexSessionId(rootSession);
-    const args = this.buildArgs(project, outputPath, { existingSessionId });
+    const args = this.buildArgs(project, outputPath, { existingSessionId, runtimeOptions });
     args.push("-");
 
     const events = [];
@@ -108,12 +109,14 @@ export class CodexRuntimeAdapter {
         resumedFromSessionId: existingSessionId,
         status: events.length ? "active" : "ephemeral",
         contextPolicy,
+        runtimeOptions: normalizeRuntimeOptions(runtimeOptions, this),
       }),
     };
   }
 
-  buildArgs(project, outputPath, { existingSessionId = "" } = {}) {
+  buildArgs(project, outputPath, { existingSessionId = "", runtimeOptions } = {}) {
     const serviceTierConfig = this.serviceTier ? `service_tier="${this.serviceTier}"` : "";
+    const sandboxMode = runtimeOptions?.sandboxMode || this.sandboxMode;
     const args = existingSessionId ? [
       "exec",
       "resume",
@@ -131,7 +134,7 @@ export class CodexRuntimeAdapter {
       outputPath,
     ];
     if (serviceTierConfig) args.splice(existingSessionId ? 4 : 4, 0, "-c", serviceTierConfig);
-    if (!existingSessionId && this.sandboxMode) args.splice(args.length - 2, 0, "--sandbox", this.sandboxMode);
+    if (!existingSessionId && sandboxMode) args.splice(args.length - 2, 0, "--sandbox", sandboxMode);
     if (this.model) args.push("--model", this.model);
     if (existingSessionId) args.push(existingSessionId);
     return args;
@@ -187,7 +190,7 @@ function extractCodexSessionId(events, stdout) {
   return match?.[1] || "";
 }
 
-function buildRuntimeSession({ project, rootSession, sessionId, resumedFromSessionId, status, contextPolicy }) {
+function buildRuntimeSession({ project, rootSession, sessionId, resumedFromSessionId, status, contextPolicy, runtimeOptions }) {
   return {
     provider: "codex",
     sessionId: sessionId || "",
@@ -196,7 +199,14 @@ function buildRuntimeSession({ project, rootSession, sessionId, resumedFromSessi
     hippoSessionId: rootSession?.id || "",
     status: sessionId ? status : "ephemeral",
     contextPolicy: normalizeContextPolicy(contextPolicy),
+    runtimeOptions: runtimeOptions || {},
     updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeRuntimeOptions(options, adapter) {
+  return {
+    sandboxMode: options?.sandboxMode || adapter.sandboxMode || "",
   };
 }
 
