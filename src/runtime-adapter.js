@@ -72,15 +72,21 @@ export class CodexRuntimeAdapter {
     args.push("-");
 
     const events = [];
+    const collectStreamEvents = createJsonLineCollector();
     const { stdout, stderr } = await runCommand(this.command, args, {
       runId,
       runtimeId: this.id,
       input: prompt,
       timeoutMs: Number(process.env.CODEX_EXEC_TIMEOUT_MS || 300000),
       onStdout: (chunk) => {
-        const parsed = collectJsonEvents(chunk, events);
-        if (parsed.length) parsed.forEach((event) => onEvent?.(normalizeCodexEvent(event, { runId, runtimeId: this.id })));
-        onEvent?.({ type: "stdout", text: chunk });
+        const parsed = collectStreamEvents(chunk);
+        if (parsed.passthrough) onEvent?.({ type: "stdout", text: parsed.passthrough });
+        for (const event of parsed.events) {
+          events.push(event);
+          const normalized = normalizeCodexEvent(event, { runId, runtimeId: this.id });
+          onEvent?.(normalized);
+          if (normalized.text) onEvent?.({ type: "stdout", text: normalized.text });
+        }
       },
       onStderr: (chunk) => onEvent?.({ type: "stderr", text: chunk }),
     });
@@ -161,6 +167,35 @@ function collectJsonEvents(chunk, target) {
   return parsed;
 }
 
+function createJsonLineCollector() {
+  let buffer = "";
+  return (chunk) => {
+    buffer += String(chunk || "");
+    const events = [];
+    const passthrough = [];
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (!trimmed.startsWith("{")) {
+        passthrough.push(line);
+        continue;
+      }
+      try {
+        events.push(JSON.parse(trimmed));
+      } catch {
+        passthrough.push(line);
+      }
+    }
+    if (buffer && !buffer.trimStart().startsWith("{")) {
+      passthrough.push(buffer);
+      buffer = "";
+    }
+    return { events, passthrough: passthrough.join("\n") };
+  };
+}
+
 function getExistingCodexSessionId(rootSession) {
   return rootSession?.runtimeSessions?.codex?.sessionId || "";
 }
@@ -223,8 +258,7 @@ function normalizeContextPolicy(policy) {
 
 function normalizeCodexEvent(event, { runId, runtimeId }) {
   const type = event?.type || "unknown";
-  const item = event?.item || {};
-  const text = item.text || event.text || event.delta || "";
+  const text = extractEventText(event);
   const mappedType = {
     "thread.started": "runtime_session_started",
     "turn.started": "runtime_turn_started",
@@ -242,6 +276,36 @@ function normalizeCodexEvent(event, { runId, runtimeId }) {
     text,
     payload: event,
   };
+}
+
+function extractEventText(value) {
+  if (!value || typeof value !== "object") return "";
+  const direct = [
+    value.delta,
+    value.text,
+    value.message,
+    value.output_text,
+    value.item?.text,
+    value.item?.delta,
+    value.item?.message,
+    value.item?.output_text,
+  ].find((item) => typeof item === "string" && item);
+  if (direct) return direct;
+  const content = value.content || value.item?.content || value.data?.content || value.payload?.content;
+  return extractContentText(content);
+}
+
+function extractContentText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((item) => {
+      if (typeof item === "string") return item;
+      if (!item || typeof item !== "object") return "";
+      return item.text || item.delta || item.output_text || "";
+    })
+    .filter(Boolean)
+    .join("");
 }
 
 function cancelRuntimeProcess(runId) {

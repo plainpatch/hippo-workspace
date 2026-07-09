@@ -177,6 +177,7 @@ Status as of the current implementation:
 - Codex session mapping records the previous resumed Codex session and context policy. Normal turns resume Codex context; `reset` and `manual-summary` start fresh runtime context, with manual summaries injected into the prompt.
 - Main app conversations now persist message-level run metadata, including workspace id, agent/runtime selection, context strategy, run id, and assistant runtime context policy/status.
 - Single-turn Codex sandbox overrides are supported from UI/API/MCP and are recorded in request/message/runtime metadata.
+- Codex JSONL streaming is normalized so structured runtime events remain trace data while extracted text deltas are streamed to the chat surface.
 
 Remaining product hardening:
 
