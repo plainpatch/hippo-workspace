@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { config } from "./config.js";
 
 const KNOWLEDGE_INDEX_FILE = ".hippo-knowledge-index.json";
@@ -238,8 +238,8 @@ export class ResourceManager {
 
   async recordKnowledgeDocument(relativePath, value) {
     const index = await this.readKnowledgeIndex();
-    index.documents[relativePath] = {
-      id: index.documents[relativePath]?.id || randomUUID(),
+    index.documents[relativePath] = buildKnowledgeDocumentRecord(relativePath, {
+      id: index.documents[relativePath]?.id,
       relativePath,
       title: value.title || path.basename(relativePath),
       type: value.type || "file",
@@ -248,8 +248,10 @@ export class ResourceManager {
       topicPath: value.topicPath || getTopicPath(relativePath),
       ragWorkspaceSlug: value.ragWorkspaceSlug || "",
       documentNames: value.documentNames || [],
-      updatedAt: new Date().toISOString(),
-    };
+      sourceHash: value.sourceHash,
+      sourceSize: value.sourceSize,
+      sourceMtimeMs: value.sourceMtimeMs,
+    });
     await this.writeKnowledgeIndex(index);
     return index.documents[relativePath];
   }
@@ -306,21 +308,153 @@ export class ResourceManager {
     return { domains, topics };
   }
 
-  async syncTopicWorkspace(topicPath) {
+  async syncTopicWorkspace(topicPath, options = {}) {
     const safePath = assertTopicPath(topicPath);
     const drawer = await this.ensureTopicRagWorkspace(safePath);
     const workspaceSlug = drawer.rag?.workspaceSlug;
     const index = await this.readKnowledgeIndex();
-    const documentNames = Object.values(index.documents)
+    const scanned = await this.scanTopicDocuments(safePath);
+    const synced = [];
+    const skipped = [];
+    const errors = [];
+
+    if (workspaceSlug && this.client?.ingestFile) {
+      for (const file of scanned) {
+        const current = index.documents[file.relativePath];
+        const unchanged = !options.force
+          && current?.sourceHash === file.sourceHash
+          && current?.sourceSize === file.sourceSize
+          && (current.documentNames || []).length;
+        if (unchanged) {
+          skipped.push({ relativePath: file.relativePath, reason: "unchanged" });
+          continue;
+        }
+
+        try {
+          const fileBuffer = await fs.readFile(file.absolutePath);
+          const response = await this.client.ingestFile({
+            fileBuffer,
+            fileName: file.fileName,
+            metadata: {
+              title: current?.title || file.fileName,
+              sourcePath: file.relativePath,
+              hippoTopicPath: safePath,
+            },
+            addToWorkspaces: [workspaceSlug],
+          });
+          const documentNames = extractDocumentNames(response);
+          index.documents[file.relativePath] = buildKnowledgeDocumentRecord(file.relativePath, {
+            id: current?.id,
+            title: current?.title || file.fileName,
+            type: "file",
+            drawer: getPrimaryDrawer(file.relativePath),
+            tags: getSecondaryTags(file.relativePath),
+            topicPath: safePath,
+            ragWorkspaceSlug: workspaceSlug,
+            documentNames,
+            sourceHash: file.sourceHash,
+            sourceSize: file.sourceSize,
+            sourceMtimeMs: file.sourceMtimeMs,
+          });
+          synced.push({
+            relativePath: file.relativePath,
+            documentNames,
+            previousDocumentNames: current?.documentNames || [],
+          });
+        } catch (error) {
+          errors.push({
+            relativePath: file.relativePath,
+            error: error.message || "RAG document upload failed.",
+          });
+        }
+      }
+      if (synced.length) await this.writeKnowledgeIndex(index);
+    } else {
+      for (const file of scanned) {
+        if (index.documents[file.relativePath]?.documentNames?.length) {
+          skipped.push({ relativePath: file.relativePath, reason: "already-indexed" });
+          continue;
+        }
+        index.documents[file.relativePath] = buildKnowledgeDocumentRecord(file.relativePath, {
+          id: index.documents[file.relativePath]?.id,
+          title: file.fileName,
+          type: "file",
+          drawer: getPrimaryDrawer(file.relativePath),
+          tags: getSecondaryTags(file.relativePath),
+          topicPath: safePath,
+          ragWorkspaceSlug: workspaceSlug || "",
+          documentNames: [],
+          sourceHash: file.sourceHash,
+          sourceSize: file.sourceSize,
+          sourceMtimeMs: file.sourceMtimeMs,
+        });
+        synced.push({ relativePath: file.relativePath, documentNames: [] });
+      }
+      if (synced.length) await this.writeKnowledgeIndex(index);
+    }
+
+    const nextIndex = synced.length ? await this.readKnowledgeIndex() : index;
+    const documentNames = Object.values(nextIndex.documents)
       .filter((item) => item.topicPath === safePath || getTopicPath(item.relativePath) === safePath)
       .flatMap((item) => item.documentNames || []);
     if (workspaceSlug && documentNames.length && this.client?.updateWorkspaceEmbeddings) {
       await this.client.updateWorkspaceEmbeddings(workspaceSlug, {
         adds: dedupe(documentNames),
-        deletes: [],
+        deletes: dedupe(synced.flatMap((item) => item.previousDocumentNames || [])),
       });
     }
-    return { topicPath: safePath, workspaceSlug, documentNames: dedupe(documentNames) };
+    const status = workspaceSlug
+      ? errors.length ? "partial" : "synced"
+      : drawer.rag?.status || "pending";
+    await this.upsertDrawerMetadata(safePath, {
+      metadata: drawer.metadata || {},
+      rag: {
+        ...(drawer.rag || {}),
+        providerId: drawer.rag?.providerId || (workspaceSlug ? "anythingllm" : "unconfigured"),
+        workspaceSlug: workspaceSlug || "",
+        status,
+        documentCount: Object.values(nextIndex.documents)
+          .filter((item) => item.topicPath === safePath || getTopicPath(item.relativePath) === safePath)
+          .length,
+        syncedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        error: errors[0]?.error || drawer.rag?.error || "",
+      },
+    });
+    return {
+      topicPath: safePath,
+      workspaceSlug,
+      documentNames: dedupe(documentNames),
+      scanned: scanned.length,
+      synced,
+      skipped,
+      errors,
+      status,
+    };
+  }
+
+  async scanTopicDocuments(topicPath) {
+    const safePath = assertTopicPath(topicPath);
+    const topicDir = path.join(this.knowledgeDir, safePath);
+    const files = await listFiles(topicDir).catch((error) => {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    });
+    const result = [];
+    for (const absolutePath of files) {
+      const stat = await fs.stat(absolutePath);
+      const buffer = await fs.readFile(absolutePath);
+      const relativePath = toPosix(path.relative(this.knowledgeDir, absolutePath));
+      result.push({
+        absolutePath,
+        relativePath,
+        fileName: path.basename(absolutePath),
+        sourceHash: createHash("sha256").update(buffer).digest("hex"),
+        sourceSize: stat.size,
+        sourceMtimeMs: stat.mtimeMs,
+      });
+    }
+    return result.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
   }
 
   async getTopicWorkspaceForDir(relativeDir) {
@@ -500,6 +634,39 @@ function extractDocumentNames(response) {
     }
   }
   return dedupe(candidates.map(String));
+}
+
+function buildKnowledgeDocumentRecord(relativePath, value = {}) {
+  return {
+    id: value.id || randomUUID(),
+    relativePath,
+    title: value.title || path.basename(relativePath),
+    type: value.type || "file",
+    drawer: value.drawer || getPrimaryDrawer(relativePath),
+    tags: value.tags || getSecondaryTags(relativePath),
+    topicPath: value.topicPath || getTopicPath(relativePath),
+    ragWorkspaceSlug: value.ragWorkspaceSlug || "",
+    documentNames: value.documentNames || [],
+    sourceHash: value.sourceHash || "",
+    sourceSize: Number.isFinite(value.sourceSize) ? value.sourceSize : undefined,
+    sourceMtimeMs: Number.isFinite(value.sourceMtimeMs) ? value.sourceMtimeMs : undefined,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function listFiles(root) {
+  const entries = await fs.readdir(root, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    if (entry.name.startsWith(".")) continue;
+    const absolutePath = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...await listFiles(absolutePath));
+    } else if (entry.isFile()) {
+      files.push(absolutePath);
+    }
+  }
+  return files;
 }
 
 function slugify(value) {

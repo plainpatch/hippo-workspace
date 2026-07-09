@@ -661,6 +661,9 @@ function renderKnowledgeManager() {
       renderKnowledgeManager();
     });
   });
+  stream.querySelectorAll("[data-sync-topic-path]").forEach((button) => {
+    button.addEventListener("click", () => syncKnowledgeTopic(button.dataset.syncTopicPath, button));
+  });
   stream.scrollTop = 0;
 }
 
@@ -697,7 +700,10 @@ function renderKnowledgeDetail(node, domains) {
         <span>${isDomain ? "一级知识库" : "二级主题"}</span>
         <h2>${escapeHtml(node.title || node.name)}</h2>
       </div>
-      <small>${node.path}</small>
+      <div class="knowledgeDetailActions">
+        <small>${escapeHtml(node.path)}</small>
+        ${isDomain ? "" : `<button data-sync-topic-path="${escapeHtml(node.path)}" type="button">同步 RAG</button>`}
+      </div>
     </div>
     ${renderKnowledgeMetadataForm(node, `${isDomain ? `${topics.length} 主题 · ` : ""}${documents.length} 文档`)}
     ${isDomain ? renderKnowledgeTopicCreator(node) : ""}
@@ -712,6 +718,11 @@ function renderKnowledgeDetail(node, domains) {
         <dt>层级</dt><dd>${isDomain ? "一级知识库 / 领域类型" : "二级主题 / 细分知识类型"}</dd>
         <dt>工作区引用</dt><dd>${isDomain ? "工作区引用此一级知识库后，检索包含其下主题。" : "二级主题可在工作区设置中勾选为检索筛选项。"}</dd>
         <dt>文档数</dt><dd>${documents.length}</dd>
+        ${isDomain ? "" : `
+          <dt>RAG Workspace</dt><dd>${escapeHtml(node.rag?.workspaceSlug || "未创建")}</dd>
+          <dt>RAG 状态</dt><dd>${escapeHtml(node.rag?.status || "pending")}</dd>
+          <dt>最近同步</dt><dd>${escapeHtml(node.rag?.syncedAt || "未同步")}</dd>
+        `}
       </dl>
     </div>
   `;
@@ -760,6 +771,7 @@ function renderKnowledgeDocumentList(documents) {
         <div class="knowledgeDirectoryItem static">
           <strong>${escapeHtml(doc.name)}</strong>
           <span>${escapeHtml(doc.path)}</span>
+          ${doc.documentNames?.length ? `<small>${escapeHtml(doc.documentNames.length)} RAG 文档</small>` : ""}
         </div>
       `).join("")}
     </div>
@@ -853,6 +865,31 @@ async function saveKnowledgeMetadata(event) {
   renderProjectKnowledgeTree([]);
   renderKnowledgeManager();
   toast("知识库元信息已保存。");
+}
+
+async function syncKnowledgeTopic(topicPath, button) {
+  if (!topicPath) return;
+  const original = button?.textContent || "同步 RAG";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "同步中";
+  }
+  try {
+    const result = await request("/api/knowledge/topics/sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ topicPath }),
+    });
+    state.knowledge = await request("/api/knowledge");
+    renderKnowledgeManager();
+    toast(`同步完成：扫描 ${result.scanned || 0} 个，更新 ${result.synced?.length || 0} 个。`);
+  } catch (error) {
+    toast(`同步失败：${error.message}`);
+    if (button) {
+      button.disabled = false;
+      button.textContent = original;
+    }
+  }
 }
 
 function setActiveSystemNav(view) {

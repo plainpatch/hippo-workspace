@@ -259,6 +259,20 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "hippo_sync_knowledge_topic",
+    {
+      title: "Sync knowledge topic",
+      description:
+        "Scan a second-level Hippo knowledge topic folder, upload new or changed files to its topic-level RAG workspace, and refresh embeddings.",
+      inputSchema: {
+        topicPath: z.string().min(1),
+        force: z.boolean().default(false),
+      },
+    },
+    async ({ topicPath, force }) => jsonContent(await resourceManager.syncTopicWorkspace(topicPath, { force }))
+  );
+
+  server.registerTool(
     "hippo_project_rag_plan",
     {
       title: "Plan workspace RAG scope",

@@ -179,6 +179,7 @@ Exposed MCP tools:
 - `hippo_create_agent`
 - `hippo_get_agent`
 - `hippo_workspace_knowledge`
+- `hippo_sync_knowledge_topic`
 - `hippo_workspace_rag_plan`
 - `hippo_workspace_rag_search`
 - `hippo_execute_workspace_task`
@@ -247,6 +248,18 @@ curl -X POST http://localhost:8787/api/knowledge/text \
     "textContent": "AnythingLLM 接入说明..."
   }'
 ```
+
+Sync a second-level topic folder into its mapped RAG workspace:
+
+```sh
+curl -X POST http://localhost:8787/api/knowledge/topics/sync \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "topicPath": "platform/anythingllm"
+  }'
+```
+
+This scans files under the Hippo topic folder, uploads new or changed files to the topic-level AnythingLLM workspace, records returned document names in the Hippo knowledge index, and refreshes workspace embeddings.
 
 Plan a workspace-scoped RAG retrieval before searching:
 

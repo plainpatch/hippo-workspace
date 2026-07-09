@@ -174,6 +174,7 @@ Status as of the current implementation:
 - Phase 5: implemented for automatic execution. DAG runs expand deterministically, ready nodes are scheduled by dependency order, parallel branches use independent runtime sessions, and terminal outputs are collected into the run output.
 - Phase 6: implemented as a first stateful API/MCP surface. Tools can validate graph prototypes, create/read/advance/cancel/retry runs, inspect node runs, and append/list trace events.
 - Workspace RAG scope planning is implemented as API/MCP. A model can first read the authorized knowledge domains/topics, then call scoped search against topic-level RAG workspaces. Search requests are intersected with the workspace's configured knowledge authorization.
+- Topic-level RAG synchronization is implemented as API/UI/MCP. Hippo scans second-level topic folders, uploads new or changed files to the mapped AnythingLLM workspace, stores returned document names, and refreshes embeddings before retrieval.
 - Codex session mapping records the previous resumed Codex session and context policy. Normal turns resume Codex context; `reset` and `manual-summary` start fresh runtime context, with manual summaries injected into the prompt.
 - Main app conversations now persist message-level run metadata, including workspace id, agent/runtime selection, context strategy, run id, and assistant runtime context policy/status.
 - Single-turn Codex sandbox overrides are supported from UI/API/MCP and are recorded in request/message/runtime metadata.

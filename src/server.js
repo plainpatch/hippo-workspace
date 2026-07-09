@@ -94,6 +94,10 @@ app.post("/api/knowledge/topics", asyncHandler(async (req, res) => {
   res.json(await resourceManager.createKnowledgeTopic(req.body));
 }));
 
+app.post("/api/knowledge/topics/sync", asyncHandler(async (req, res) => {
+  res.json(await resourceManager.syncTopicWorkspace(req.body.topicPath, { force: Boolean(req.body.force) }));
+}));
+
 app.post("/api/knowledge/text", asyncHandler(async (req, res) => {
   res.json(await resourceManager.ingestKnowledgeText(req.body));
 }));

@@ -1648,6 +1648,32 @@ dd {
   font-size: 12px;
 }
 
+.knowledgeDetailActions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.knowledgeDetailActions small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.knowledgeDetailActions button {
+  min-height: 28px;
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border-color: var(--line-strong);
+  background: #242424;
+  font-size: 12px;
+}
+
+.knowledgeDetailActions button:disabled {
+  cursor: default;
+  opacity: 0.64;
+}
+
 .knowledgeDetailSection {
   display: grid;
   gap: 8px;
