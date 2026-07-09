@@ -647,7 +647,7 @@ dd {
 }
 
 .chatStream:empty::before {
-  content: "选择左侧项目后开始对话";
+  content: "选择左侧工作区后开始对话";
   display: block;
   max-width: 860px;
   margin: 20vh auto 0;
@@ -706,6 +706,165 @@ dd {
   background: #222222;
 }
 
+.runSummary {
+  max-width: 720px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 10px;
+  background: #1b1b1b;
+}
+
+.runSummaryHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.runSummaryHeader strong {
+  font-size: 13px;
+}
+
+.runStatus {
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  padding: 2px 7px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.runStatus.completed {
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #8ce2bd;
+}
+
+.runStatus.running {
+  border-color: rgba(59, 130, 246, 0.42);
+  color: #9bc3ff;
+}
+
+.runStatus.waiting {
+  border-color: rgba(245, 158, 11, 0.44);
+  color: #f6c164;
+}
+
+.runStatus.failed,
+.runStatus.cancelled {
+  border-color: rgba(239, 68, 68, 0.42);
+  color: #ff9b9b;
+}
+
+.runSummary > small {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--muted);
+}
+
+.runNodeList {
+  display: grid;
+  gap: 6px;
+}
+
+.runNode {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  padding: 7px 8px;
+  background: #222222;
+}
+
+.runNode span,
+.runNode small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runNode span {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.runNode small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.runNode.completed {
+  border-color: rgba(16, 185, 129, 0.26);
+}
+
+.runNode.running {
+  border-color: rgba(59, 130, 246, 0.3);
+}
+
+.runNode.waiting {
+  border-color: rgba(245, 158, 11, 0.32);
+}
+
+.inboxPage {
+  max-width: var(--chat-width);
+  margin: 0 auto;
+  display: grid;
+  gap: 12px;
+}
+
+.inboxItem {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 12px;
+  background: #1b1b1b;
+}
+
+.inboxItemHeader {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.inboxItemHeader div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.inboxItemHeader strong,
+.inboxItemHeader small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inboxItemHeader small,
+.inboxItem p {
+  color: var(--muted);
+}
+
+.inboxItem p {
+  margin: 0;
+  font-size: 13px;
+}
+
+.inboxItem textarea {
+  min-height: 92px;
+}
+
+.inboxActions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .composer {
   width: min(var(--chat-width), calc(100vw - var(--sidebar-width) - 56px));
   margin: 0 auto 18px;
@@ -760,6 +919,16 @@ dd {
   background: rgba(255, 255, 255, 0.08);
 }
 
+.composerTools .stopExecutionButton {
+  border-color: rgba(239, 68, 68, 0.42);
+  color: #fecaca;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.composerTools .stopExecutionButton:hover {
+  background: rgba(239, 68, 68, 0.2);
+}
+
 .modeSelect {
   display: flex;
   align-items: center;
@@ -773,6 +942,20 @@ dd {
   border-color: rgba(255, 255, 255, 0.12);
   border-radius: 8px;
   background: #1e1e1e;
+}
+
+.contextSummaryInput {
+  width: 100%;
+  min-height: 48px;
+  max-height: 96px;
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: #1e1e1e;
+  color: #f4f4f5;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .dryRunToggle {
@@ -898,6 +1081,81 @@ dd {
   gap: 10px;
 }
 
+.dagFields {
+  display: grid;
+  gap: 12px;
+}
+
+.dagBuilder {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 10px;
+  background: #1b1b1b;
+}
+
+.dagBuilderHeader,
+.dagPreviewRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dagBuilderHeader button,
+.dagPreviewRow button,
+.dagBuilderPanel button {
+  min-height: 28px;
+  padding: 4px 8px;
+}
+
+.dagBuilderGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dagBuilderPanel {
+  display: grid;
+  gap: 8px;
+}
+
+.dagGraphPreview {
+  display: grid;
+  gap: 8px;
+}
+
+.dagPreviewSection {
+  display: grid;
+  gap: 6px;
+}
+
+.dagPreviewSection strong {
+  color: #f1f1f1;
+  font-size: 12px;
+}
+
+.dagPreviewSection small {
+  color: var(--muted);
+}
+
+.dagPreviewRow {
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  padding: 6px 8px;
+  background: #222222;
+}
+
+.dagPreviewRow span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
 .drawerSection {
   margin-top: 18px;
   border-top: 1px solid var(--line);
@@ -932,6 +1190,21 @@ dd {
   border-radius: 7px;
   padding: 6px;
   background: #1d1d1d;
+}
+
+.knowledgeFilterInput {
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  padding: 6px 9px;
+  background: #1d1d1d;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.knowledgeFilterInput::placeholder {
+  color: var(--faint);
 }
 
 .knowledgeNode {
@@ -1335,6 +1608,55 @@ dd {
 .knowledgeEmptyDetail {
   display: grid;
   gap: 6px;
+}
+
+.settingsPanel {
+  width: min(var(--chat-width), calc(100vw - var(--sidebar-width) - 56px));
+  margin: 0 auto;
+  padding: 12px 0 36px;
+}
+
+.settingsForm {
+  display: grid;
+  gap: 14px;
+}
+
+.settingsSection {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #202020;
+}
+
+.settingsSection h2 {
+  margin: 0;
+  color: #f4f4f5;
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.settingsSection label {
+  display: grid;
+  gap: 7px;
+  color: #d8d8dc;
+  font-size: 13px;
+}
+
+.settingsSection input,
+.settingsSection select {
+  width: 100%;
+  min-height: 36px;
+  border-color: rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: #1a1a1a;
+  color: #f4f4f5;
+}
+
+.settingsSection small {
+  color: var(--muted);
+  line-height: 1.45;
 }
 
 .kv {

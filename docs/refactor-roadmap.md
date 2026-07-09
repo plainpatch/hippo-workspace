@@ -6,46 +6,46 @@ Hippo is an Agent App shell and orchestration layer over agent runtimes. It shou
 
 The app must support multiple runtimes through adapters. The current implementation target is Codex, with Claude, Hermes, and other runtimes left as adapter extensions.
 
-Hippo owns an app system path. New projects are created under the app-managed `projects/` directory, not arbitrary user-selected filesystem roots. Runtime, app home, project path, knowledge path, and RAG provider are app settings.
+Hippo owns an app system path. New workspaces are created under the app-managed `projects/` directory, not arbitrary user-selected filesystem roots. Runtime, app home, workspace path, knowledge path, and RAG provider are app settings.
 
-Agents are global definitions. A project references the global agents it enables, and a conversation inside that project can switch between those enabled agents. Conversation history belongs to the project; individual messages may record which agent was used.
+Agents are global definitions. A workspace references the global agents it enables, and a conversation inside that workspace can switch between those enabled agents. Conversation history belongs to the workspace; individual messages may record which agent was used.
 
 AnythingLLM is only a RAG provider dependency. It must not be the agent conversation runtime. The app should keep RAG behind a `RagProvider` abstraction so AnythingLLM can be replaced later.
 
 The knowledge base is app-system-level. It uses a constrained drawer model:
 
 - primary drawer: domain and authorization boundary
-- secondary drawer: tag/type filter only
+- secondary drawer: topic/type filter mapped to a topic-level RAG workspace
 
-Projects reference primary drawers. RAG and system MCP search must only retrieve from drawers referenced by the current project. Secondary drawers can narrow retrieval but cannot grant access.
+Workspaces reference primary drawers. RAG and system MCP search must only retrieve from drawers referenced by the current workspace. Secondary drawers can narrow retrieval but cannot grant access.
 
 ## Current Code Drift
 
 - Execution was centered on AnythingLLM workspace chat instead of a runtime adapter.
 - Project records were named `agentWorkspaces` and treated as AnythingLLM-bound workspaces.
-- Agent definitions carried `knowledgeRefs`, which made knowledge authorization agent-scoped instead of project-scoped.
+- Agent definitions carried `knowledgeRefs`, which made knowledge authorization agent-scoped instead of workspace-scoped.
 - Knowledge paths allowed arbitrary nesting and had no explicit primary/secondary drawer metadata model.
-- MCP exposed raw AnythingLLM tools but did not expose project-scoped system RAG APIs.
+- MCP exposed raw AnythingLLM tools but did not expose workspace-scoped system RAG APIs.
 - App system paths were mostly environment variables and repo-local defaults, not an explicit settings boundary.
 
 ## Phase Targets
 
 ### Phase 1: Architectural Boundaries
 
-- Add app settings for app home, runtime, project path, knowledge path, and RAG provider.
+- Add app settings for app home, runtime, workspace path, knowledge path, and RAG provider.
 - Add `RuntimeAdapter` and register Codex as the first runtime.
 - Add `RagProvider` and keep AnythingLLM behind it.
-- Keep global agents independent from projects.
-- Add project `agentIds` and `knowledgeDrawerRefs`.
-- Make project knowledge authorization primary-drawer-scoped.
-- Expose project-scoped MCP search APIs.
-- Remove legacy `/api/agent-workspaces` compatibility and expose only `/api/projects`.
+- Keep global agents independent from workspaces.
+- Add workspace `agentIds`, `knowledgeDrawerRefs`, and `knowledgeTopicRefs`.
+- Make workspace knowledge authorization primary-drawer-scoped.
+- Expose workspace-scoped MCP search APIs.
+- Remove legacy `/api/agent-workspaces` compatibility and expose `/api/workspaces`, retaining `/api/projects` only as a compatibility alias while older clients migrate.
 
 ### Phase 2: Domain Rename and Migration
 
 - Finish removing remaining internal migration names from store and service code.
 - Add explicit store migrations from version 1 to version 2.
-- Persist project-scoped conversations.
+- Persist workspace-scoped conversations.
 - Record selected agent per message.
 - Keep Agent-level knowledge authorization out of UI, MCP, and store writes.
 
@@ -66,6 +66,6 @@ Projects reference primary drawers. RAG and system MCP search must only retrieve
 ### Phase 5: Product Polish
 
 - Improve settings UI.
-- Add project creation/import flows under the app system path.
-- Add agent switching history in project conversations.
+- Add workspace creation/import flows under the app system path.
+- Add agent switching history in workspace conversations.
 - Add validation and diagnostics for runtime, MCP, skills, and RAG provider configuration.

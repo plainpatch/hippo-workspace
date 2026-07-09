@@ -1,6 +1,6 @@
 # hippo
 
-Hippo is an Agent App shell for project-scoped agent orchestration. It is designed to adapt agent runtimes such as Codex, Claude, or Hermes; the current runtime adapter is Codex. AnythingLLM is used only as the current RAG provider and is intentionally hidden behind a provider abstraction.
+Hippo is an Agent App shell for workspace-scoped agent orchestration. It is designed to adapt agent runtimes such as Codex, Claude, or Hermes; the current runtime adapter is Codex. AnythingLLM is used only as the current RAG provider and is intentionally hidden behind a provider abstraction.
 
 See [docs/refactor-roadmap.md](docs/refactor-roadmap.md) for the active requirement alignment, current code drift, and phased refactor targets.
 
@@ -39,13 +39,13 @@ Open the wrapper console at http://localhost:8787.
 
 The console supports:
 
-- creating Hippo projects under the app system path
+- creating Hippo workspaces under the app system path
 - creating global Agent definitions
-- enabling global Agents per project
-- assigning first-level knowledge drawers to projects
+- enabling global Agents per workspace
+- assigning knowledge libraries and topic filters to workspaces
 - ingesting raw text and files into the system knowledge base
-- project-scoped chat through the configured runtime
-- project-scoped RAG search through the configured RAG provider
+- workspace-scoped chat through the configured runtime
+- workspace-scoped RAG search through the configured RAG provider
 
 ## Resource directory model
 
@@ -53,14 +53,14 @@ The app uses one system resource root, configurable through app settings and env
 
 ```text
 ~/.hippo/
-  projects/    # one local directory per Hippo project
+  projects/    # one local directory per Hippo workspace
   knowledge/   # system-level knowledge drawers
-  agents/      # global agent and project store
+  agents/      # global agent and workspace store
 ```
 
-When a project is created, Hippo creates a folder under the app-managed `projects/` directory. Projects reference global agents and first-level knowledge drawers.
+When a workspace is created, Hippo creates a folder under the app-managed `projects/` directory. Workspaces reference global agents, first-level knowledge libraries, and optional second-level topic filters.
 
-The knowledge base is system-level. It uses a controlled drawer model under `knowledge/`: first-level drawers are authorization boundaries, while second-level drawers are tags for filtering. Projects do not own those files directly. A project grants RAG access by listing first-level drawers in `knowledgeDrawerRefs`.
+The knowledge base is system-level. It uses a controlled drawer model under `knowledge/`: first-level drawers are authorization boundaries, while second-level drawers are topic filters mapped to topic-level RAG workspaces. Workspaces do not own those files directly. A workspace grants RAG access by listing first-level drawers in `knowledgeDrawerRefs` and can narrow retrieval with `knowledgeTopicRefs`.
 
 The Docker wrapper mounts the resource root at `/app/resources`:
 
@@ -87,7 +87,7 @@ Runtime dependencies are still local:
 
 ## Chrome extension
 
-The companion Chrome extension lives in `apps/chrome-extension`. It opens as a Chrome side panel, loads Hippo projects, provides a project-scoped chat surface, and clips the current page or selected text into the Hippo system knowledge base.
+The companion Chrome extension lives in `apps/chrome-extension`. It opens as a Chrome side panel, loads Hippo workspaces, provides a workspace-scoped chat surface, and clips the current page or selected text into the Hippo system knowledge base.
 
 One-click developer install:
 
@@ -112,12 +112,12 @@ http://localhost:8787
 
 Side panel capabilities:
 
-- select and load a Hippo project
-- chat with the selected project's agent
+- select and load a Hippo workspace
+- chat with the selected workspace's agent
 - pass the current page title and URL as runtime context during chat
 - read the current page title, URL, selected text, and page text summary
 - save content into `resources/knowledge/<目录>`
-- optionally associate the knowledge directory with a Hippo project
+- optionally associate the knowledge directory with a Hippo workspace
 - open the local Hippo workbench
 
 Context menu:
@@ -126,7 +126,7 @@ Context menu:
 - right click
 - choose "保存选中文本到 Hippo 知识库"
 
-The context menu uses the default knowledge directory and default project selected in the side panel.
+The context menu uses the default knowledge directory and default workspace selected in the side panel.
 
 ## Run the wrapper locally without Docker
 
@@ -171,35 +171,37 @@ http://localhost:8787/mcp
 Exposed MCP tools:
 
 - `hippo_get_settings`
-- `hippo_list_projects`
-- `hippo_create_project`
-- `hippo_get_project`
-- `hippo_update_project`
+- `hippo_list_workspaces`
+- `hippo_create_workspace`
+- `hippo_get_workspace`
+- `hippo_update_workspace`
 - `hippo_list_agents`
 - `hippo_create_agent`
 - `hippo_get_agent`
-- `hippo_project_knowledge`
-- `hippo_project_rag_search`
-- `hippo_execute_project_task`
+- `hippo_workspace_knowledge`
+- `hippo_workspace_rag_plan`
+- `hippo_workspace_rag_search`
+- `hippo_execute_workspace_task`
 
 ## Agent orchestration layer
 
-The wrapper separates projects from agents:
+The wrapper separates workspaces from agents:
 
-- project: name, description, app-managed local directory, enabled global agents, and authorized first-level knowledge drawers
+- workspace: name, description, app-managed local directory, enabled global agents, authorized first-level knowledge libraries, and selected topic filters
 - agent: name, description, system prompt, runtime, skills, MCP access, and optional extra RAG document names
-- task execution: runs inside a selected project and may load one project-enabled agent for that turn
+- task execution: runs inside a selected workspace and may load one workspace-enabled agent for that turn
 
-Create a project:
+Create a workspace:
 
 ```sh
-curl -X POST http://localhost:8787/api/projects \
+curl -X POST http://localhost:8787/api/workspaces \
   -H 'Content-Type: application/json' \
   -d '{
-    "name": "docs-project",
-    "description": "Documentation project",
+    "name": "docs-workspace",
+    "description": "Documentation workspace",
     "agentIds": ["<agent-id>"],
-    "knowledgeDrawerRefs": ["platform"]
+    "knowledgeDrawerRefs": ["platform"],
+    "knowledgeTopicRefs": ["platform/api-docs"]
   }'
 ```
 
@@ -246,19 +248,52 @@ curl -X POST http://localhost:8787/api/knowledge/text \
   }'
 ```
 
+Plan a workspace-scoped RAG retrieval before searching:
+
+```sh
+curl -X POST http://localhost:8787/api/workspaces/<workspace-id>/rag-plan \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "drawerRefs": ["platform"],
+    "topicRefs": ["platform/anythingllm"]
+  }'
+```
+
+The plan endpoint returns only the intersection of the requested scope and the workspace authorization. First-level knowledge libraries are the authorization boundary; second-level topics are filters mapped to topic-level RAG workspaces.
+
+Search the selected RAG scope:
+
+```sh
+curl -X POST http://localhost:8787/api/workspaces/<workspace-id>/rag-search \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query": "AnythingLLM workspace 如何更新向量索引？",
+    "topicRefs": ["platform/anythingllm"],
+    "topN": 4
+  }'
+```
+
 Execute a task in a workspace and load an agent for this turn:
 
 ```sh
-curl -X POST http://localhost:8787/api/projects/<project-id>/execute \
+curl -X POST http://localhost:8787/api/workspaces/<workspace-id>/execute \
   -H 'Content-Type: application/json' \
   -d '{
     "agentId": "<agent-id>",
     "task": "根据知识库说明这个模块的接入步骤。",
-    "mode": "query"
+    "mode": "query",
+    "sessionId": "<hippo-conversation-id>",
+    "contextStrategy": "runtime"
   }'
 ```
 
-Project and agent definitions are persisted under the configured app home, by default `~/.hippo/agents/agent-store.json`.
+Hippo conversations are root sessions. For the Codex runtime, Hippo stores the Codex session id under `conversation.runtimeSessions.codex.sessionId` and resumes it on later turns by default. `contextStrategy` controls this behavior:
+
+- `runtime`: keep Codex's runtime-managed multi-turn context.
+- `reset`: start a fresh Codex runtime session for the turn.
+- `manual-summary`: start a fresh Codex runtime session and inject `contextSummary` into the prompt as the compressed prior context.
+
+Workspace and agent definitions are persisted under the configured app home, by default `~/.hippo/agents/agent-store.json`.
 
 ## Stop
 

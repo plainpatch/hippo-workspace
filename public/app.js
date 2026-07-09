@@ -8,7 +8,12 @@ const state = {
   conversations: [],
   collapsedProjectIds: new Set(),
   selectedKnowledgePath: "",
+  workspaceKnowledgeSelection: {
+    drawers: new Set(),
+    topics: new Set(),
+  },
   currentView: "chat",
+  activeRun: null,
   messages: [],
 };
 
@@ -32,21 +37,34 @@ function bindEvents() {
   document.getElementById("searchBtn")?.addEventListener("click", () => toast("搜索入口已预留。"));
   document.getElementById("agentsBtn").addEventListener("click", showAgentsPage);
   document.getElementById("knowledgeBtn").addEventListener("click", showKnowledgePage);
+  document.getElementById("inboxBtn")?.addEventListener("click", showInboxPage);
   document.getElementById("mcpBtn").addEventListener("click", showMcpMessage);
   document.getElementById("runtimeBtn").addEventListener("click", showRuntimeMessage);
-  document.getElementById("settingsBtn").addEventListener("click", openDrawer);
+  document.getElementById("settingsBtn").addEventListener("click", showSettingsPage);
   document.getElementById("createProjectBtn").addEventListener("click", () => openProjectForm());
   document.getElementById("projectConfigBtn").addEventListener("click", () => {
     if (state.currentView === "agents") openAgentForm();
     else if (state.currentView === "knowledge") focusKnowledgeCreateAction();
+    else if (state.currentView === "inbox") showInboxPage();
+    else if (state.currentView === "settings") refreshSettingsPage();
     else openProjectForm(getActiveProject());
   });
   document.getElementById("closeDrawerBtn").addEventListener("click", closeDrawer);
   document.getElementById("attachTextBtn").addEventListener("click", openDrawer);
 
   document.getElementById("projectForm").addEventListener("submit", saveProject);
+  document.getElementById("projectKnowledgeFilter")?.addEventListener("input", () => {
+    const active = getActiveProject();
+    renderProjectKnowledgeTreeFromForm(active);
+  });
   document.getElementById("agentForm").addEventListener("submit", saveAgent);
+  document.getElementById("agentTypeSelect")?.addEventListener("change", syncAgentTypeFields);
+  document.getElementById("addDagNodeBtn")?.addEventListener("click", addDagNodeFromBuilder);
+  document.getElementById("addDagEdgeBtn")?.addEventListener("click", addDagEdgeFromBuilder);
+  document.getElementById("syncDagJsonBtn")?.addEventListener("click", renderDagBuilderFromJson);
   document.getElementById("composerForm").addEventListener("submit", sendMessage);
+  document.getElementById("contextStrategySelect")?.addEventListener("change", syncContextStrategyFields);
+  document.getElementById("stopExecutionBtn")?.addEventListener("click", cancelActiveRun);
   document.getElementById("quickTextForm").addEventListener("submit", uploadTextToProject);
   messageInput.addEventListener("input", () => resizeComposer(messageInput));
   messageInput.addEventListener("keydown", (event) => {
@@ -79,7 +97,7 @@ async function checkStatus() {
 }
 
 async function loadProjects() {
-  const data = await request("/api/projects");
+  const data = await request("/api/workspaces");
   state.projects = data.projects || [];
   if (!state.activeProjectId && state.projects.length) {
     state.activeProjectId = state.projects[0].id;
@@ -99,7 +117,7 @@ async function loadProjects() {
 }
 
 async function loadConversations(projectId) {
-  const data = await request(`/api/projects/${encodeURIComponent(projectId)}/conversations`);
+  const data = await request(`/api/workspaces/${encodeURIComponent(projectId)}/conversations`);
   state.conversations = data.conversations || [];
   if (state.activeConversationId && !state.conversations.some((item) => item.id === state.activeConversationId)) {
     state.activeConversationId = null;
@@ -109,7 +127,23 @@ async function loadConversations(projectId) {
   }
   const active = getActiveConversation();
   state.messages = active?.messages ? [...active.messages] : [];
+  await refreshMessageRunSummaries(projectId);
   renderProjectList();
+}
+
+async function refreshMessageRunSummaries(projectId) {
+  const runIds = [...new Set((state.messages || []).map((message) => message.runId).filter(Boolean))];
+  if (!runIds.length) return;
+  try {
+    const data = await request(`/api/workspaces/${encodeURIComponent(projectId)}/runs`);
+    const runsById = new Map((data.runs || []).map((run) => [run.id, run]));
+    state.messages = state.messages.map((message) => {
+      const run = runsById.get(message.runId);
+      return run ? { ...message, agentRunSummary: summarizeAgentRun(run) } : message;
+    });
+  } catch {
+    // Run summaries are best-effort UI state; keep messages usable if the run list is unavailable.
+  }
 }
 
 async function loadAgents() {
@@ -121,7 +155,7 @@ async function loadAgents() {
 async function loadKnowledge() {
   const data = await request("/api/knowledge");
   state.knowledge = data;
-  renderProjectKnowledgeTree([]);
+  renderProjectKnowledgeTreeFromForm(getActiveProject());
   if (state.currentView === "knowledge") renderKnowledgeManager();
 }
 
@@ -129,8 +163,8 @@ function renderProjectList() {
   const target = document.getElementById("projectList");
   if (!state.projects.length) {
     target.innerHTML = `
-      <div class="emptyBlock">还没有项目。</div>
-      <button class="emptyCreateProject" data-empty-create-project type="button">新建项目</button>
+      <div class="emptyBlock">还没有工作区。</div>
+      <button class="emptyCreateProject" data-empty-create-project type="button">新建工作区</button>
     `;
     target.querySelector("[data-empty-create-project]")?.addEventListener("click", () => openProjectForm());
     return;
@@ -148,7 +182,7 @@ function renderProjectList() {
           </span>
           ${icons.chevron}
         </button>
-        <button class="projectOptionsButton" data-project-options-id="${escapeHtml(project.id)}" type="button" aria-label="项目选项">${icons.options}</button>
+        <button class="projectOptionsButton" data-project-options-id="${escapeHtml(project.id)}" type="button" aria-label="工作区设置">${icons.options}</button>
         <button class="projectNewConversationButton" data-project-new-conversation-id="${escapeHtml(project.id)}" type="button" aria-label="新增对话">${icons.newConversation}</button>
       </div>
       ${isActive && !isCollapsed ? renderConversationList() : ""}
@@ -226,17 +260,18 @@ function renderActiveProject() {
   const meta = document.getElementById("activeProjectMeta");
   const configButton = document.getElementById("projectConfigBtn");
   const input = document.getElementById("messageInput");
+  setHeaderConfigButton(true);
 
   if (!project) {
-    name.textContent = "选择或创建项目";
-    meta.textContent = "左侧项目是 App 管理的 project；Agent 是全局定义后被 project 引用。";
-    configButton.textContent = "新建项目";
+    name.textContent = "选择或创建工作区";
+    meta.textContent = "左侧工作区由 App 管理；Agent 和知识库都是全局定义后被工作区引用。";
+    configButton.textContent = "新建工作区";
     input.disabled = true;
-    input.placeholder = "请先创建项目";
+    input.placeholder = "请先创建工作区";
     if (!state.messages.length) {
       state.messages = [{
         role: "assistant",
-        text: "先在左侧创建一个 project。Project 管理本地目录、可用 Agent 和知识抽屉授权。",
+        text: "先在左侧创建一个工作区。工作区管理本地目录、可用 Agent 和知识库引用。",
       }];
       renderMessages();
     }
@@ -244,14 +279,14 @@ function renderActiveProject() {
   }
 
   name.textContent = project.name;
-  meta.textContent = `${project.localWorkspaceFolderName || project.id} · ${state.conversations.length} 个会话 · ${project.knowledgeDrawerRefs?.length || 0} 个知识抽屉 · ${project.agentIds?.length || 0} 个 Agent`;
-  configButton.textContent = "项目";
+  meta.textContent = `${project.localWorkspaceFolderName || project.id} · ${state.conversations.length} 个会话 · ${project.knowledgeDrawerRefs?.length || 0} 个知识库 · ${project.knowledgeTopicRefs?.length || 0} 个主题筛选 · ${project.agentIds?.length || 0} 个 Agent`;
+  configButton.textContent = "工作区设置";
   input.disabled = false;
   input.placeholder = `向「${project.name}」提问；可选加载 Agent`;
   if (!state.messages.length) {
     state.messages = [{
       role: "assistant",
-      text: `当前 project 本地目录为「${project.localWorkspacePath || "未记录"}」。对话使用 Codex runtime；AnythingLLM 只作为 RAG provider。`,
+      text: `当前工作区本地目录为「${project.localWorkspacePath || "未记录"}」。对话使用 Codex runtime；AnythingLLM 只作为 RAG provider。`,
     }];
   }
   renderMessages();
@@ -265,6 +300,7 @@ function renderMessages() {
       <div class="messageBody">
         <div class="messageMeta">${message.role === "user" ? "你" : "Hippo Agent"}</div>
         <div class="messageText">${formatMessage(message.text)}</div>
+        ${message.agentRunSummary ? renderAgentRunSummary(message.agentRunSummary) : ""}
       </div>
     </article>
   `).join("");
@@ -275,6 +311,7 @@ function showAgentsPage() {
   state.currentView = "agents";
   setActiveSystemNav("agents");
   document.getElementById("composerForm").classList.add("hidden");
+  setHeaderConfigButton(true);
   document.getElementById("activeProjectName").textContent = "智能体";
   document.getElementById("activeProjectMeta").textContent = "Agent 类似可选插件包，可以预置提示词和多个 Skill；不加载 Agent 也能执行。";
   document.getElementById("projectConfigBtn").textContent = "新建 Agent";
@@ -288,7 +325,7 @@ function showAgentsPage() {
         <button class="agentCard" data-agent-id="${escapeHtml(agent.id)}" type="button">
           <strong>${escapeHtml(agent.name)}</strong>
           <span>${escapeHtml(agent.description || "未填写说明")}</span>
-      <small>${(agent.skills || []).length} 个 Skill · ${(agent.mcpServers || []).length} 个 MCP · ${agent.runtimeId || "codex"}</small>
+      <small>${agent.type === "dag" ? `DAG · ${(agent.nodes || []).length} 节点` : "单节点"} · v${agent.version || 1} · ${(agent.skills || []).length} Skill · ${agent.runtimeId || "codex"}</small>
         </button>
       `).join("") : `<div class="emptyBlock">还没有 Agent。可以先直接使用通用助手执行任务；需要预置提示词或组合 Skill 时再创建 Agent。</div>`}
     </div>
@@ -307,10 +344,176 @@ function showKnowledgePage() {
   setActiveSystemNav("knowledge");
   closeDrawer();
   document.getElementById("composerForm").classList.add("hidden");
+  setHeaderConfigButton(true);
   document.getElementById("activeProjectName").textContent = "知识库";
   document.getElementById("activeProjectMeta").textContent = "系统路径 knowledge 下的两级目录：一级知识库表示领域类型，二级主题表示领域下的细分知识类型。";
   document.getElementById("projectConfigBtn").textContent = "新建主题";
   renderKnowledgeManager();
+}
+
+async function showInboxPage() {
+  state.currentView = "inbox";
+  setActiveSystemNav("inbox");
+  closeDrawer();
+  document.getElementById("composerForm").classList.add("hidden");
+  setHeaderConfigButton(true);
+  document.getElementById("activeProjectName").textContent = "待处理";
+  document.getElementById("activeProjectMeta").textContent = "等待人工输入的 DAG 节点；提交输出后会继续推进运行图。";
+  document.getElementById("projectConfigBtn").textContent = "刷新";
+  await renderInboxManager();
+}
+
+function showSettingsPage() {
+  state.currentView = "settings";
+  setActiveSystemNav("");
+  closeDrawer();
+  document.getElementById("composerForm").classList.add("hidden");
+  setHeaderConfigButton(false);
+  document.getElementById("activeProjectName").textContent = "系统设置";
+  document.getElementById("activeProjectMeta").textContent = "配置 APP 系统路径、runtime 和 RAG provider。部分设置保存后需要重启生效。";
+  const settings = state.status?.wrapper?.settings || {};
+  const codex = settings.runtimes?.codex || {};
+  const anythingllm = settings.ragProviders?.anythingllm || {};
+  const stream = document.getElementById("chatStream");
+  stream.innerHTML = `
+    <section class="settingsPanel">
+      <form id="appSettingsForm" class="settingsForm">
+        <div class="settingsSection">
+          <h2>系统路径</h2>
+          <label>资源根目录
+            <input name="resourceRootPath" value="${escapeHtml(settings.resourceRootPath || settings.appHomePath || "")}" />
+          </label>
+          <small>保存后重启生效；工作区和知识库目录会基于这个路径。</small>
+        </div>
+        <div class="settingsSection">
+          <h2>Runtime</h2>
+          <label>默认 Runtime
+            <select name="defaultRuntimeId">
+              <option value="codex" ${settings.defaultRuntimeId === "codex" ? "selected" : ""}>Codex</option>
+            </select>
+          </label>
+          <label>Codex Command
+            <input name="codexCommand" value="${escapeHtml(codex.command || "codex")}" />
+          </label>
+          <label>Codex Model
+            <input name="codexModel" value="${escapeHtml(codex.model || "")}" placeholder="可选" />
+          </label>
+          <label>Sandbox
+            <select name="codexSandboxMode">
+              ${["workspace-write", "read-only", "danger-full-access"].map((item) =>
+                `<option value="${item}" ${codex.sandboxMode === item ? "selected" : ""}>${item}</option>`
+              ).join("")}
+            </select>
+          </label>
+          <label>Service Tier
+            <input name="codexServiceTier" value="${escapeHtml(codex.serviceTier || "fast")}" />
+          </label>
+        </div>
+        <div class="settingsSection">
+          <h2>RAG Provider</h2>
+          <label>默认 RAG Provider
+            <select name="ragProviderId">
+              <option value="anythingllm" ${settings.ragProviderId === "anythingllm" ? "selected" : ""}>AnythingLLM</option>
+            </select>
+          </label>
+          <label>AnythingLLM URL
+            <input name="anythingllmBaseUrl" value="${escapeHtml(anythingllm.baseUrl || "")}" />
+          </label>
+          <small>RAG provider URL 保存后需要重启服务才能重新初始化客户端。</small>
+        </div>
+        <button class="primary" type="submit">保存设置</button>
+      </form>
+    </section>
+  `;
+  document.getElementById("appSettingsForm")?.addEventListener("submit", saveAppSettings);
+  stream.scrollTop = 0;
+}
+
+async function refreshSettingsPage() {
+  await checkStatus();
+  showSettingsPage();
+}
+
+async function saveAppSettings(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const result = await request("/api/settings", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(stripEmpty(Object.fromEntries(form.entries()))),
+  });
+  state.status = {
+    ...(state.status || {}),
+    wrapper: {
+      ...(state.status?.wrapper || {}),
+      settings: result.settings,
+    },
+  };
+  toast(settingsRestartText(result.requiresRestart));
+  showSettingsPage();
+}
+
+async function renderInboxManager() {
+  const stream = document.getElementById("chatStream");
+  const project = getActiveProject();
+  if (!project) {
+    stream.innerHTML = `<div class="emptyBlock">请先选择工作区。</div>`;
+    return;
+  }
+  const data = await request(`/api/workspaces/${encodeURIComponent(project.id)}/runs`);
+  const waitingItems = (data.runs || []).flatMap((run) =>
+    Object.values(run.nodeRuns || {})
+      .filter((node) => node.status === "waiting")
+      .map((node) => ({ run, node }))
+  );
+  stream.innerHTML = `
+    <section class="inboxPage">
+      ${waitingItems.length ? waitingItems.map(({ run, node }) => renderInboxItem(run, node)).join("") : `<div class="emptyBlock">当前工作区没有等待处理的节点。</div>`}
+    </section>
+  `;
+  stream.querySelectorAll("[data-resume-form]").forEach((form) => {
+    form.addEventListener("submit", resumeWaitingNode);
+  });
+  stream.scrollTop = 0;
+}
+
+function renderInboxItem(run, node) {
+  const nodeDef = (run.agentSnapshot?.nodes || []).find((item) => item.id === node.nodeId) || {};
+  return `
+    <form class="inboxItem" data-resume-form data-run-id="${escapeHtml(run.id)}" data-node-run-id="${escapeHtml(node.id)}">
+      <div class="inboxItemHeader">
+        <div>
+          <strong>${escapeHtml(nodeDef.name || node.nodeId)}</strong>
+          <small>${escapeHtml(run.agentSnapshot?.name || "DAG Run")} · ${escapeHtml(run.id.slice(0, 8))}</small>
+        </div>
+        <span class="runStatus waiting">waiting</span>
+      </div>
+      ${nodeDef.description ? `<p>${escapeHtml(nodeDef.description)}</p>` : ""}
+      <textarea name="output" rows="4" placeholder="填写人工确认结果或补充信息，支持 JSON"></textarea>
+      <div class="inboxActions">
+        <button class="primary" type="submit">继续运行</button>
+      </div>
+    </form>
+  `;
+}
+
+async function resumeWaitingNode(event) {
+  event.preventDefault();
+  const project = getActiveProject();
+  const form = event.currentTarget;
+  const rawOutput = new FormData(form).get("output");
+  await request(`/api/workspaces/${encodeURIComponent(project.id)}/runs/${encodeURIComponent(form.dataset.runId)}/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      nodeRunId: form.dataset.nodeRunId,
+      output: parseLooseJson(rawOutput),
+    }),
+  });
+  toast("等待节点已继续。");
+  await loadConversations(project.id);
+  await saveActiveConversation();
+  await renderInboxManager();
 }
 
 function focusKnowledgeCreateAction() {
@@ -419,7 +622,7 @@ function renderKnowledgeDetail(node, domains) {
       <dl class="knowledgeConfigList">
         <dt>路径</dt><dd>${escapeHtml(node.path)}</dd>
         <dt>层级</dt><dd>${isDomain ? "一级知识库 / 领域类型" : "二级主题 / 细分知识类型"}</dd>
-        <dt>项目授权</dt><dd>${isDomain ? "项目引用此一级知识库后，检索包含其下主题。" : "二级主题作为检索 tag 辅助过滤，不单独授权。"}</dd>
+        <dt>工作区引用</dt><dd>${isDomain ? "工作区引用此一级知识库后，检索包含其下主题。" : "二级主题可在工作区设置中勾选为检索筛选项。"}</dd>
         <dt>文档数</dt><dd>${documents.length}</dd>
       </dl>
     </div>
@@ -605,17 +808,60 @@ function renderAgentList() {
   });
 }
 
-function renderProjectKnowledgeTree(selectedRefs = []) {
+function renderProjectKnowledgeTree(selectedRefs = [], selectedTopicRefs = []) {
   const target = document.getElementById("projectKnowledgeTree");
   if (!target) return;
   const tree = state.knowledge?.tree;
-  const children = Array.isArray(tree?.children) ? tree.children : [];
+  const filterValue = document.getElementById("projectKnowledgeFilter")?.value || "";
+  const children = filterProjectKnowledgeItems(Array.isArray(tree?.children) ? tree.children : [], filterValue);
   if (!children.length) {
-    target.innerHTML = `<div class="emptyBlock">系统知识库暂无内容。可先在下方入库文本，或通过 API 上传文件。</div>`;
+    target.innerHTML = filterValue
+      ? `<div class="emptyBlock">没有匹配的知识库或主题。</div>`
+      : `<div class="emptyBlock">系统知识库暂无内容。可先在下方入库文本，或通过 API 上传文件。</div>`;
     return;
   }
   const selected = new Set(selectedRefs || []);
-  target.innerHTML = children.map((item) => renderKnowledgeNode(item, selected, 0, true)).join("");
+  const selectedTopics = new Set(selectedTopicRefs || []);
+  target.innerHTML = children.map((item) => renderKnowledgeNode(item, selected, selectedTopics, 0)).join("");
+  target.querySelectorAll("[name='knowledgeDrawerRefs'], [name='knowledgeTopicRefs']").forEach((input) => {
+    input.addEventListener("change", () => {
+      const collection = input.name === "knowledgeTopicRefs"
+        ? state.workspaceKnowledgeSelection.topics
+        : state.workspaceKnowledgeSelection.drawers;
+      if (input.checked) collection.add(input.value);
+      else collection.delete(input.value);
+      if (input.name === "knowledgeTopicRefs" && input.checked) {
+        state.workspaceKnowledgeSelection.drawers.add(input.value.split("/")[0]);
+      }
+      renderProjectKnowledgeTreeFromForm(getActiveProject(), { preserveDomSelection: false });
+    });
+  });
+}
+
+function renderProjectKnowledgeTreeFromForm(project = undefined, options = {}) {
+  if (options.preserveDomSelection !== false) captureWorkspaceKnowledgeSelection();
+  if (!state.workspaceKnowledgeSelection.drawers.size && project?.knowledgeDrawerRefs?.length) {
+    state.workspaceKnowledgeSelection.drawers = new Set(project.knowledgeDrawerRefs || []);
+  }
+  if (!state.workspaceKnowledgeSelection.topics.size && project?.knowledgeTopicRefs?.length) {
+    state.workspaceKnowledgeSelection.topics = new Set(project.knowledgeTopicRefs || []);
+  }
+  renderProjectKnowledgeTree(
+    [...state.workspaceKnowledgeSelection.drawers],
+    [...state.workspaceKnowledgeSelection.topics]
+  );
+}
+
+function captureWorkspaceKnowledgeSelection() {
+  const form = document.getElementById("projectForm");
+  if (!form) return;
+  form.querySelectorAll("[name='knowledgeDrawerRefs'], [name='knowledgeTopicRefs']").forEach((input) => {
+    const collection = input.name === "knowledgeTopicRefs"
+      ? state.workspaceKnowledgeSelection.topics
+      : state.workspaceKnowledgeSelection.drawers;
+    if (input.checked) collection.add(input.value);
+    else collection.delete(input.value);
+  });
 }
 
 function renderProjectAgentPicker(selectedAgentIds = []) {
@@ -659,20 +905,27 @@ async function saveProject(event) {
   const formNode = event.currentTarget;
   const form = new FormData(formNode);
   const id = form.get("id");
+  captureWorkspaceKnowledgeSelection();
+  const selectedTopicRefs = [...state.workspaceKnowledgeSelection.topics];
+  const selectedDrawerRefs = [...state.workspaceKnowledgeSelection.drawers];
   const body = {
     name: form.get("name"),
     description: form.get("description"),
     agentIds: [...formNode.querySelectorAll("[name='agentIds']:checked")].map((item) => item.value),
-    knowledgeDrawerRefs: [...formNode.querySelectorAll("[name='knowledgeDrawerRefs']:checked")].map((item) => item.value),
+    knowledgeDrawerRefs: [...new Set([
+      ...selectedDrawerRefs,
+      ...selectedTopicRefs.map((item) => item.split("/")[0]).filter(Boolean),
+    ])],
+    knowledgeTopicRefs: selectedTopicRefs,
   };
 
   const result = id
-    ? await request(`/api/projects/${encodeURIComponent(id)}`, {
+    ? await request(`/api/workspaces/${encodeURIComponent(id)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(stripEmpty(body)),
       })
-    : await submitJson("/api/projects", body, false);
+    : await submitJson("/api/workspaces", body, false);
 
   state.activeProjectId = result.project.id;
   state.activeConversationId = null;
@@ -680,7 +933,7 @@ async function saveProject(event) {
   state.messages = [];
   await loadProjects();
   closeDrawer();
-  toast("项目已保存。");
+  toast("工作区已保存。");
 }
 
 async function saveAgent(event) {
@@ -688,7 +941,9 @@ async function saveAgent(event) {
   const formNode = event.currentTarget;
   const form = new FormData(formNode);
   const id = form.get("id");
+  const type = form.get("type") || "single";
   const body = {
+    type,
     name: form.get("name"),
     description: form.get("description"),
     systemPrompt: form.get("systemPrompt"),
@@ -699,6 +954,12 @@ async function saveAgent(event) {
     defaultMode: form.get("defaultMode"),
     topN: Number(form.get("topN") || 4),
   };
+  if (type === "dag") {
+    body.rootNodeId = String(form.get("rootNodeId") || "").trim();
+    body.nodes = parseJsonField(form.get("nodesJson"), []);
+    body.edges = parseJsonField(form.get("edgesJson"), []);
+    body.executionPolicy = { concurrency: Number(form.get("dagConcurrency") || 4) };
+  }
 
   id
     ? await request(`/api/agents/${encodeURIComponent(id)}`, {
@@ -739,15 +1000,24 @@ async function sendMessage(event) {
     agentId: form.get("agentId") || undefined,
     mode: form.get("mode") || undefined,
     sessionId: conversation.id,
+    runId: crypto.randomUUID?.() || `run-${Date.now()}`,
     dryRun: Boolean(form.get("dryRun")),
+    contextStrategy: form.get("contextStrategy") || "runtime",
+    contextSummary: form.get("contextStrategy") === "manual-summary"
+      ? String(form.get("contextSummary") || "").trim()
+      : "",
   };
 
   try {
     const assistantMessage = { role: "assistant", text: "正在准备执行..." };
     state.messages.push(assistantMessage);
     renderMessages();
+    setActiveRun(project.id, payload.runId);
     await streamProjectExecution(project.id, payload, {
-      onPrepared() {
+      onPrepared(event) {
+        setActiveRun(project.id, event.request?.runId || payload.runId);
+        assistantMessage.runId = event.request?.runId || payload.runId;
+        if (event.agentRun) assistantMessage.agentRunSummary = summarizeAgentRun(event.agentRun);
         assistantMessage.text = payload.dryRun ? "正在生成编排请求..." : "正在调用 Codex runtime...";
         renderMessages();
       },
@@ -762,19 +1032,45 @@ async function sendMessage(event) {
         assistantMessage.text = payload.dryRun
           ? data.result?.text || `已生成编排请求：\n\n${data.request?.message || ""}`
           : extractAgentResponse(data);
+        assistantMessage.runId = data.agentRun?.id || assistantMessage.runId || payload.runId;
+        if (data.agentRun) assistantMessage.agentRunSummary = summarizeAgentRun(data.agentRun);
+        clearActiveRun();
+        renderMessages();
+        saveActiveConversation();
+      },
+      onDagNodeEvent(event) {
+        assistantMessage.agentRunSummary = updateRunSummaryNode(assistantMessage.agentRunSummary, event);
+        renderMessages();
+      },
+      onRuntimeEvent(event) {
+        if (event.eventType === "runtime_session_started") setActiveRun(project.id, event.runId || payload.runId);
+      },
+      onCancelled(event) {
+        assistantMessage.text = `${assistantMessage.text || ""}\n\n运行已停止。`.trim();
+        clearActiveRun();
         renderMessages();
         saveActiveConversation();
       },
     });
   } catch (error) {
+    clearActiveRun();
     state.messages.push({ role: "assistant", text: `执行失败：${error.message}` });
     await saveActiveConversation();
   }
   renderMessages();
 }
 
+function syncContextStrategyFields() {
+  const strategy = document.getElementById("contextStrategySelect")?.value || "runtime";
+  const summary = document.getElementById("contextSummaryInput");
+  if (!summary) return;
+  summary.classList.toggle("hidden", strategy !== "manual-summary");
+  if (strategy === "manual-summary") summary.focus();
+  else summary.value = "";
+}
+
 async function streamProjectExecution(projectId, payload, handlers = {}) {
-  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/execute/stream`, {
+  const response = await fetch(`/api/workspaces/${encodeURIComponent(projectId)}/execute/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(stripEmpty(payload)),
@@ -800,10 +1096,32 @@ async function streamProjectExecution(projectId, payload, handlers = {}) {
       if (event.type === "prepared") handlers.onPrepared?.(event);
       else if (event.type === "stdout") handlers.onChunk?.(event.text, event);
       else if (event.type === "stderr") handlers.onStatus?.(event.text, event);
+      else if (event.type === "runtime_event") handlers.onRuntimeEvent?.(event);
+      else if (event.type === "dag_node_started" || event.type === "dag_node_completed" || event.type === "dag_node_waiting") handlers.onDagNodeEvent?.(event);
+      else if (event.type === "cancelled") handlers.onCancelled?.(event);
       else if (event.type === "done") handlers.onDone?.(event);
       else if (event.type === "error") throw new Error(event.error || "执行失败");
     }
   }
+}
+
+async function cancelActiveRun() {
+  if (!state.activeRun?.runId) return;
+  const current = state.activeRun;
+  await request(`/api/workspaces/${encodeURIComponent(current.projectId)}/runs/${encodeURIComponent(current.runId)}/cancel`, {
+    method: "POST",
+  });
+  toast("已请求停止当前运行。");
+}
+
+function setActiveRun(projectId, runId) {
+  state.activeRun = { projectId, runId };
+  document.getElementById("stopExecutionBtn")?.classList.remove("hidden");
+}
+
+function clearActiveRun() {
+  state.activeRun = null;
+  document.getElementById("stopExecutionBtn")?.classList.add("hidden");
 }
 
 function parseSseEvent(part) {
@@ -847,7 +1165,12 @@ function openProjectForm(project = undefined) {
     form.elements.id.value = "";
   }
   renderProjectAgentPicker(active?.agentIds || []);
-  renderProjectKnowledgeTree(active?.knowledgeDrawerRefs || []);
+  state.workspaceKnowledgeSelection = {
+    drawers: new Set(active?.knowledgeDrawerRefs || []),
+    topics: new Set(active?.knowledgeTopicRefs || []),
+  };
+  document.getElementById("projectKnowledgeFilter").value = "";
+  renderProjectKnowledgeTree(active?.knowledgeDrawerRefs || [], active?.knowledgeTopicRefs || []);
   setDrawerOpen(true);
 }
 
@@ -858,6 +1181,7 @@ function openAgentForm(agent = undefined) {
   form.reset();
   if (agent) {
     form.elements.id.value = agent.id;
+    form.elements.type.value = agent.type || "single";
     form.elements.name.value = agent.name || "";
     form.elements.description.value = agent.description || "";
     form.elements.systemPrompt.value = agent.systemPrompt || "";
@@ -867,23 +1191,132 @@ function openAgentForm(agent = undefined) {
     form.elements.ragDocumentNames.value = (agent.explicitRagDocumentNames || []).join("\n");
     form.elements.defaultMode.value = agent.defaultMode || "query";
     form.elements.topN.value = agent.topN || 4;
+    form.elements.rootNodeId.value = agent.rootNodeId || "";
+    form.elements.dagConcurrency.value = agent.executionPolicy?.concurrency || 4;
+    form.elements.nodesJson.value = agent.nodes?.length ? JSON.stringify(agent.nodes, null, 2) : "";
+    form.elements.edgesJson.value = agent.edges?.length ? JSON.stringify(agent.edges, null, 2) : "";
   } else {
     form.elements.id.value = "";
+    form.elements.type.value = "single";
     form.elements.runtimeId.value = "codex";
     form.elements.defaultMode.value = "query";
     form.elements.topN.value = 4;
+    form.elements.dagConcurrency.value = 4;
+    form.elements.rootNodeId.value = "";
+    form.elements.nodesJson.value = "";
+    form.elements.edgesJson.value = "";
   }
+  syncAgentTypeFields();
   setDrawerOpen(true);
+}
+
+function syncAgentTypeFields() {
+  const type = document.getElementById("agentTypeSelect")?.value || "single";
+  document.getElementById("agentDagFields")?.classList.toggle("hidden", type !== "dag");
+  if (type === "dag") renderDagBuilderFromJson();
+}
+
+function renderDagBuilderFromJson() {
+  const form = document.getElementById("agentForm");
+  if (!form || form.elements.type.value !== "dag") return;
+  const nodes = parseJsonField(form.elements.nodesJson.value, []);
+  const edges = parseJsonField(form.elements.edgesJson.value, []);
+  renderDagBuilder(nodes, edges);
+}
+
+function renderDagBuilder(nodes = [], edges = []) {
+  const preview = document.getElementById("dagGraphPreview");
+  const fromSelect = document.getElementById("dagEdgeFromInput");
+  const toSelect = document.getElementById("dagEdgeToInput");
+  if (!preview || !fromSelect || !toSelect) return;
+  const options = nodes.map((node) => `<option value="${escapeHtml(node.id)}">${escapeHtml(node.id)}</option>`).join("");
+  fromSelect.innerHTML = options;
+  toSelect.innerHTML = options;
+  preview.innerHTML = `
+    <div class="dagPreviewSection">
+      <strong>节点</strong>
+      ${nodes.length ? nodes.map((node) => `
+        <div class="dagPreviewRow">
+          <span>${escapeHtml(node.id)} · ${escapeHtml(node.kind || "task")}</span>
+          <button type="button" data-remove-dag-node="${escapeHtml(node.id)}">删除</button>
+        </div>
+      `).join("") : `<small>还没有节点。</small>`}
+    </div>
+    <div class="dagPreviewSection">
+      <strong>连边</strong>
+      ${edges.length ? edges.map((edge, index) => `
+        <div class="dagPreviewRow">
+          <span>${escapeHtml(edge.from)} -> ${escapeHtml(edge.to)} · ${escapeHtml(edge.type || "serial")}${edge.required === false ? " · optional" : ""}</span>
+          <button type="button" data-remove-dag-edge="${index}">删除</button>
+        </div>
+      `).join("") : `<small>还没有连边。</small>`}
+    </div>
+  `;
+  preview.querySelectorAll("[data-remove-dag-node]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const nextNodes = nodes.filter((node) => node.id !== button.dataset.removeDagNode);
+      const nextEdges = edges.filter((edge) => edge.from !== button.dataset.removeDagNode && edge.to !== button.dataset.removeDagNode);
+      setDagJson(nextNodes, nextEdges);
+    });
+  });
+  preview.querySelectorAll("[data-remove-dag-edge]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const index = Number(button.dataset.removeDagEdge);
+      setDagJson(nodes, edges.filter((_, itemIndex) => itemIndex !== index));
+    });
+  });
+}
+
+function addDagNodeFromBuilder() {
+  const form = document.getElementById("agentForm");
+  const nodeId = document.getElementById("dagNodeIdInput").value.trim();
+  if (!nodeId) return toast("请填写节点 ID。", true);
+  const nodes = parseJsonField(form.elements.nodesJson.value, []);
+  const edges = parseJsonField(form.elements.edgesJson.value, []);
+  if (nodes.some((node) => node.id === nodeId)) return toast("节点 ID 已存在。", true);
+  const node = {
+    id: nodeId,
+    kind: document.getElementById("dagNodeKindInput").value || "task",
+    name: document.getElementById("dagNodeNameInput").value.trim() || nodeId,
+  };
+  setDagJson([...nodes, node], edges);
+  if (!form.elements.rootNodeId.value) form.elements.rootNodeId.value = nodeId;
+  document.getElementById("dagNodeIdInput").value = "";
+  document.getElementById("dagNodeNameInput").value = "";
+}
+
+function addDagEdgeFromBuilder() {
+  const form = document.getElementById("agentForm");
+  const nodes = parseJsonField(form.elements.nodesJson.value, []);
+  const edges = parseJsonField(form.elements.edgesJson.value, []);
+  const from = document.getElementById("dagEdgeFromInput").value;
+  const to = document.getElementById("dagEdgeToInput").value;
+  if (!from || !to) return toast("请先添加节点。", true);
+  if (from === to) return toast("连边不能指向同一个节点。", true);
+  const edge = {
+    from,
+    to,
+    type: document.getElementById("dagEdgeTypeInput").value || "serial",
+    required: document.getElementById("dagEdgeRequiredInput").checked,
+  };
+  setDagJson(nodes, [...edges, edge]);
+}
+
+function setDagJson(nodes, edges) {
+  const form = document.getElementById("agentForm");
+  form.elements.nodesJson.value = JSON.stringify(nodes, null, 2);
+  form.elements.edgesJson.value = JSON.stringify(edges, null, 2);
+  renderDagBuilder(nodes, edges);
 }
 
 function showDrawerForm(type) {
   document.getElementById("projectForm").classList.toggle("hidden", type !== "project");
   document.getElementById("agentForm").classList.toggle("hidden", type !== "agent");
   document.getElementById("agentListSection").classList.toggle("hidden", type !== "agent");
-  document.getElementById("drawerTitle").textContent = type === "agent" ? "Agent 配置" : "项目";
+  document.getElementById("drawerTitle").textContent = type === "agent" ? "Agent 配置" : "工作区设置";
   document.getElementById("drawerSubtitle").textContent = type === "agent"
     ? "创建全局 Agent：预置提示词、Skill、MCP 和 runtime。"
-    : "创建或编辑 project、可用 Agent 和知识抽屉授权。";
+    : "创建或编辑工作区、可用 Agent 和知识库引用。";
 }
 
 function openDrawer() {
@@ -908,7 +1341,7 @@ function setDrawerOpen(open) {
 function showMcpMessage() {
   state.messages.push({
     role: "assistant",
-    text: `MCP 端点：http://localhost:${state.status?.wrapper?.port || 8787}/mcp\n\n系统工具以 hippo_ 开头，包括 hippo_list_projects、hippo_create_project、hippo_project_rag_search、hippo_execute_project_task。`,
+    text: `MCP 端点：http://localhost:${state.status?.wrapper?.port || 8787}/mcp\n\n工作区工具包括 hippo_list_workspaces、hippo_create_workspace、hippo_workspace_rag_search、hippo_execute_workspace_task。`,
   });
   renderMessages();
   saveActiveConversation();
@@ -934,7 +1367,7 @@ async function createConversationForActiveProject() {
     renderMessages();
     return;
   }
-  const { conversation } = await submitJson(`/api/projects/${encodeURIComponent(project.id)}/conversations`, {
+  const { conversation } = await submitJson(`/api/workspaces/${encodeURIComponent(project.id)}/conversations`, {
     title: "新对话",
     messages: [],
   }, false);
@@ -953,10 +1386,10 @@ function getActiveConversation() {
 
 async function ensureActiveConversation(task = "") {
   const project = getActiveProject();
-  if (!project) throw new Error("请先创建项目。");
+  if (!project) throw new Error("请先创建工作区。");
   const existing = getActiveConversation();
   if (existing) return existing;
-  const { conversation } = await submitJson(`/api/projects/${encodeURIComponent(project.id)}/conversations`, {
+  const { conversation } = await submitJson(`/api/workspaces/${encodeURIComponent(project.id)}/conversations`, {
     title: deriveConversationTitle(task),
     messages: [],
   }, false);
@@ -971,7 +1404,7 @@ async function saveActiveConversation() {
   if (!project || !conversation) return;
   const title = deriveConversationTitleFromMessages(state.messages) || conversation.title || "新对话";
   const { conversation: updated } = await request(
-    `/api/projects/${encodeURIComponent(project.id)}/conversations/${encodeURIComponent(conversation.id)}`,
+    `/api/workspaces/${encodeURIComponent(project.id)}/conversations/${encodeURIComponent(conversation.id)}`,
     {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -1010,6 +1443,80 @@ function extractAgentResponse(data) {
   return result.textResponse || result.text || result.message || JSON.stringify(result, null, 2);
 }
 
+function summarizeAgentRun(run) {
+  const nodes = Object.values(run?.nodeRuns || {}).map((node) => ({
+    id: node.id,
+    nodeId: node.nodeId,
+    kind: node.kind || "task",
+    status: node.status,
+    runtimeSessionId: node.runtimeSession?.sessionId || "",
+    text: summarizeRunOutput(node.output),
+  }));
+  return {
+    id: run?.id || "",
+    status: run?.status || "pending",
+    agentType: run?.agentSnapshot?.type || "single",
+    agentName: run?.agentSnapshot?.name || "",
+    nodes,
+  };
+}
+
+function summarizeRunOutput(output) {
+  if (!output) return "";
+  if (typeof output.text === "string") return output.text.slice(0, 160);
+  if (typeof output === "string") return output.slice(0, 160);
+  return "";
+}
+
+function updateRunSummaryNode(summary, event) {
+  if (!summary) {
+    summary = { id: event.runId || "", status: "running", agentType: "dag", nodes: [] };
+  }
+  const nodes = Array.isArray(summary.nodes) ? [...summary.nodes] : [];
+  const index = nodes.findIndex((node) => node.id === event.nodeRunId || node.nodeId === event.nodeId);
+  const current = index === -1 ? { id: event.nodeRunId, nodeId: event.nodeId } : nodes[index];
+  const updated = {
+    ...current,
+    id: event.nodeRunId || current.id,
+    nodeId: event.nodeId || current.nodeId,
+    status: event.type === "dag_node_completed" ? "completed" : event.type === "dag_node_waiting" ? "waiting" : "running",
+    runtimeSessionId: event.result?.runtimeSession?.sessionId || current.runtimeSessionId || "",
+    text: event.result ? summarizeRunOutput(event.result) : current.text || "",
+  };
+  if (index === -1) nodes.push(updated);
+  else nodes[index] = updated;
+  return {
+    ...summary,
+    status: nodes.some((node) => node.status === "waiting")
+      ? "waiting"
+      : event.type === "dag_node_completed" && nodes.every((node) => node.status === "completed")
+        ? "completed"
+        : "running",
+    nodes,
+  };
+}
+
+function renderAgentRunSummary(summary) {
+  const nodes = Array.isArray(summary.nodes) ? summary.nodes : [];
+  return `
+    <div class="runSummary">
+      <div class="runSummaryHeader">
+        <strong>${escapeHtml(summary.agentType === "dag" ? "DAG Run" : "Run")}</strong>
+        <span class="runStatus ${escapeHtml(summary.status || "pending")}">${escapeHtml(summary.status || "pending")}</span>
+      </div>
+      ${summary.agentName ? `<small>${escapeHtml(summary.agentName)}</small>` : ""}
+      <div class="runNodeList">
+        ${nodes.map((node) => `
+          <div class="runNode ${escapeHtml(node.status || "pending")}">
+            <span>${escapeHtml(node.nodeId || "node")}${node.kind === "wait" ? " · 等待" : ""}</span>
+            <small>${escapeHtml(node.status || "pending")}${node.runtimeSessionId ? ` · ${escapeHtml(node.runtimeSessionId.slice(0, 8))}` : ""}</small>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+  `;
+}
+
 function deriveConversationTitle(task) {
   const compact = String(task || "").trim().replace(/\s+/g, " ");
   if (!compact) return "新对话";
@@ -1046,26 +1553,83 @@ function parseSkills(value) {
   });
 }
 
+function parseJsonField(value, fallback) {
+  const text = String(value || "").trim();
+  if (!text) return fallback;
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`JSON 格式错误：${error.message}`);
+  }
+}
+
+function parseLooseJson(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
 function formatSkillLine(skill) {
   return skill.description ? `${skill.name}: ${skill.description}` : skill.name;
 }
 
-function renderKnowledgeNode(item, selected, depth, primaryOnly = false) {
+function filterProjectKnowledgeItems(items, query) {
+  const needle = normalizeSearchText(query);
+  if (!needle) return items;
+  return items.map((domain) => {
+    const topicChildren = Array.isArray(domain.children)
+      ? domain.children.filter((child) => child.type === "folder")
+      : [];
+    const domainMatches = knowledgeSearchText(domain).includes(needle);
+    const matchedTopics = topicChildren.filter((topic) => knowledgeSearchText(topic).includes(needle));
+    if (!domainMatches && !matchedTopics.length) return null;
+    return {
+      ...domain,
+      children: domainMatches ? topicChildren : matchedTopics,
+    };
+  }).filter(Boolean);
+}
+
+function knowledgeSearchText(item) {
+  return normalizeSearchText([
+    item?.title,
+    item?.name,
+    item?.path,
+    item?.description,
+  ].filter(Boolean).join(" "));
+}
+
+function normalizeSearchText(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function renderKnowledgeNode(item, selectedDomains, selectedTopics, depth) {
   const primaryPath = item.path.split("/")[0];
-  const checked = selected.has(primaryPath) ? "checked" : "";
+  const isDomain = item.type === "folder" && depth === 0;
+  const isTopic = item.type === "folder" && depth === 1;
+  const checked = isDomain
+    ? selectedDomains.has(primaryPath) ? "checked" : ""
+    : selectedTopics.has(item.path) ? "checked" : "";
   const indent = depth * 14;
   const count = item.type === "folder" ? countKnowledgeDocs(item) : item.documentNames?.length || 0;
   const childItems = Array.isArray(item.children) ? item.children : [];
-  const children = childItems.length && !primaryOnly
-    ? `<div class="knowledgeChildren">${childItems.map((child) => renderKnowledgeNode(child, selected, depth + 1, primaryOnly)).join("")}</div>`
+  const topicChildren = childItems.filter((child) => child.type === "folder");
+  const children = topicChildren.length && depth === 0
+    ? `<div class="knowledgeChildren">${topicChildren.map((child) => renderKnowledgeNode(child, selectedDomains, selectedTopics, depth + 1)).join("")}</div>`
     : "";
-  const isSelectable = item.type === "folder" && (!primaryOnly || depth === 0);
+  const isSelectable = isDomain || isTopic;
+  const inputName = isTopic ? "knowledgeTopicRefs" : "knowledgeDrawerRefs";
+  const label = isTopic ? "主题" : "知识库";
   return `
     <label class="knowledgeNode ${item.type}" style="--depth:${indent}px">
-      ${isSelectable ? `<input name="knowledgeDrawerRefs" type="checkbox" value="${escapeHtml(primaryPath)}" ${checked} />` : ""}
+      ${isSelectable ? `<input name="${inputName}" type="checkbox" value="${escapeHtml(isTopic ? item.path : primaryPath)}" ${checked} />` : ""}
       <span>${item.type === "folder" ? "▸" : "·"}</span>
-      <strong>${escapeHtml(item.name)}</strong>
-      <small>${count} 文档</small>
+      <strong>${escapeHtml(item.title || item.name)}</strong>
+      <small>${label} · ${count} 文档</small>
     </label>
     ${children}
   `;
@@ -1106,6 +1670,19 @@ function kv(entries) {
 
 function formatMessage(value) {
   return escapeHtml(value).replace(/\n/g, "<br>");
+}
+
+function settingsRestartText(requiresRestart = {}) {
+  const restartKeys = Object.entries(requiresRestart)
+    .filter(([, required]) => required)
+    .map(([key]) => key);
+  return restartKeys.length
+    ? `设置已保存；${restartKeys.join("、")} 需要重启后生效。`
+    : "设置已保存。";
+}
+
+function setHeaderConfigButton(visible) {
+  document.getElementById("projectConfigBtn")?.classList.toggle("hidden", !visible);
 }
 
 function toast(message, error = false) {

@@ -8,12 +8,12 @@ export class AnythingLlmRagProvider {
     return this.client.status();
   }
 
-  async ingestText({ textContent, metadata }) {
-    return this.client.uploadRawText({ textContent, metadata });
+  async ingestText({ textContent, metadata, addToWorkspaces }) {
+    return this.client.uploadRawText({ textContent, metadata, addToWorkspaces });
   }
 
-  async ingestFile({ fileBuffer, fileName, metadata }) {
-    return this.client.uploadFile({ fileBuffer, fileName, metadata });
+  async ingestFile({ fileBuffer, fileName, metadata, addToWorkspaces }) {
+    return this.client.uploadFile({ fileBuffer, fileName, metadata, addToWorkspaces });
   }
 
   async retrieve({ workspaceSlug, query, topN = 4, scoreThreshold }) {
@@ -25,8 +25,13 @@ export class AnythingLlmRagProvider {
     return this.client.workspaceChat(workspaceSlug, { message, mode, sessionId, reset });
   }
 
-  async ensureWorkspace({ name }) {
-    return this.client.createWorkspace({ name, chatMode: "chat" });
+  async ensureWorkspace({ name, description, metadata }) {
+    return this.client.createWorkspace({
+      name,
+      openAiPrompt: description,
+      chatMode: "chat",
+      metadata,
+    });
   }
 
   async updateWorkspaceEmbeddings(workspaceSlug, payload) {

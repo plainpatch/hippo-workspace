@@ -18,6 +18,8 @@ export const config = {
   ragProviderId: process.env.HIPPO_RAG_PROVIDER || "anythingllm",
   codexCommand: process.env.CODEX_COMMAND || "codex",
   codexModel: process.env.CODEX_MODEL || "",
+  codexSandboxMode: process.env.CODEX_SANDBOX_MODE || "workspace-write",
+  codexServiceTier: process.env.CODEX_SERVICE_TIER || "fast",
   agentStorePath:
     process.env.AGENT_STORE_PATH || path.join(appHomePath, "agents", "agent-store.json"),
   resourceRootPath:

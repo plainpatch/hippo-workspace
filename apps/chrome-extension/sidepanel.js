@@ -2,6 +2,7 @@
   const DEFAULTS = {
     wrapperUrl: "http://localhost:8787",
     defaultKnowledgeDir: "浏览器剪藏",
+    defaultWorkspaceId: "",
     defaultProjectId: "",
     defaultAgentId: "",
   };
@@ -21,7 +22,7 @@
     bindElements();
     bindEvents();
     settings = { ...DEFAULTS, ...(await storageGet(DEFAULTS)) };
-    activeProjectId = settings.defaultProjectId || "";
+    activeProjectId = settings.defaultWorkspaceId || settings.defaultProjectId || "";
     activeAgentId = settings.defaultAgentId || "";
     elements.wrapperUrlInput.value = settings.wrapperUrl;
     elements.knowledgeDirInput.value = settings.defaultKnowledgeDir;
@@ -76,7 +77,7 @@
       setStatus("连接中...");
       const [status, projectData, agentData] = await Promise.all([
         request("/api/status"),
-        request("/api/projects"),
+        request("/api/workspaces"),
         request("/api/agents"),
       ]);
       projects = projectData.projects || [];
@@ -101,7 +102,7 @@
 
   function renderProjects() {
     elements.projectSelect.innerHTML = [
-      `<option value="">选择项目</option>`,
+      `<option value="">选择工作区</option>`,
       ...projects.map((project) =>
         `<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)}</option>`
       ),
@@ -130,13 +131,13 @@
     const project = getActiveProject();
     elements.messageInput.disabled = !project;
     elements.sendBtn.disabled = !project;
-    elements.messageInput.placeholder = project ? `向「${project.name}」提问` : "请先选择项目";
+    elements.messageInput.placeholder = project ? `向「${project.name}」提问` : "请先选择工作区";
     renderProjectDetails(project);
 
     if (project && !messagesByProject.has(project.id)) {
       messagesByProject.set(project.id, [{
         role: "assistant",
-        text: `已加载 project「${project.name}」。不选择 Agent 时会使用通用助手；Agent 只是可选增强。`,
+        text: `已加载工作区「${project.name}」。不选择 Agent 时会使用通用助手；Agent 只是可选增强。`,
       }]);
     }
     renderMessages();
@@ -155,15 +156,16 @@
 
   function renderProjectDetails(project) {
     elements.projectDetails.innerHTML = project ? kv({
-      项目: project.name,
+      工作区: project.name,
       目录: project.localWorkspaceFolderName || project.id,
-      知识抽屉: `${project.knowledgeDrawerRefs?.length || 0}`,
+      知识库: `${project.knowledgeDrawerRefs?.length || 0}`,
       当前Agent: getActiveAgent()?.name || "通用助手",
-    }) : kv({ 项目: "未选择", 状态: "请在顶部选择项目" });
+    }) : kv({ 工作区: "未选择", 状态: "请在顶部选择工作区" });
   }
 
   async function selectProject() {
     activeProjectId = elements.projectSelect.value;
+    settings.defaultWorkspaceId = activeProjectId;
     settings.defaultProjectId = activeProjectId;
     await storageSet(settings);
     renderAgents();
@@ -186,7 +188,7 @@
     pushMessage(project.id, { role: "user", text: task });
     elements.messageInput.value = "";
     try {
-      const data = await request(`/api/projects/${encodeURIComponent(project.id)}/execute`, {
+      const data = await request(`/api/workspaces/${encodeURIComponent(project.id)}/execute`, {
         method: "POST",
         body: {
           task,
@@ -267,6 +269,7 @@
     settings = {
       wrapperUrl: normalizeWrapperUrl(elements.wrapperUrlInput.value),
       defaultKnowledgeDir: elements.knowledgeDirInput.value.trim() || DEFAULTS.defaultKnowledgeDir,
+      defaultWorkspaceId: activeProjectId,
       defaultProjectId: activeProjectId,
       defaultAgentId: activeAgentId,
     };

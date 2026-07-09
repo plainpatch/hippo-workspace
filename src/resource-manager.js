@@ -82,22 +82,82 @@ export class ResourceManager {
     const topicDescription = requireNonEmpty(description, "Knowledge topic description is required.");
     await this.ensureDrawerExists(primaryPath);
     const topicPath = path.posix.join(primaryPath, slugify(displayName));
-    return this.createKnowledgeFolder(topicPath, {
+    const result = await this.createKnowledgeFolder(topicPath, {
       name: displayName,
       description: topicDescription,
       metadata,
     });
+    const drawer = await this.ensureTopicRagWorkspace(topicPath);
+    return { ...result, drawer };
   }
 
   async updateKnowledgeDrawer({ drawerPath, name, description, metadata = {} } = {}) {
     const safePath = assertDrawerPath(drawerPath);
     if (!safePath) throw new ResourceManagerError("Knowledge drawer path is required.", 400);
     await this.ensureDrawerExists(safePath);
-    return this.upsertDrawerMetadata(safePath, {
+    const drawer = await this.upsertDrawerMetadata(safePath, {
       name: name ? String(name).trim() : undefined,
       description: description !== undefined ? String(description).trim() : undefined,
       metadata,
     });
+    if (drawer.level === 2) return this.ensureTopicRagWorkspace(safePath);
+    return drawer;
+  }
+
+  async ensureTopicRagWorkspace(topicPath) {
+    const safePath = assertTopicPath(topicPath);
+    const index = await this.readKnowledgeIndex();
+    const drawer = index.drawers[safePath];
+    if (!drawer) throw new ResourceManagerError(`Knowledge topic ${safePath} was not found.`, 404);
+    if (drawer.rag?.workspaceSlug) return drawer;
+    if (!this.client?.ensureWorkspace) {
+      return this.upsertDrawerMetadata(safePath, {
+        metadata: drawer.metadata || {},
+        rag: {
+          providerId: "unconfigured",
+          workspaceSlug: "",
+          status: "pending",
+          updatedAt: new Date().toISOString(),
+        },
+      });
+    }
+
+    const domain = index.drawers[getPrimaryDrawer(safePath)] || {};
+    try {
+      const response = await this.client.ensureWorkspace({
+        name: `${domain.name || getPrimaryDrawer(safePath)} / ${drawer.name || path.posix.basename(safePath)}`,
+        description: [
+          domain.description ? `领域：${domain.description}` : "",
+          drawer.description ? `主题：${drawer.description}` : "",
+          `Hippo topic path: ${safePath}`,
+        ].filter(Boolean).join("\n"),
+        metadata: { hippoTopicPath: safePath },
+      });
+      const workspaceSlug = extractWorkspaceSlug(response);
+      if (!workspaceSlug) {
+        throw new ResourceManagerError("RAG provider created a workspace without a slug.", 502, response);
+      }
+      return this.upsertDrawerMetadata(safePath, {
+        metadata: drawer.metadata || {},
+        rag: {
+          providerId: "anythingllm",
+          workspaceSlug,
+          status: "ready",
+          updatedAt: new Date().toISOString(),
+        },
+      });
+    } catch (error) {
+      return this.upsertDrawerMetadata(safePath, {
+        metadata: drawer.metadata || {},
+        rag: {
+          providerId: "anythingllm",
+          workspaceSlug: "",
+          status: "error",
+          error: error.message || "RAG workspace creation failed.",
+          updatedAt: new Date().toISOString(),
+        },
+      });
+    }
   }
 
   async ingestKnowledgeText({ relativeDir = "", title, textContent, metadata = {} }) {
@@ -110,11 +170,17 @@ export class ResourceManager {
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
     await fs.writeFile(absolutePath, String(textContent || ""), "utf8");
 
+    const topicWorkspace = await this.getTopicWorkspaceForDir(safeDir);
     const response = this.client.ingestText
-      ? await this.client.ingestText({ textContent, metadata: { title, sourcePath: relativePath, ...metadata } })
+      ? await this.client.ingestText({
+          textContent,
+          metadata: { title, sourcePath: relativePath, ...metadata },
+          addToWorkspaces: topicWorkspace ? [topicWorkspace] : undefined,
+        })
       : await this.client.uploadRawText({
           textContent,
           metadata: { title, sourcePath: relativePath, ...metadata },
+          addToWorkspaces: topicWorkspace ? [topicWorkspace] : undefined,
         });
     const documentNames = extractDocumentNames(response);
     await this.ensureDrawerMetadata(safeDir, metadata);
@@ -124,6 +190,8 @@ export class ResourceManager {
       drawer: getPrimaryDrawer(relativePath),
       tags: getSecondaryTags(relativePath),
       documentNames,
+      topicPath: getTopicPath(relativePath),
+      ragWorkspaceSlug: topicWorkspace,
       anythingllmResponse: response,
     });
     return { relativePath, absolutePath, documentNames, response };
@@ -139,16 +207,19 @@ export class ResourceManager {
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
     await fs.writeFile(absolutePath, fileBuffer);
 
+    const topicWorkspace = await this.getTopicWorkspaceForDir(safeDir);
     const response = this.client.ingestFile
       ? await this.client.ingestFile({
           fileBuffer,
           fileName: safeName,
           metadata: { sourcePath: relativePath, ...metadata },
+          addToWorkspaces: topicWorkspace ? [topicWorkspace] : undefined,
         })
       : await this.client.uploadFile({
           fileBuffer,
           fileName: safeName,
           metadata: { sourcePath: relativePath, ...metadata },
+          addToWorkspaces: topicWorkspace ? [topicWorkspace] : undefined,
         });
     const documentNames = extractDocumentNames(response);
     await this.ensureDrawerMetadata(safeDir, metadata);
@@ -158,6 +229,8 @@ export class ResourceManager {
       drawer: getPrimaryDrawer(relativePath),
       tags: getSecondaryTags(relativePath),
       documentNames,
+      topicPath: getTopicPath(relativePath),
+      ragWorkspaceSlug: topicWorkspace,
       anythingllmResponse: response,
     });
     return { relativePath, absolutePath, documentNames, response };
@@ -172,6 +245,8 @@ export class ResourceManager {
       type: value.type || "file",
       drawer: value.drawer || getPrimaryDrawer(relativePath),
       tags: value.tags || getSecondaryTags(relativePath),
+      topicPath: value.topicPath || getTopicPath(relativePath),
+      ragWorkspaceSlug: value.ragWorkspaceSlug || "",
       documentNames: value.documentNames || [],
       updatedAt: new Date().toISOString(),
     };
@@ -207,6 +282,54 @@ export class ResourceManager {
     };
   }
 
+  async getProjectKnowledgeIndex({ drawerRefs = [], topicRefs = [] } = {}) {
+    const index = await this.readKnowledgeIndex();
+    const selectedDomains = new Set((drawerRefs || []).map(assertPrimaryDrawerPath).filter(Boolean));
+    const selectedTopics = new Set((topicRefs || []).map(assertTopicPath).filter(Boolean));
+    const drawers = buildDrawerList(index);
+    const domains = drawers
+      .filter((drawer) => drawer.level === 1 && selectedDomains.has(drawer.path))
+      .map((domain) => ({
+        path: domain.path,
+        name: domain.name || domain.path,
+        description: domain.description || "",
+        topics: drawers
+          .filter((topic) => isTopicInProjectScope(topic.path, selectedDomains, selectedTopics))
+          .filter((topic) => getPrimaryDrawer(topic.path) === domain.path)
+          .map((topic) => enrichTopicIndex(topic, index.documents)),
+      }));
+    const topics = domains.flatMap((domain) => domain.topics.map((topic) => ({
+      ...topic,
+      domainPath: domain.path,
+      domainName: domain.name,
+    })));
+    return { domains, topics };
+  }
+
+  async syncTopicWorkspace(topicPath) {
+    const safePath = assertTopicPath(topicPath);
+    const drawer = await this.ensureTopicRagWorkspace(safePath);
+    const workspaceSlug = drawer.rag?.workspaceSlug;
+    const index = await this.readKnowledgeIndex();
+    const documentNames = Object.values(index.documents)
+      .filter((item) => item.topicPath === safePath || getTopicPath(item.relativePath) === safePath)
+      .flatMap((item) => item.documentNames || []);
+    if (workspaceSlug && documentNames.length && this.client?.updateWorkspaceEmbeddings) {
+      await this.client.updateWorkspaceEmbeddings(workspaceSlug, {
+        adds: dedupe(documentNames),
+        deletes: [],
+      });
+    }
+    return { topicPath: safePath, workspaceSlug, documentNames: dedupe(documentNames) };
+  }
+
+  async getTopicWorkspaceForDir(relativeDir) {
+    const safeDir = relativeDir ? assertDrawerPath(relativeDir) : "";
+    if (!safeDir || safeDir.split("/").length !== 2) return "";
+    const drawer = await this.ensureTopicRagWorkspace(safeDir);
+    return drawer.rag?.workspaceSlug || "";
+  }
+
   async upsertDrawerMetadata(relativePath, metadata = {}) {
     const safePath = assertDrawerPath(relativePath);
     const index = await this.readKnowledgeIndex();
@@ -218,6 +341,7 @@ export class ResourceManager {
       description: metadata.description || index.drawers[safePath]?.description || "",
       enabled: metadata.enabled ?? index.drawers[safePath]?.enabled ?? true,
       metadata: metadata.metadata || index.drawers[safePath]?.metadata || {},
+      rag: metadata.rag || index.drawers[safePath]?.rag || undefined,
       updatedAt: now,
       createdAt: index.drawers[safePath]?.createdAt || now,
     };
@@ -292,6 +416,7 @@ async function readTree(root, current, index) {
         description: drawer.description || "",
         level: relativePath ? relativePath.split("/").length : 0,
         metadata: drawer.metadata || {},
+        rag: drawer.rag || {},
         children: childTree.children,
       });
     } else if (entry.isFile()) {
@@ -329,6 +454,15 @@ function assertPrimaryDrawerPath(value) {
   const normalized = assertSafeRelativePath(value);
   if (!normalized) return "";
   return normalized.split("/")[0];
+}
+
+function assertTopicPath(value) {
+  const normalized = assertDrawerPath(value);
+  const parts = normalized.split("/");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    throw new ResourceManagerError("Knowledge topic path must include a primary drawer and a secondary topic.", 400);
+  }
+  return normalized;
 }
 
 function requireNonEmpty(value, message) {
@@ -392,6 +526,42 @@ function getPrimaryDrawer(relativePath) {
 function getSecondaryTags(relativePath) {
   const parts = assertSafeRelativePath(relativePath).split("/");
   return parts.length > 2 ? [parts[1]] : parts.length === 2 && !parts[1].includes(".") ? [parts[1]] : [];
+}
+
+function getTopicPath(relativePath) {
+  const parts = assertSafeRelativePath(relativePath).split("/").filter(Boolean);
+  return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : "";
+}
+
+function isTopicInProjectScope(topicPath, selectedDomains, selectedTopics) {
+  if (!topicPath || topicPath.split("/").length !== 2) return false;
+  if (!selectedDomains.has(getPrimaryDrawer(topicPath))) return false;
+  return !selectedTopics.size || selectedTopics.has(topicPath);
+}
+
+function enrichTopicIndex(topic, documentsByPath) {
+  const documents = Object.values(documentsByPath || {}).filter((item) =>
+    item.topicPath === topic.path || getTopicPath(item.relativePath) === topic.path
+  );
+  return {
+    path: topic.path,
+    name: topic.name || path.posix.basename(topic.path),
+    description: topic.description || "",
+    rag: topic.rag || {},
+    documentCount: documents.length,
+    documents: documents.map((document) => ({
+      id: document.id,
+      relativePath: document.relativePath,
+      title: document.title,
+      type: document.type,
+      documentNames: document.documentNames || [],
+      updatedAt: document.updatedAt,
+    })),
+  };
+}
+
+function extractWorkspaceSlug(response) {
+  return response?.workspace?.slug || response?.slug || response?.workspace?.[0]?.slug;
 }
 
 function buildDrawerList(index) {

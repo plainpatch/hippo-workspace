@@ -2,24 +2,38 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { config } from "./config.js";
 
+const runningProcesses = new Map();
+
 export class CodexRuntimeAdapter {
-  constructor({ command = config.codexCommand, model = config.codexModel } = {}) {
+  constructor({
+    command = config.codexCommand,
+    model = config.codexModel,
+    sandboxMode = config.codexSandboxMode,
+    serviceTier = config.codexServiceTier,
+  } = {}) {
     this.id = "codex";
     this.command = command;
     this.model = model;
+    this.sandboxMode = sandboxMode;
+    this.serviceTier = serviceTier;
   }
 
-  async execute({ project, agent, prompt }) {
+  async execute({ project, agent, prompt, rootSession, reset = false, runId = randomUUID(), contextPolicy } = {}) {
     const outputPath = path.join(os.tmpdir(), `hippo-codex-${Date.now()}-${process.pid}.txt`);
-    const args = this.buildArgs(project, outputPath);
-    if (this.model) args.push("--model", this.model);
+    const existingSessionId = reset ? "" : getExistingCodexSessionId(rootSession);
+    const args = this.buildArgs(project, outputPath, { existingSessionId });
     args.push("-");
 
+    const events = [];
     const { stdout, stderr } = await runCommand(this.command, args, {
+      runId,
+      runtimeId: this.id,
       input: prompt,
       timeoutMs: Number(process.env.CODEX_EXEC_TIMEOUT_MS || 300000),
+      onStdout: (chunk) => collectJsonEvents(chunk, events),
     });
 
     let text = "";
@@ -33,23 +47,40 @@ export class CodexRuntimeAdapter {
 
     return {
       runtimeId: this.id,
+      runId,
       agentId: agent?.id,
       text: text.trim() || stdout.trim(),
       stdout,
       stderr,
+      events,
+      runtimeSession: buildRuntimeSession({
+        project,
+        rootSession,
+        sessionId: extractCodexSessionId(events, stdout) || getExistingCodexSessionId(rootSession),
+        resumedFromSessionId: existingSessionId,
+        status: events.length ? "active" : "ephemeral",
+        contextPolicy,
+      }),
     };
   }
 
-  async stream({ project, agent, prompt, onEvent }) {
+  async stream({ project, agent, prompt, rootSession, reset = false, runId = randomUUID(), contextPolicy, onEvent } = {}) {
     const outputPath = path.join(os.tmpdir(), `hippo-codex-${Date.now()}-${process.pid}.txt`);
-    const args = this.buildArgs(project, outputPath);
-    if (this.model) args.push("--model", this.model);
+    const existingSessionId = reset ? "" : getExistingCodexSessionId(rootSession);
+    const args = this.buildArgs(project, outputPath, { existingSessionId });
     args.push("-");
 
+    const events = [];
     const { stdout, stderr } = await runCommand(this.command, args, {
+      runId,
+      runtimeId: this.id,
       input: prompt,
       timeoutMs: Number(process.env.CODEX_EXEC_TIMEOUT_MS || 300000),
-      onStdout: (chunk) => onEvent?.({ type: "stdout", text: chunk }),
+      onStdout: (chunk) => {
+        const parsed = collectJsonEvents(chunk, events);
+        if (parsed.length) parsed.forEach((event) => onEvent?.(normalizeCodexEvent(event, { runId, runtimeId: this.id })));
+        onEvent?.({ type: "stdout", text: chunk });
+      },
       onStderr: (chunk) => onEvent?.({ type: "stderr", text: chunk }),
     });
 
@@ -64,34 +95,168 @@ export class CodexRuntimeAdapter {
 
     return {
       runtimeId: this.id,
+      runId,
       agentId: agent?.id,
       text: text.trim() || stdout.trim(),
       stdout,
       stderr,
+      events,
+      runtimeSession: buildRuntimeSession({
+        project,
+        rootSession,
+        sessionId: extractCodexSessionId(events, stdout) || getExistingCodexSessionId(rootSession),
+        resumedFromSessionId: existingSessionId,
+        status: events.length ? "active" : "ephemeral",
+        contextPolicy,
+      }),
     };
   }
 
-  buildArgs(project, outputPath) {
-    return [
+  buildArgs(project, outputPath, { existingSessionId = "" } = {}) {
+    const serviceTierConfig = this.serviceTier ? `service_tier="${this.serviceTier}"` : "";
+    const args = existingSessionId ? [
       "exec",
+      "resume",
+      "--json",
+      "--skip-git-repo-check",
+      "--output-last-message",
+      outputPath,
+    ] : [
+      "exec",
+      "--json",
       "--cd",
       project.localWorkspacePath || process.cwd(),
       "--skip-git-repo-check",
-      "-c",
-      'service_tier="fast"',
-      "--sandbox",
-      "workspace-write",
       "--output-last-message",
       outputPath,
     ];
+    if (serviceTierConfig) args.splice(existingSessionId ? 4 : 4, 0, "-c", serviceTierConfig);
+    if (!existingSessionId && this.sandboxMode) args.splice(args.length - 2, 0, "--sandbox", this.sandboxMode);
+    if (this.model) args.push("--model", this.model);
+    if (existingSessionId) args.push(existingSessionId);
+    return args;
+  }
+
+  cancel(runId) {
+    return cancelRuntimeProcess(runId);
   }
 }
 
-function runCommand(command, args, { input, timeoutMs, onStdout, onStderr }) {
+function collectJsonEvents(chunk, target) {
+  const parsed = [];
+  for (const line of String(chunk || "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || !trimmed.startsWith("{")) continue;
+    try {
+      const event = JSON.parse(trimmed);
+      target.push(event);
+      parsed.push(event);
+    } catch {
+      // Codex may interleave non-JSON progress text; keep stdout intact as fallback.
+    }
+  }
+  return parsed;
+}
+
+function getExistingCodexSessionId(rootSession) {
+  return rootSession?.runtimeSessions?.codex?.sessionId || "";
+}
+
+function extractCodexSessionId(events, stdout) {
+  for (const event of events || []) {
+    const candidates = [
+      event.session_id,
+      event.sessionId,
+      event.thread_id,
+      event.threadId,
+      event.conversation_id,
+      event.conversationId,
+      event.id && String(event.type || "").includes("session") ? event.id : "",
+      event.payload?.session_id,
+      event.payload?.sessionId,
+      event.payload?.thread_id,
+      event.payload?.threadId,
+      event.data?.session_id,
+      event.data?.sessionId,
+      event.data?.thread_id,
+      event.data?.threadId,
+    ].filter(Boolean);
+    if (candidates.length) return String(candidates[0]);
+  }
+  const match = String(stdout || "").match(/"session[_-]?id"\s*:\s*"([^"]+)"/i);
+  return match?.[1] || "";
+}
+
+function buildRuntimeSession({ project, rootSession, sessionId, resumedFromSessionId, status, contextPolicy }) {
+  return {
+    provider: "codex",
+    sessionId: sessionId || "",
+    resumedFromSessionId: resumedFromSessionId || "",
+    workspacePath: project.localWorkspacePath || process.cwd(),
+    hippoSessionId: rootSession?.id || "",
+    status: sessionId ? status : "ephemeral",
+    contextPolicy: normalizeContextPolicy(contextPolicy),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeContextPolicy(policy) {
+  const strategy = ["runtime", "reset", "manual-summary"].includes(policy?.strategy)
+    ? policy.strategy
+    : "runtime";
+  return {
+    strategy,
+    summary: policy?.summary || "",
+    summaryUpdatedAt: policy?.summaryUpdatedAt || "",
+  };
+}
+
+function normalizeCodexEvent(event, { runId, runtimeId }) {
+  const type = event?.type || "unknown";
+  const item = event?.item || {};
+  const text = item.text || event.text || event.delta || "";
+  const mappedType = {
+    "thread.started": "runtime_session_started",
+    "turn.started": "runtime_turn_started",
+    "turn.completed": "runtime_turn_completed",
+    "item.started": "runtime_item_started",
+    "item.completed": "runtime_item_completed",
+    "item.updated": "runtime_item_updated",
+  }[type] || "runtime_event";
+  return {
+    type: "runtime_event",
+    runtimeId,
+    runId,
+    eventType: mappedType,
+    sourceType: type,
+    text,
+    payload: event,
+  };
+}
+
+function cancelRuntimeProcess(runId) {
+  const record = runningProcesses.get(runId);
+  if (!record) {
+    return { cancelled: false, reason: "run-not-active", runId };
+  }
+  record.cancelled = true;
+  record.child.kill("SIGTERM");
+  setTimeout(() => {
+    if (!record.exited) record.child.kill("SIGKILL");
+  }, 2000).unref();
+  return { cancelled: true, runId, pid: record.child.pid };
+}
+
+export function cancelRuntimeRun(runId) {
+  return cancelRuntimeProcess(runId);
+}
+
+function runCommand(command, args, { runId, runtimeId, input, timeoutMs, onStdout, onStderr }) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
     });
+    if (runId) runningProcesses.set(runId, { child, command, args, runtimeId, startedAt: new Date().toISOString(), cancelled: false, exited: false });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -100,7 +265,8 @@ function runCommand(command, args, { input, timeoutMs, onStdout, onStderr }) {
       timedOut = true;
       child.kill("SIGTERM");
       setTimeout(() => {
-        if (!child.killed) child.kill("SIGKILL");
+        const record = runId ? runningProcesses.get(runId) : undefined;
+        if (!record?.exited) child.kill("SIGKILL");
       }, 2000).unref();
     }, timeoutMs);
 
@@ -116,10 +282,26 @@ function runCommand(command, args, { input, timeoutMs, onStdout, onStderr }) {
     });
     child.on("error", (error) => {
       clearTimeout(timer);
+      if (runId) runningProcesses.delete(runId);
       reject(error);
     });
     child.on("close", (code, signal) => {
       clearTimeout(timer);
+      const record = runId ? runningProcesses.get(runId) : undefined;
+      if (record) record.exited = true;
+      if (runId) runningProcesses.delete(runId);
+      if (record?.cancelled) {
+        reject(new RuntimeAdapterError(`Runtime run ${runId} was cancelled.`, 499, {
+          command,
+          args,
+          stdout,
+          stderr,
+          signal,
+          runId,
+          cancelled: true,
+        }));
+        return;
+      }
       if (timedOut) {
         reject(new RuntimeAdapterError(`Codex runtime timed out after ${timeoutMs}ms.`, 504, {
           command,
@@ -127,6 +309,7 @@ function runCommand(command, args, { input, timeoutMs, onStdout, onStderr }) {
           stdout,
           stderr,
           signal,
+          runId,
         }));
         return;
       }
@@ -137,6 +320,7 @@ function runCommand(command, args, { input, timeoutMs, onStdout, onStderr }) {
           stdout,
           stderr,
           signal,
+          runId,
         }));
         return;
       }
@@ -155,6 +339,8 @@ export class RuntimeRegistry {
         codex: {
           command: config.codexCommand,
           model: config.codexModel || undefined,
+          sandboxMode: config.codexSandboxMode,
+          serviceTier: config.codexServiceTier,
         },
       },
       ...(settings || {}),
@@ -166,6 +352,22 @@ export class RuntimeRegistry {
       return new CodexRuntimeAdapter(this.settings.runtimes.codex);
     }
     throw new RuntimeAdapterError(`Unsupported runtime: ${id}`, 400);
+  }
+
+  updateSettings(settings = {}) {
+    this.settings = {
+      ...this.settings,
+      ...settings,
+      runtimes: {
+        ...(this.settings.runtimes || {}),
+        ...(settings.runtimes || {}),
+      },
+    };
+    return this.settings;
+  }
+
+  cancelRun(runId) {
+    return cancelRuntimeRun(runId);
   }
 }
 
