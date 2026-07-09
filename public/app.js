@@ -988,28 +988,34 @@ async function sendMessage(event) {
   if (!task) return;
 
   const conversation = await ensureActiveConversation(task);
-  state.messages.push({ role: "user", text: task });
-  renderMessages();
-  await saveActiveConversation();
-  const input = document.getElementById("messageInput");
-  input.value = "";
-  resizeComposer(input);
-
+  const runId = crypto.randomUUID?.() || `run-${Date.now()}`;
   const payload = {
     task,
     agentId: form.get("agentId") || undefined,
     mode: form.get("mode") || undefined,
     sessionId: conversation.id,
-    runId: crypto.randomUUID?.() || `run-${Date.now()}`,
+    runId,
     dryRun: Boolean(form.get("dryRun")),
     contextStrategy: form.get("contextStrategy") || "runtime",
     contextSummary: form.get("contextStrategy") === "manual-summary"
       ? String(form.get("contextSummary") || "").trim()
       : "",
   };
+  const turnMetadata = buildTurnMetadata(project, conversation, payload);
+  state.messages.push({ role: "user", text: task, runId, metadata: { ...turnMetadata, messageRole: "user" } });
+  renderMessages();
+  await saveActiveConversation();
+  const input = document.getElementById("messageInput");
+  input.value = "";
+  resizeComposer(input);
 
   try {
-    const assistantMessage = { role: "assistant", text: "正在准备执行..." };
+    const assistantMessage = {
+      role: "assistant",
+      text: "正在准备执行...",
+      runId,
+      metadata: { ...turnMetadata, messageRole: "assistant", status: "preparing" },
+    };
     state.messages.push(assistantMessage);
     renderMessages();
     setActiveRun(project.id, payload.runId);
@@ -1017,6 +1023,14 @@ async function sendMessage(event) {
       onPrepared(event) {
         setActiveRun(project.id, event.request?.runId || payload.runId);
         assistantMessage.runId = event.request?.runId || payload.runId;
+        assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
+          runId: assistantMessage.runId,
+          agentId: event.agent?.id || payload.agentId || "",
+          agentName: event.agent?.name || "",
+          runtimeId: event.request?.runtimeId || turnMetadata.runtimeId,
+          contextPolicy: event.request?.contextPolicy,
+          status: payload.dryRun ? "dry-run" : "running",
+        });
         if (event.agentRun) assistantMessage.agentRunSummary = summarizeAgentRun(event.agentRun);
         assistantMessage.text = payload.dryRun ? "正在生成编排请求..." : "正在调用 Codex runtime...";
         renderMessages();
@@ -1034,6 +1048,14 @@ async function sendMessage(event) {
           : extractAgentResponse(data);
         assistantMessage.runId = data.agentRun?.id || assistantMessage.runId || payload.runId;
         if (data.agentRun) assistantMessage.agentRunSummary = summarizeAgentRun(data.agentRun);
+        assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
+          runId: assistantMessage.runId,
+          status: data.agentRun?.status || "completed",
+          runtimeSession: data.result?.runtimeSession,
+          runtimeId: data.result?.runtimeId || data.request?.runtimeId || assistantMessage.metadata?.runtimeId,
+          agentRunId: data.agentRun?.id || "",
+          agentRunStatus: data.agentRun?.status || "",
+        });
         clearActiveRun();
         renderMessages();
         saveActiveConversation();
@@ -1047,6 +1069,11 @@ async function sendMessage(event) {
       },
       onCancelled(event) {
         assistantMessage.text = `${assistantMessage.text || ""}\n\n运行已停止。`.trim();
+        assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
+          status: "cancelled",
+          cancelledAt: new Date().toISOString(),
+          cancelEvent: event,
+        });
         clearActiveRun();
         renderMessages();
         saveActiveConversation();
@@ -1054,7 +1081,12 @@ async function sendMessage(event) {
     });
   } catch (error) {
     clearActiveRun();
-    state.messages.push({ role: "assistant", text: `执行失败：${error.message}` });
+    state.messages.push({
+      role: "assistant",
+      text: `执行失败：${error.message}`,
+      runId,
+      metadata: { ...turnMetadata, messageRole: "assistant", status: "failed", error: error.message },
+    });
     await saveActiveConversation();
   }
   renderMessages();
@@ -1067,6 +1099,33 @@ function syncContextStrategyFields() {
   summary.classList.toggle("hidden", strategy !== "manual-summary");
   if (strategy === "manual-summary") summary.focus();
   else summary.value = "";
+}
+
+function buildTurnMetadata(project, conversation, payload) {
+  const agent = payload.agentId ? state.agents.find((item) => item.id === payload.agentId) : null;
+  return stripEmpty({
+    workspaceId: project.id,
+    workspaceName: project.name,
+    conversationId: conversation.id,
+    runId: payload.runId,
+    agentId: payload.agentId || "",
+    agentName: agent?.name || "",
+    runtimeId: agent?.runtimeId || state.status?.wrapper?.settings?.defaultRuntimeId || "codex",
+    mode: payload.mode || agent?.defaultMode || "automatic",
+    contextStrategy: payload.contextStrategy || "runtime",
+    contextSummary: payload.contextSummary || "",
+    contextSummaryProvided: Boolean(payload.contextSummary),
+    dryRun: Boolean(payload.dryRun),
+    createdAt: new Date().toISOString(),
+  });
+}
+
+function mergeMessageMetadata(current = {}, next = {}) {
+  return stripEmpty({
+    ...(current || {}),
+    ...(next || {}),
+    updatedAt: new Date().toISOString(),
+  });
 }
 
 async function streamProjectExecution(projectId, payload, handlers = {}) {
