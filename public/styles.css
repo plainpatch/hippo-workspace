@@ -722,8 +722,28 @@ dd {
   margin-bottom: 6px;
 }
 
+.runSummaryActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .runSummaryHeader strong {
   font-size: 13px;
+}
+
+.runDetailButton {
+  min-height: 24px;
+  padding: 2px 7px;
+  border-color: rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  color: #d8d8dc;
+  background: #242424;
+  font-size: 11px;
+}
+
+.runDetailButton:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .runStatus {
@@ -806,6 +826,124 @@ dd {
 
 .runNode.waiting {
   border-color: rgba(245, 158, 11, 0.32);
+}
+
+.runDetailPage {
+  width: min(var(--chat-width), calc(100vw - var(--sidebar-width) - 56px));
+  margin: 0 auto;
+  display: grid;
+  gap: 14px;
+  padding-bottom: 36px;
+}
+
+.runDetailHeader,
+.runDetailSection,
+.runDetailNode,
+.traceItem {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #202020;
+}
+
+.runDetailHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px;
+}
+
+.runDetailHeader h2,
+.runDetailSection h3 {
+  margin: 0;
+  color: #f4f4f5;
+  font-size: 15px;
+}
+
+.runDetailHeader small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.runDetailGrid,
+.runDetailNode dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 7px 12px;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #202020;
+  font-size: 12px;
+}
+
+.runDetailGrid dt,
+.runDetailNode dt {
+  color: #8f8f8f;
+}
+
+.runDetailGrid dd,
+.runDetailNode dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.runDetailSection {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+}
+
+.runDetailNodes,
+.traceList {
+  display: grid;
+  gap: 8px;
+}
+
+.runDetailNode {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.runDetailNode > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.runDetailNode strong {
+  color: #f4f4f5;
+}
+
+.runDetailNode small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.traceItem {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+}
+
+.traceItem strong {
+  color: #f4f4f5;
+  font-size: 12px;
+}
+
+.traceItem small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.traceItem code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: #cfcfcf;
+  font-size: 11px;
 }
 
 .inboxPage {

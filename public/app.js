@@ -47,6 +47,7 @@ function bindEvents() {
     else if (state.currentView === "knowledge") focusKnowledgeCreateAction();
     else if (state.currentView === "inbox") showInboxPage();
     else if (state.currentView === "settings") refreshSettingsPage();
+    else if (state.currentView === "run-detail") renderActiveProject();
     else openProjectForm(getActiveProject());
   });
   document.getElementById("closeDrawerBtn").addEventListener("click", closeDrawer);
@@ -295,15 +296,18 @@ function renderActiveProject() {
 function renderMessages() {
   const stream = document.getElementById("chatStream");
   stream.innerHTML = state.messages.map((message) => `
-    <article class="message ${message.role}">
+    <article class="message ${escapeHtml(message.role)}">
       <div class="messageAvatar">${message.role === "user" ? "你" : "H"}</div>
       <div class="messageBody">
         <div class="messageMeta">${message.role === "user" ? "你" : "Hippo Agent"}</div>
         <div class="messageText">${formatMessage(message.text)}</div>
-        ${message.agentRunSummary ? renderAgentRunSummary(message.agentRunSummary) : ""}
+        ${message.agentRunSummary ? renderAgentRunSummary(message.agentRunSummary, message.runId) : ""}
       </div>
     </article>
   `).join("");
+  stream.querySelectorAll("[data-run-detail-id]").forEach((button) => {
+    button.addEventListener("click", () => showRunDetail(button.dataset.runDetailId));
+  });
   stream.scrollTop = stream.scrollHeight;
 }
 
@@ -475,6 +479,90 @@ async function renderInboxManager() {
     form.addEventListener("submit", resumeWaitingNode);
   });
   stream.scrollTop = 0;
+}
+
+async function showRunDetail(runId) {
+  const project = getActiveProject();
+  if (!project || !runId) return;
+  const [runData, traceData] = await Promise.all([
+    request(`/api/workspaces/${encodeURIComponent(project.id)}/runs/${encodeURIComponent(runId)}`),
+    request(`/api/workspaces/${encodeURIComponent(project.id)}/runs/${encodeURIComponent(runId)}/trace`),
+  ]);
+  const run = runData.run;
+  state.currentView = "run-detail";
+  setActiveSystemNav("chat");
+  document.getElementById("composerForm").classList.add("hidden");
+  setHeaderConfigButton(true);
+  document.getElementById("projectConfigBtn").textContent = "返回对话";
+  document.getElementById("activeProjectName").textContent = "运行详情";
+  document.getElementById("activeProjectMeta").textContent = `${project.name} · ${run.id}`;
+  const stream = document.getElementById("chatStream");
+  stream.innerHTML = renderRunDetail(run, traceData.trace || []);
+  stream.scrollTop = 0;
+}
+
+function renderRunDetail(run, trace = []) {
+  const nodes = Object.values(run.nodeRuns || {});
+  return `
+    <section class="runDetailPage">
+      <div class="runDetailHeader">
+        <div>
+          <h2>${escapeHtml(run.agentSnapshot?.name || "通用助手")}</h2>
+          <small>${escapeHtml(run.id)} · ${escapeHtml(run.status)}</small>
+        </div>
+        <span class="runStatus ${escapeHtml(run.status)}">${escapeHtml(run.status)}</span>
+      </div>
+      <dl class="runDetailGrid">
+        <dt>工作区</dt><dd>${escapeHtml(run.workspaceId || "")}</dd>
+        <dt>Root Session</dt><dd>${escapeHtml(run.rootSessionId || "")}</dd>
+        <dt>Agent</dt><dd>${escapeHtml(run.agentId || "通用助手")} · v${escapeHtml(run.agentVersion || 1)}</dd>
+        <dt>Runtime</dt><dd>${escapeHtml(run.request?.runtimeId || "codex")}</dd>
+        <dt>Sandbox</dt><dd>${escapeHtml(run.request?.runtimeOptions?.sandboxMode || "默认")}</dd>
+        <dt>上下文</dt><dd>${escapeHtml(run.request?.contextPolicy?.strategy || "runtime")}</dd>
+      </dl>
+      <div class="runDetailSection">
+        <h3>节点</h3>
+        <div class="runDetailNodes">
+          ${nodes.map(renderRunDetailNode).join("") || `<div class="emptyBlock">没有节点。</div>`}
+        </div>
+      </div>
+      <div class="runDetailSection">
+        <h3>Trace</h3>
+        <div class="traceList">
+          ${trace.slice(-80).map(renderTraceEvent).join("") || `<div class="emptyBlock">没有 trace。</div>`}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderRunDetailNode(node) {
+  return `
+    <div class="runDetailNode ${escapeHtml(node.status || "pending")}">
+      <div>
+        <strong>${escapeHtml(node.nodeId || "root")}</strong>
+        <small>${escapeHtml(node.kind || "task")} · ${escapeHtml(node.id || "")}</small>
+      </div>
+      <span class="runStatus ${escapeHtml(node.status || "pending")}">${escapeHtml(node.status || "pending")}</span>
+      <dl>
+        <dt>Runtime Run</dt><dd>${escapeHtml(node.runtimeRunId || "")}</dd>
+        <dt>Runtime Session</dt><dd>${escapeHtml(node.runtimeSession?.sessionId || "")}</dd>
+        <dt>Sandbox</dt><dd>${escapeHtml(node.runtimeSession?.runtimeOptions?.sandboxMode || "")}</dd>
+        <dt>输出</dt><dd>${escapeHtml(summarizeRunOutput(node.output) || "")}</dd>
+      </dl>
+    </div>
+  `;
+}
+
+function renderTraceEvent(event) {
+  const payload = event.payload === undefined ? "" : JSON.stringify(event.payload);
+  return `
+    <div class="traceItem">
+      <strong>${escapeHtml(event.type || "trace")}</strong>
+      <small>${escapeHtml(event.createdAt || "")}</small>
+      ${payload ? `<code>${escapeHtml(payload.length > 360 ? `${payload.slice(0, 360)}...` : payload)}</code>` : ""}
+    </div>
+  `;
 }
 
 function renderInboxItem(run, node) {
@@ -1559,13 +1647,17 @@ function updateRunSummaryNode(summary, event) {
   };
 }
 
-function renderAgentRunSummary(summary) {
+function renderAgentRunSummary(summary, messageRunId = "") {
   const nodes = Array.isArray(summary.nodes) ? summary.nodes : [];
+  const runId = summary.id || messageRunId;
   return `
     <div class="runSummary">
       <div class="runSummaryHeader">
         <strong>${escapeHtml(summary.agentType === "dag" ? "DAG Run" : "Run")}</strong>
-        <span class="runStatus ${escapeHtml(summary.status || "pending")}">${escapeHtml(summary.status || "pending")}</span>
+        <div class="runSummaryActions">
+          <span class="runStatus ${escapeHtml(summary.status || "pending")}">${escapeHtml(summary.status || "pending")}</span>
+          ${runId ? `<button class="runDetailButton" data-run-detail-id="${escapeHtml(runId)}" type="button">详情</button>` : ""}
+        </div>
       </div>
       ${summary.agentName ? `<small>${escapeHtml(summary.agentName)}</small>` : ""}
       <div class="runNodeList">
