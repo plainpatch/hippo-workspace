@@ -578,9 +578,12 @@ export class AgentOrchestrator {
       throw new AgentOrchestratorError(`Workspace ${id} was not found.`, 404);
     }
     store.projects = next;
+    const deletedConversations = store.conversations.filter((conversation) => conversation.projectId === id).length;
+    const deletedRuns = store.agentRuns.filter((run) => run.workspaceId === id || run.projectId === id).length;
     store.conversations = store.conversations.filter((conversation) => conversation.projectId !== id);
+    store.agentRuns = store.agentRuns.filter((run) => run.workspaceId !== id && run.projectId !== id);
     await this.writeStore(store);
-    return { deleted: true, id };
+    return { deleted: true, id, deletedConversations, deletedRuns };
   }
 
   async executeAgentTask(id, input) {
