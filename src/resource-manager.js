@@ -161,27 +161,21 @@ export class ResourceManager {
   }
 
   async ingestKnowledgeText({ relativeDir = "", title, textContent, metadata = {} }) {
-    if (!this.client) throw new ResourceManagerError("AnythingLLM client is required for ingestion.", 500);
     await this.ensureBaseDirectories();
     const safeDir = relativeDir ? assertDrawerPath(relativeDir) : "";
     const fileName = `${slugify(title || "note")}-${Date.now()}.md`;
     const relativePath = safeDir ? path.posix.join(safeDir, fileName) : fileName;
     const absolutePath = path.join(this.knowledgeDir, relativePath);
+    const content = String(textContent || "");
     await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-    await fs.writeFile(absolutePath, String(textContent || ""), "utf8");
+    await fs.writeFile(absolutePath, content, "utf8");
 
     const topicWorkspace = await this.getTopicWorkspaceForDir(safeDir);
-    const response = this.client.ingestText
-      ? await this.client.ingestText({
-          textContent,
-          metadata: { title, sourcePath: relativePath, ...metadata },
-          addToWorkspaces: topicWorkspace ? [topicWorkspace] : undefined,
-        })
-      : await this.client.uploadRawText({
-          textContent,
-          metadata: { title, sourcePath: relativePath, ...metadata },
-          addToWorkspaces: topicWorkspace ? [topicWorkspace] : undefined,
-        });
+    const { response, ragError } = await this.tryIngestTextToRag({
+      textContent: content,
+      metadata: { title, sourcePath: relativePath, ...metadata },
+      addToWorkspaces: topicWorkspace ? [topicWorkspace] : undefined,
+    });
     const documentNames = extractDocumentNames(response);
     await this.ensureDrawerMetadata(safeDir, metadata);
     await this.recordKnowledgeDocument(relativePath, {
@@ -192,13 +186,14 @@ export class ResourceManager {
       documentNames,
       topicPath: getTopicPath(relativePath),
       ragWorkspaceSlug: topicWorkspace,
+      sourceHash: createHash("sha256").update(content).digest("hex"),
+      sourceSize: Buffer.byteLength(content),
       anythingllmResponse: response,
     });
-    return { relativePath, absolutePath, documentNames, response };
+    return { relativePath, absolutePath, documentNames, response, ragError };
   }
 
   async ingestKnowledgeFile({ relativeDir = "", fileBuffer, fileName, metadata = {} }) {
-    if (!this.client) throw new ResourceManagerError("AnythingLLM client is required for ingestion.", 500);
     await this.ensureBaseDirectories();
     const safeDir = relativeDir ? assertDrawerPath(relativeDir) : "";
     const safeName = path.basename(fileName || `file-${Date.now()}`);
@@ -208,20 +203,14 @@ export class ResourceManager {
     await fs.writeFile(absolutePath, fileBuffer);
 
     const topicWorkspace = await this.getTopicWorkspaceForDir(safeDir);
-    const response = this.client.ingestFile
-      ? await this.client.ingestFile({
-          fileBuffer,
-          fileName: safeName,
-          metadata: { sourcePath: relativePath, ...metadata },
-          addToWorkspaces: topicWorkspace ? [topicWorkspace] : undefined,
-        })
-      : await this.client.uploadFile({
-          fileBuffer,
-          fileName: safeName,
-          metadata: { sourcePath: relativePath, ...metadata },
-          addToWorkspaces: topicWorkspace ? [topicWorkspace] : undefined,
-        });
+    const { response, ragError } = await this.tryIngestFileToRag({
+      fileBuffer,
+      fileName: safeName,
+      metadata: { sourcePath: relativePath, ...metadata },
+      addToWorkspaces: topicWorkspace ? [topicWorkspace] : undefined,
+    });
     const documentNames = extractDocumentNames(response);
+    const stat = await fs.stat(absolutePath);
     await this.ensureDrawerMetadata(safeDir, metadata);
     await this.recordKnowledgeDocument(relativePath, {
       title: safeName,
@@ -231,9 +220,36 @@ export class ResourceManager {
       documentNames,
       topicPath: getTopicPath(relativePath),
       ragWorkspaceSlug: topicWorkspace,
+      sourceHash: createHash("sha256").update(fileBuffer).digest("hex"),
+      sourceSize: stat.size,
+      sourceMtimeMs: stat.mtimeMs,
       anythingllmResponse: response,
     });
-    return { relativePath, absolutePath, documentNames, response };
+    return { relativePath, absolutePath, documentNames, response, ragError };
+  }
+
+  async tryIngestTextToRag(payload) {
+    if (!this.client) return { response: {}, ragError: { message: "RAG provider is not configured." } };
+    try {
+      const response = this.client.ingestText
+        ? await this.client.ingestText(payload)
+        : await this.client.uploadRawText(payload);
+      return { response };
+    } catch (error) {
+      return { response: {}, ragError: serializeRagError(error) };
+    }
+  }
+
+  async tryIngestFileToRag(payload) {
+    if (!this.client) return { response: {}, ragError: { message: "RAG provider is not configured." } };
+    try {
+      const response = this.client.ingestFile
+        ? await this.client.ingestFile(payload)
+        : await this.client.uploadFile(payload);
+      return { response };
+    } catch (error) {
+      return { response: {}, ragError: serializeRagError(error) };
+    }
   }
 
   async recordKnowledgeDocument(relativePath, value) {
@@ -651,6 +667,15 @@ function buildKnowledgeDocumentRecord(relativePath, value = {}) {
     sourceSize: Number.isFinite(value.sourceSize) ? value.sourceSize : undefined,
     sourceMtimeMs: Number.isFinite(value.sourceMtimeMs) ? value.sourceMtimeMs : undefined,
     updatedAt: new Date().toISOString(),
+  };
+}
+
+function serializeRagError(error) {
+  return {
+    name: error?.name || "Error",
+    message: error?.message || String(error || "RAG provider request failed."),
+    status: error?.status,
+    details: error?.details,
   };
 }
 
