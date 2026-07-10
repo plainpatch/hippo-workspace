@@ -10,18 +10,15 @@
     <div class="appShell">
       <aside class="sidebar">
         <div class="systemNav">
-          <button class="sysButton active" id="newChatBtn" type="button"><span>＋</span>新对话</button>
-          <button class="sysButton" id="searchBtn" type="button"><span>⌕</span>搜索</button>
-          <button class="sysButton" id="knowledgeBtn" type="button"><span>◎</span>知识库</button>
-          <button class="sysButton" id="mcpBtn" type="button"><span>◇</span>MCP</button>
+          <button class="sysButton active" id="projectHomeBtn" data-system-view="chat" type="button"><span>▣</span>工作区</button>
+          <button class="sysButton" id="knowledgeBtn" data-system-view="knowledge" type="button"><span>K</span>知识库</button>
+          <button class="sysButton" id="agentsBtn" data-system-view="agents" type="button"><span>A</span>智能体</button>
+          <button class="sysButton" id="inboxBtn" data-system-view="inbox" type="button"><span>W</span>待处理</button>
+          <button class="sysButton" id="mcpBtn" type="button"><span>M</span>MCP</button>
+          <button class="sysButton" id="createProjectBtn" type="button"><span>+</span>新建工作区</button>
         </div>
 
         <div class="projectsPane">
-          <div class="sectionLabel">项目</div>
-          <button class="projectRoot" id="createProjectBtn" type="button">
-            <span class="projectIcon">H</span>
-            <span>新建项目</span>
-          </button>
           <div id="projectList" class="projectList"></div>
         </div>
 
@@ -42,13 +39,13 @@
           <div class="projectTitle">
             <span class="titleIcon">▣</span>
             <div>
-              <h1 id="activeProjectName">选择或创建项目</h1>
-              <p id="activeProjectMeta">项目级配置会决定默认 Agent、Skill 与 RAG 范围。</p>
+              <h1 id="activeProjectName">选择或创建工作区</h1>
+              <p id="activeProjectMeta">工作区管理本地目录、Agent 和知识库引用。</p>
             </div>
           </div>
           <div class="headerActions">
             <div id="runtimePills" class="pills"></div>
-            <button id="projectConfigBtn" type="button">项目配置</button>
+            <button id="projectConfigBtn" type="button">工作区设置</button>
             <button id="refreshBtn" type="button">刷新</button>
           </div>
         </header>
@@ -56,73 +53,71 @@
         <section id="chatStream" class="chatStream" aria-live="polite"></section>
 
         <form id="composerForm" class="composer">
-          <textarea id="messageInput" name="message" rows="3" placeholder="向当前项目的 Agent 提问，或描述要执行的任务" required></textarea>
+          <textarea id="messageInput" name="message" rows="1" placeholder="描述任务；可选加载 Agent" required></textarea>
           <div class="composerBar">
             <div class="composerTools">
-              <button id="attachTextBtn" type="button">＋ 入库</button>
-              <label class="modeSelect">模式
-                <select name="mode">
-                  <option value="">项目默认</option>
-                  <option value="query">检索问答</option>
-                  <option value="chat">对话</option>
-                  <option value="automatic">自动</option>
+              <button id="attachTextBtn" type="button" title="入库">+ 入库</button>
+              <label class="modeSelect">Agent
+                <select name="agentId" id="agentSelect">
+                  <option value="">通用助手</option>
+                </select>
+              </label>
+              <label class="modeSelect">上下文
+                <select name="contextStrategy" id="contextStrategySelect">
+                  <option value="runtime">续接</option>
+                  <option value="reset">重置</option>
+                  <option value="manual-summary">摘要</option>
+                </select>
+              </label>
+              <label class="modeSelect">权限
+                <select name="sandboxMode" id="sandboxModeSelect">
+                  <option value="">默认</option>
+                  <option value="read-only">只读</option>
+                  <option value="workspace-write">工作区写入</option>
+                  <option value="danger-full-access">完全访问</option>
                 </select>
               </label>
               <label class="dryRunToggle"><input name="dryRun" type="checkbox" /> 仅生成请求</label>
+              <button id="stopExecutionBtn" class="stopExecutionButton hidden" type="button" title="停止当前运行">停止</button>
             </div>
-            <button class="sendButton" type="submit">发送</button>
+            <button class="sendButton" type="submit" aria-label="发送">↑</button>
           </div>
+          <textarea id="contextSummaryInput" class="contextSummaryInput hidden" name="contextSummary" rows="2" placeholder="填入压缩后的上文摘要；本轮会开启新的 runtime session"></textarea>
         </form>
       </main>
 
       <aside id="configDrawer" class="configDrawer" aria-hidden="true">
         <div class="drawerHeader">
           <div>
-            <h2 id="drawerTitle">项目配置</h2>
-            <p>配置预置 Agent、默认 Skill 与 RAG 边界。</p>
+            <h2 id="drawerTitle">工作区设置</h2>
+            <p id="drawerSubtitle">创建或编辑工作区、可用 Agent 和知识库引用。</p>
           </div>
           <button id="closeDrawerBtn" type="button">关闭</button>
         </div>
 
         <form id="projectForm" class="drawerForm">
           <input name="id" type="hidden" />
-          <label>项目名称 <input name="name" required placeholder="例如：集成 anythingllm" /></label>
-          <label>项目说明 <input name="description" placeholder="这个项目要解决什么问题" /></label>
-          <label>绑定 AnythingLLM 工作空间
-            <select name="anythingllmWorkspaceSlug" id="workspaceSelect"></select>
-          </label>
-          <label class="checkRow">
-            <input name="createAnythingllmWorkspace" type="checkbox" checked />
-            <span>未选择绑定时自动创建 AnythingLLM 工作空间</span>
-          </label>
-          <label>预置 Agent 系统提示词
-            <textarea name="systemPrompt" rows="6" placeholder="定义这个项目里的默认 Agent 应该如何工作"></textarea>
-          </label>
-          <label>默认可访问 Skill
-            <textarea name="skills" rows="5" placeholder="检索回答: 基于绑定知识库组织答案&#10;审查: 识别风险和缺失证据"></textarea>
-          </label>
+          <label>工作区名称 <input name="name" required placeholder="例如：文档集成" /></label>
+          <label>工作区说明 <textarea name="description" rows="4" placeholder="这个工作区要解决什么问题"></textarea></label>
           <div class="knowledgePicker">
             <div>
-              <strong>关联系统知识库</strong>
-              <p>勾选目录或文件，项目会通过引用加载对应知识范围。</p>
+              <strong>工作区可用 Agent</strong>
+              <p>工作区引用全局 Agent；对话中只能切换已启用的 Agent。</p>
             </div>
-            <div id="knowledgeTree" class="knowledgeTree"></div>
+            <div id="projectAgentPicker" class="agentList"></div>
           </div>
-          <label>补充 AnythingLLM 文档名
-            <textarea name="ragDocumentNames" rows="3" placeholder="可选：custom-documents/example.json"></textarea>
-          </label>
-          <div class="formGrid">
-            <label>默认模式
-              <select name="defaultMode">
-                <option value="query">检索问答</option>
-                <option value="chat">对话</option>
-                <option value="automatic">自动</option>
-              </select>
-            </label>
-            <label>Top N <input name="topN" type="number" min="1" value="4" /></label>
+          <div class="knowledgePicker">
+            <div>
+              <strong>工作区知识库引用</strong>
+              <p>一级知识库作为授权边界；二级主题映射 RAG workspace，可留空表示检索该一级下全部主题。</p>
+            </div>
+            <input id="projectKnowledgeFilter" class="knowledgeFilterInput" type="search" placeholder="筛选知识库或主题" autocomplete="off" />
+            <div id="projectKnowledgeTree" class="knowledgeTree"></div>
           </div>
-          <button class="primary" type="submit">保存项目</button>
+          <button class="primary" type="submit">保存工作区</button>
         </form>
+
+        <div id="agentListSection" class="drawerSection hidden"></div>
 
         <div class="drawerSection">
           <h3>系统知识库入库</h3>
@@ -142,6 +137,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js" type="module"></script>
+    <script src="/app.js?v=dag-visual-editor" type="module"></script>
   </body>
 </html>

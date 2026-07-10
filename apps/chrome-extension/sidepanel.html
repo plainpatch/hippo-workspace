@@ -17,9 +17,14 @@
       </header>
 
       <section class="projectBar">
-        <label>项目
+        <label>工作区
           <select id="projectSelect">
-            <option value="">选择项目</option>
+            <option value="">选择工作区</option>
+          </select>
+        </label>
+        <label>Agent
+          <select id="agentSelect">
+            <option value="">通用助手</option>
           </select>
         </label>
         <button id="reloadBtn" type="button">刷新</button>
@@ -34,7 +39,7 @@
       <section id="chatTab" class="tabPanel active">
         <div id="chatStream" class="chatStream" aria-live="polite"></div>
         <form id="chatForm" class="composer">
-          <textarea id="messageInput" rows="4" placeholder="选择项目后开始对话"></textarea>
+          <textarea id="messageInput" rows="4" placeholder="选择工作区后即可对话；Agent 可选，默认通用助手"></textarea>
           <div class="composerBar">
             <label class="inlineControl">
               <input id="dryRunInput" type="checkbox" />
@@ -69,7 +74,7 @@
           <textarea id="previewText" rows="12" placeholder="选中网页内容后打开侧边栏，或切换为页面正文摘要。"></textarea>
         </div>
 
-        <button id="clipBtn" class="primary" type="button">入库并关联当前项目</button>
+        <button id="clipBtn" class="primary" type="button">入库到系统知识库</button>
       </section>
 
       <section id="settingsTab" class="tabPanel">

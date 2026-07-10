@@ -2,14 +2,18 @@
   const DEFAULTS = {
     wrapperUrl: "http://localhost:8787",
     defaultKnowledgeDir: "浏览器剪藏",
+    defaultWorkspaceId: "",
     defaultProjectId: "",
+    defaultAgentId: "",
   };
 
   const elements = {};
   const messagesByProject = new Map();
   let settings = { ...DEFAULTS };
   let projects = [];
+  let agents = [];
   let activeProjectId = "";
+  let activeAgentId = "";
   let pageSnapshot = null;
 
   document.addEventListener("DOMContentLoaded", init);
@@ -18,7 +22,8 @@
     bindElements();
     bindEvents();
     settings = { ...DEFAULTS, ...(await storageGet(DEFAULTS)) };
-    activeProjectId = settings.defaultProjectId || "";
+    activeProjectId = settings.defaultWorkspaceId || settings.defaultProjectId || "";
+    activeAgentId = settings.defaultAgentId || "";
     elements.wrapperUrlInput.value = settings.wrapperUrl;
     elements.knowledgeDirInput.value = settings.defaultKnowledgeDir;
     await Promise.allSettled([loadRuntime(), refreshPageSnapshot()]);
@@ -30,6 +35,7 @@
       "statusLine",
       "openAppBtn",
       "projectSelect",
+      "agentSelect",
       "reloadBtn",
       "chatStream",
       "chatForm",
@@ -57,6 +63,7 @@
     elements.reloadBtn.addEventListener("click", loadRuntime);
     elements.openAppBtn.addEventListener("click", openApp);
     elements.projectSelect.addEventListener("change", selectProject);
+    elements.agentSelect.addEventListener("change", selectAgent);
     elements.chatForm.addEventListener("submit", sendMessage);
     elements.refreshSourceBtn.addEventListener("click", refreshPageSnapshot);
     elements.captureModeSelect.addEventListener("change", renderPreview);
@@ -68,16 +75,20 @@
   async function loadRuntime() {
     try {
       setStatus("连接中...");
-      const [status, projectData] = await Promise.all([
+      const [status, projectData, agentData] = await Promise.all([
         request("/api/status"),
-        request("/api/agent-workspaces"),
+        request("/api/workspaces"),
+        request("/api/agents"),
       ]);
-      projects = projectData.agentWorkspaces || [];
+      projects = projectData.workspaces || projectData.projects || [];
+      agents = agentData.agents || [];
       if (activeProjectId && !projects.some((project) => project.id === activeProjectId)) {
         activeProjectId = "";
       }
       if (!activeProjectId && projects.length) activeProjectId = projects[0].id;
+      if (activeAgentId && !agents.some((agent) => agent.id === activeAgentId)) activeAgentId = "";
       renderProjects();
+      renderAgents();
       renderActiveProject();
       setStatus(
         `Wrapper 在线 · ${status.anythingllm?.auth?.authenticated ? "AnythingLLM 已认证" : "AnythingLLM 未认证"}`,
@@ -91,7 +102,7 @@
 
   function renderProjects() {
     elements.projectSelect.innerHTML = [
-      `<option value="">选择项目</option>`,
+      `<option value="">选择工作区</option>`,
       ...projects.map((project) =>
         `<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)}</option>`
       ),
@@ -99,17 +110,34 @@
     elements.projectSelect.value = activeProjectId;
   }
 
+  function renderAgents() {
+    const project = getActiveProject();
+    const availableAgents = project?.agentIds?.length
+      ? agents.filter((agent) => project.agentIds.includes(agent.id))
+      : agents;
+    elements.agentSelect.innerHTML = [
+      `<option value="">通用助手</option>`,
+      ...availableAgents.map((agent) =>
+        `<option value="${escapeHtml(agent.id)}">${escapeHtml(agent.name)}</option>`
+      ),
+    ].join("");
+    if (activeAgentId && !availableAgents.some((agent) => agent.id === activeAgentId)) {
+      activeAgentId = "";
+    }
+    elements.agentSelect.value = activeAgentId;
+  }
+
   function renderActiveProject() {
     const project = getActiveProject();
     elements.messageInput.disabled = !project;
     elements.sendBtn.disabled = !project;
-    elements.messageInput.placeholder = project ? `向「${project.name}」提问` : "请先选择项目";
+    elements.messageInput.placeholder = project ? `向「${project.name}」提问` : "请先选择工作区";
     renderProjectDetails(project);
 
     if (project && !messagesByProject.has(project.id)) {
       messagesByProject.set(project.id, [{
         role: "assistant",
-        text: `已加载项目「${project.name}」。知识库引用：${(project.knowledgeRefs || []).join("、") || "未配置"}。`,
+        text: `已加载工作区「${project.name}」。不选择 Agent 时会使用通用助手；Agent 只是可选增强。`,
       }]);
     }
     renderMessages();
@@ -128,17 +156,25 @@
 
   function renderProjectDetails(project) {
     elements.projectDetails.innerHTML = project ? kv({
-      项目: project.name,
-      Workspace: project.localWorkspaceFolderName || project.anythingllmWorkspaceSlug,
-      AnythingLLM: project.anythingllmWorkspaceSlug,
-      知识引用: (project.knowledgeRefs || []).join("、") || "未配置",
-      Skill: `${(project.skills || []).length} 个`,
-    }) : kv({ 项目: "未选择", 状态: "请在顶部选择项目" });
+      工作区: project.name,
+      目录: project.localWorkspaceFolderName || project.id,
+      知识库: `${project.knowledgeDrawerRefs?.length || 0}`,
+      当前Agent: getActiveAgent()?.name || "通用助手",
+    }) : kv({ 工作区: "未选择", 状态: "请在顶部选择工作区" });
   }
 
   async function selectProject() {
     activeProjectId = elements.projectSelect.value;
+    settings.defaultWorkspaceId = activeProjectId;
     settings.defaultProjectId = activeProjectId;
+    await storageSet(settings);
+    renderAgents();
+    renderActiveProject();
+  }
+
+  async function selectAgent() {
+    activeAgentId = elements.agentSelect.value;
+    settings.defaultAgentId = activeAgentId;
     await storageSet(settings);
     renderActiveProject();
   }
@@ -152,10 +188,11 @@
     pushMessage(project.id, { role: "user", text: task });
     elements.messageInput.value = "";
     try {
-      const data = await request(`/api/agent-workspaces/${encodeURIComponent(project.id)}/execute`, {
+      const data = await request(`/api/workspaces/${encodeURIComponent(project.id)}/execute`, {
         method: "POST",
         body: {
           task,
+          agentId: activeAgentId || undefined,
           dryRun: elements.dryRunInput.checked,
           context: pageSnapshot ? { page: { title: pageSnapshot.title, url: pageSnapshot.url } } : undefined,
         },
@@ -221,32 +258,20 @@
         },
       });
 
-      if (project) {
-        await attachKnowledgeRef(project.id, relativeDir || result.relativePath);
-      }
-      setStatus(project ? "已入库并关联当前项目。" : "已入库到系统知识库。", "ok");
+      setStatus(`已入库到系统知识库：${result.relativePath || relativeDir}`, "ok");
       await loadRuntime();
     } catch (error) {
       setStatus(`入库失败：${error.message}`, "error");
     }
   }
 
-  async function attachKnowledgeRef(projectId, ref) {
-    const project = projects.find((item) => item.id === projectId)
-      || (await request(`/api/agent-workspaces/${encodeURIComponent(projectId)}`)).agentWorkspace;
-    const refs = [...new Set([...(project.knowledgeRefs || []), ref].filter(Boolean))];
-    const updated = await request(`/api/agent-workspaces/${encodeURIComponent(projectId)}`, {
-      method: "PATCH",
-      body: { knowledgeRefs: refs },
-    });
-    projects = projects.map((item) => item.id === projectId ? updated.agentWorkspace : item);
-  }
-
   async function saveSettings() {
     settings = {
       wrapperUrl: normalizeWrapperUrl(elements.wrapperUrlInput.value),
       defaultKnowledgeDir: elements.knowledgeDirInput.value.trim() || DEFAULTS.defaultKnowledgeDir,
+      defaultWorkspaceId: activeProjectId,
       defaultProjectId: activeProjectId,
+      defaultAgentId: activeAgentId,
     };
     await storageSet(settings);
     elements.wrapperUrlInput.value = settings.wrapperUrl;
@@ -268,6 +293,10 @@
 
   function getActiveProject() {
     return projects.find((project) => project.id === activeProjectId) || null;
+  }
+
+  function getActiveAgent() {
+    return agents.find((agent) => agent.id === activeAgentId) || null;
   }
 
   function buildClipText() {

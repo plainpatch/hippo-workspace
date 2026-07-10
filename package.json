@@ -1,7 +1,7 @@
 {
   "name": "hippo",
   "version": "1.0.0",
-  "description": "This project is configured to run AnythingLLM locally with Docker Compose.",
+  "description": "Hippo agent workspace app with runtime adapters and topic-scoped RAG integration.",
   "type": "module",
   "main": "src/server.js",
   "scripts": {
@@ -9,7 +9,7 @@
     "desktop": "electron apps/desktop/main.cjs",
     "mcp": "node src/mcp-server.js",
     "install:chrome-extension": "node scripts/install-chrome-extension.mjs",
-    "check": "node --check src/server.js && node --check src/mcp-server.js && node --check src/mcp.js && node --check src/anythingllm-client.js && node --check src/agent-orchestrator.js && node --check src/resource-manager.js && node --check apps/desktop/main.cjs && node --check apps/chrome-extension/sidepanel.js && node --check apps/chrome-extension/background.js && node --check scripts/install-chrome-extension.mjs"
+    "check": "node --check src/config.js && node --check src/server.js && node --check src/mcp-server.js && node --check src/mcp.js && node --check src/anythingllm-client.js && node --check src/agent-orchestrator.js && node --check src/resource-manager.js && node --check src/app-settings.js && node --check src/rag-provider.js && node --check src/runtime-adapter.js && node --check public/app.js && node --check apps/desktop/main.cjs && node --check apps/chrome-extension/sidepanel.js && node --check apps/chrome-extension/background.js && node --check scripts/install-chrome-extension.mjs"
   },
   "keywords": [],
   "author": "",
