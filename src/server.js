@@ -306,6 +306,26 @@ app.post("/api/workspaces/:id/runs/:runId/advance", asyncHandler(async (req, res
   res.json(await agentOrchestrator.advanceGraphRun(req.params.id, req.params.runId));
 }));
 
+app.post("/api/workspaces/:id/runs/:runId/dispatch", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.dispatchGraphNode(req.params.id, req.params.runId, req.body));
+}));
+
+app.post("/api/workspaces/:id/runs/:runId/request-user", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.requestGraphRunUser(req.params.id, req.params.runId, req.body));
+}));
+
+app.post("/api/workspaces/:id/runs/:runId/user-input", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.resumeGraphRunWithUserInput(req.params.id, req.params.runId, req.body));
+}));
+
+app.post("/api/workspaces/:id/runs/:runId/complete", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.completeGraphRun(req.params.id, req.params.runId, req.body));
+}));
+
+app.post("/api/workspaces/:id/runs/:runId/fail", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.failGraphRun(req.params.id, req.params.runId, req.body));
+}));
+
 app.post("/api/projects/:id/runs/:runId/retry", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.retryNodeRun(req.params.id, req.params.runId, req.body));
 }));
@@ -357,6 +377,8 @@ async function streamWorkspaceExecution(req, res) {
   res.flushHeaders?.();
 
   const send = (event) => {
+    const eventName = String(event?.type || "message").replace(/[^\w-]/g, "-");
+    res.write(`event: ${eventName}\n`);
     res.write(`data: ${JSON.stringify(event)}\n\n`);
   };
 
@@ -444,7 +466,6 @@ async function handleMcpPost(req, res) {
   transport.onclose = () => {
     const closedSessionId = transport.sessionId;
     if (closedSessionId) mcpSessions.delete(closedSessionId);
-    mcpServer.close();
   };
 
   await mcpServer.connect(transport);

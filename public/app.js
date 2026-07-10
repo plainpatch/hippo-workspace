@@ -12,10 +12,17 @@ const state = {
     drawers: new Set(),
     topics: new Set(),
   },
+  selectedDagNodeId: "root",
+  selectedDagEdgeKey: "",
   currentView: "chat",
   activeRun: null,
   messages: [],
 };
+
+const DAG_NODE_WIDTH = 210;
+const DAG_NODE_HEIGHT = 172;
+const DAG_COLUMN_GAP = 60;
+const DAG_ROW_GAP = 36;
 
 const icons = {
   project: `<svg class="projectGlyph" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="15" height="18" rx="2.5"></rect><path d="M3 7h4"></path><path d="M3 12h4"></path><path d="M3 17h4"></path><path d="M10 8h6"></path><path d="M10 12h6"></path><path d="M10 16h4"></path></svg>`,
@@ -44,6 +51,7 @@ function bindEvents() {
   document.getElementById("createProjectBtn").addEventListener("click", () => openProjectForm());
   document.getElementById("projectConfigBtn").addEventListener("click", () => {
     if (state.currentView === "agents") openAgentForm();
+    else if (state.currentView === "agent-editor") submitActiveAgentEditor();
     else if (state.currentView === "knowledge") focusKnowledgeCreateAction();
     else if (state.currentView === "inbox") showInboxPage();
     else if (state.currentView === "settings") refreshSettingsPage();
@@ -58,11 +66,6 @@ function bindEvents() {
     const active = getActiveProject();
     renderProjectKnowledgeTreeFromForm(active);
   });
-  document.getElementById("agentForm").addEventListener("submit", saveAgent);
-  document.getElementById("agentTypeSelect")?.addEventListener("change", syncAgentTypeFields);
-  document.getElementById("addDagNodeBtn")?.addEventListener("click", addDagNodeFromBuilder);
-  document.getElementById("addDagEdgeBtn")?.addEventListener("click", addDagEdgeFromBuilder);
-  document.getElementById("syncDagJsonBtn")?.addEventListener("click", renderDagBuilderFromJson);
   document.getElementById("composerForm").addEventListener("submit", sendMessage);
   document.getElementById("contextStrategySelect")?.addEventListener("change", syncContextStrategyFields);
   document.getElementById("stopExecutionBtn")?.addEventListener("click", cancelActiveRun);
@@ -99,7 +102,7 @@ async function checkStatus() {
 
 async function loadProjects() {
   const data = await request("/api/workspaces");
-  state.projects = data.projects || [];
+  state.projects = data.workspaces || data.projects || [];
   if (!state.activeProjectId && state.projects.length) {
     state.activeProjectId = state.projects[0].id;
   }
@@ -254,6 +257,7 @@ function renderConversationList() {
 function renderActiveProject() {
   state.currentView = "chat";
   setActiveSystemNav("chat");
+  setChatStreamMode("");
   document.getElementById("composerForm").classList.remove("hidden");
   renderAgentOptions();
   const project = getActiveProject();
@@ -314,25 +318,31 @@ function renderMessages() {
 function showAgentsPage() {
   state.currentView = "agents";
   setActiveSystemNav("agents");
+  closeDrawer();
+  setChatStreamMode("");
   document.getElementById("composerForm").classList.add("hidden");
   setHeaderConfigButton(true);
   document.getElementById("activeProjectName").textContent = "智能体";
-  document.getElementById("activeProjectMeta").textContent = "Agent 类似可选插件包，可以预置提示词和多个 Skill；不加载 Agent 也能执行。";
+  document.getElementById("activeProjectMeta").textContent = "全局 Agent 原型；工作区可引用后在会话中切换使用。";
   document.getElementById("projectConfigBtn").textContent = "新建 Agent";
   const stream = document.getElementById("chatStream");
   stream.innerHTML = `
-    <div class="agentPageHeader">
-      <button class="primary" id="createAgentInlineBtn" type="button">新建 Agent</button>
-    </div>
-    <div class="agentCards">
+    <section class="agentHome">
+      <div class="agentCards">
+        <button class="agentCard agentCreateCard" id="createAgentInlineBtn" type="button">
+          <strong>新增智能体</strong>
+          <span>进入画布，从 Root 节点开始编排。</span>
+          <small>+</small>
+        </button>
       ${state.agents.length ? state.agents.map((agent) => `
         <button class="agentCard" data-agent-id="${escapeHtml(agent.id)}" type="button">
           <strong>${escapeHtml(agent.name)}</strong>
           <span>${escapeHtml(agent.description || "未填写说明")}</span>
-      <small>${agent.type === "dag" ? `DAG · ${(agent.nodes || []).length} 节点` : "单节点"} · v${agent.version || 1} · ${(agent.skills || []).length} Skill · ${agent.runtimeId || "codex"}</small>
+          <small>${formatAgentCardMeta(agent)}</small>
         </button>
-      `).join("") : `<div class="emptyBlock">还没有 Agent。可以先直接使用通用助手执行任务；需要预置提示词或组合 Skill 时再创建 Agent。</div>`}
-    </div>
+      `).join("") : ""}
+      </div>
+    </section>
   `;
   document.getElementById("createAgentInlineBtn")?.addEventListener("click", () => openAgentForm());
   stream.querySelectorAll("[data-agent-id]").forEach((button) => {
@@ -343,10 +353,16 @@ function showAgentsPage() {
   });
 }
 
+function formatAgentCardMeta(agent) {
+  const nodeCount = agent.type === "dag" ? Math.max(1, (agent.nodes || []).length) : 1;
+  return `${nodeCount} 节点 · v${agent.version || 1} · ${agent.runtimeId || "codex"}`;
+}
+
 function showKnowledgePage() {
   state.currentView = "knowledge";
   setActiveSystemNav("knowledge");
   closeDrawer();
+  setChatStreamMode("");
   document.getElementById("composerForm").classList.add("hidden");
   setHeaderConfigButton(true);
   document.getElementById("activeProjectName").textContent = "知识库";
@@ -359,10 +375,11 @@ async function showInboxPage() {
   state.currentView = "inbox";
   setActiveSystemNav("inbox");
   closeDrawer();
+  setChatStreamMode("");
   document.getElementById("composerForm").classList.add("hidden");
   setHeaderConfigButton(true);
   document.getElementById("activeProjectName").textContent = "待处理";
-  document.getElementById("activeProjectMeta").textContent = "等待人工输入的 DAG 节点；提交输出后会继续推进运行图。";
+  document.getElementById("activeProjectMeta").textContent = "等待人工审批的 DAG 节点；确认后会继续推进运行图。";
   document.getElementById("projectConfigBtn").textContent = "刷新";
   await renderInboxManager();
 }
@@ -371,6 +388,7 @@ function showSettingsPage() {
   state.currentView = "settings";
   setActiveSystemNav("");
   closeDrawer();
+  setChatStreamMode("");
   document.getElementById("composerForm").classList.add("hidden");
   setHeaderConfigButton(false);
   document.getElementById("activeProjectName").textContent = "系统设置";
@@ -467,12 +485,12 @@ async function renderInboxManager() {
   const data = await request(`/api/workspaces/${encodeURIComponent(project.id)}/runs`);
   const waitingItems = (data.runs || []).flatMap((run) =>
     Object.values(run.nodeRuns || {})
-      .filter((node) => node.status === "waiting")
+      .filter((node) => ["waiting", "waiting_approval"].includes(node.status))
       .map((node) => ({ run, node }))
   );
   stream.innerHTML = `
     <section class="inboxPage">
-      ${waitingItems.length ? waitingItems.map(({ run, node }) => renderInboxItem(run, node)).join("") : `<div class="emptyBlock">当前工作区没有等待处理的节点。</div>`}
+      ${waitingItems.length ? waitingItems.map(({ run, node }) => renderInboxItem(run, node)).join("") : `<div class="emptyBlock">当前工作区没有待审批节点。</div>`}
     </section>
   `;
   stream.querySelectorAll("[data-resume-form]").forEach((form) => {
@@ -521,6 +539,12 @@ function renderRunDetail(run, trace = []) {
         <dt>上下文</dt><dd>${escapeHtml(run.request?.contextPolicy?.strategy || "runtime")}</dd>
       </dl>
       <div class="runDetailSection">
+        <h3>Root 协调器</h3>
+        <div class="runDetailNodes">
+          ${renderRootCoordinatorDetail(run.rootCoordinator)}
+        </div>
+      </div>
+      <div class="runDetailSection">
         <h3>节点</h3>
         <div class="runDetailNodes">
           ${nodes.map(renderRunDetailNode).join("") || `<div class="emptyBlock">没有节点。</div>`}
@@ -536,11 +560,28 @@ function renderRunDetail(run, trace = []) {
   `;
 }
 
+function renderRootCoordinatorDetail(root = {}) {
+  return `
+    <div class="runDetailNode ${escapeHtml(root.status || "pending")}">
+      <div>
+        <strong>RootAgent</strong>
+        <small>${escapeHtml(root.prototypeNodeId || "root")}</small>
+      </div>
+      <span class="runStatus ${escapeHtml(root.status || "pending")}">${escapeHtml(root.status || "pending")}</span>
+      <dl>
+        <dt>Runtime Session</dt><dd>${escapeHtml(root.runtimeSession?.sessionId || "")}</dd>
+        <dt>决策次数</dt><dd>${escapeHtml(root.decisionCount || 0)}</dd>
+        <dt>最后决定</dt><dd>${escapeHtml(root.lastDecision ? JSON.stringify(root.lastDecision) : "")}</dd>
+      </dl>
+    </div>
+  `;
+}
+
 function renderRunDetailNode(node) {
   return `
     <div class="runDetailNode ${escapeHtml(node.status || "pending")}">
       <div>
-        <strong>${escapeHtml(node.nodeId || "root")}</strong>
+        <strong>${escapeHtml(node.prototypeNodeId || node.nodeId || "root")} · 第 ${escapeHtml(node.attempt || 1)} 次</strong>
         <small>${escapeHtml(node.kind || "task")} · ${escapeHtml(node.id || "")}</small>
       </div>
       <span class="runStatus ${escapeHtml(node.status || "pending")}">${escapeHtml(node.status || "pending")}</span>
@@ -598,7 +639,7 @@ async function resumeWaitingNode(event) {
       output: parseLooseJson(rawOutput),
     }),
   });
-  toast("等待节点已继续。");
+  toast("审批已提交，节点已继续。");
   await loadConversations(project.id);
   await saveActiveConversation();
   await renderInboxManager();
@@ -1052,7 +1093,7 @@ async function saveProject(event) {
       })
     : await submitJson("/api/workspaces", body, false);
 
-  state.activeProjectId = result.project.id;
+  state.activeProjectId = (result.workspace || result.project).id;
   state.activeConversationId = null;
   state.conversations = [];
   state.messages = [];
@@ -1066,12 +1107,21 @@ async function saveAgent(event) {
   const formNode = event.currentTarget;
   const form = new FormData(formNode);
   const id = form.get("id");
-  const type = form.get("type") || "single";
+  const nodes = ensureRootDraft({
+    nodes: parseJsonField(form.get("nodesJson"), []),
+    edges: parseJsonField(form.get("edgesJson"), []),
+  }).nodes;
+  const edges = ensureRootDraft({
+    nodes,
+    edges: parseJsonField(form.get("edgesJson"), []),
+  }).edges;
+  const rootNode = nodes.find((node) => node.id === "root") || {};
+  const type = nodes.length > 1 || edges.length ? "dag" : "single";
   const body = {
     type,
     name: form.get("name"),
     description: form.get("description"),
-    systemPrompt: form.get("systemPrompt"),
+    systemPrompt: rootNode.systemPrompt || form.get("systemPrompt"),
     skills: parseSkills(form.get("skills")),
     mcpServers: splitLinesOrComma(form.get("mcpServers")),
     runtimeId: form.get("runtimeId") || "codex",
@@ -1080,10 +1130,11 @@ async function saveAgent(event) {
     topN: Number(form.get("topN") || 4),
   };
   if (type === "dag") {
-    body.rootNodeId = String(form.get("rootNodeId") || "").trim();
-    body.nodes = parseJsonField(form.get("nodesJson"), []);
-    body.edges = parseJsonField(form.get("edgesJson"), []);
-    body.executionPolicy = { concurrency: Number(form.get("dagConcurrency") || 4) };
+    body.rootNodeId = "root";
+    body.nodes = nodes;
+    body.edges = edges;
+    body.executionPolicy = { maxDecisions: Number(form.get("maxDecisions") || 50) };
+    validateDagDraft(body);
   }
 
   id
@@ -1095,8 +1146,7 @@ async function saveAgent(event) {
     : await submitJson("/api/agents", body, false);
 
   await loadAgents();
-  renderAgentList();
-  closeDrawer();
+  showAgentsPage();
   toast("Agent 已保存。");
 }
 
@@ -1363,144 +1413,825 @@ function openProjectForm(project = undefined) {
 }
 
 function openAgentForm(agent = undefined) {
-  const form = document.getElementById("agentForm");
-  showDrawerForm("agent");
-  renderAgentList();
-  form.reset();
-  if (agent) {
-    form.elements.id.value = agent.id;
-    form.elements.type.value = agent.type || "single";
-    form.elements.name.value = agent.name || "";
-    form.elements.description.value = agent.description || "";
-    form.elements.systemPrompt.value = agent.systemPrompt || "";
-    form.elements.skills.value = (agent.skills || []).map(formatSkillLine).join("\n");
-    form.elements.mcpServers.value = (agent.mcpServers || []).join("\n");
-    form.elements.runtimeId.value = agent.runtimeId || "codex";
-    form.elements.ragDocumentNames.value = (agent.explicitRagDocumentNames || []).join("\n");
-    form.elements.defaultMode.value = agent.defaultMode || "query";
-    form.elements.topN.value = agent.topN || 4;
-    form.elements.rootNodeId.value = agent.rootNodeId || "";
-    form.elements.dagConcurrency.value = agent.executionPolicy?.concurrency || 4;
-    form.elements.nodesJson.value = agent.nodes?.length ? JSON.stringify(agent.nodes, null, 2) : "";
-    form.elements.edgesJson.value = agent.edges?.length ? JSON.stringify(agent.edges, null, 2) : "";
+  closeDrawer();
+  state.currentView = "agent-editor";
+  setActiveSystemNav("agents");
+  setChatStreamMode("agentEditorStream");
+  document.getElementById("composerForm").classList.add("hidden");
+  setHeaderConfigButton(true);
+  document.getElementById("activeProjectName").textContent = agent ? `编辑智能体：${agent.name}` : "新增智能体";
+  document.getElementById("activeProjectMeta").textContent = "在画布中从 Root 节点开始编排；只有 Root 时会保存为单节点 Agent。";
+  document.getElementById("projectConfigBtn").textContent = "保存";
+
+  const draft = createAgentDraft(agent);
+  state.selectedDagNodeId = "root";
+  state.selectedDagEdgeKey = "";
+  const stream = document.getElementById("chatStream");
+  stream.innerHTML = renderAgentEditor(draft);
+  bindAgentEditorEvents();
+  renderDagBuilder(draft.nodes, draft.edges);
+  stream.scrollTop = 0;
+}
+
+function setChatStreamMode(mode) {
+  const stream = document.getElementById("chatStream");
+  stream.classList.toggle("agentEditorStream", mode === "agentEditorStream");
+}
+
+function createAgentDraft(agent = undefined) {
+  const nodes = agent?.type === "dag" ? [...(agent.nodes || [])] : [];
+  const edges = agent?.type === "dag" ? [...(agent.edges || [])] : [];
+  return ensureRootDraft({
+    id: agent?.id || "",
+    name: agent?.name || "",
+    description: agent?.description || "",
+    systemPrompt: agent?.systemPrompt || "",
+    skills: (agent?.skills || []).map(formatSkillLine).join("\n"),
+    mcpServers: (agent?.mcpServers || []).join("\n"),
+    runtimeId: agent?.runtimeId || "codex",
+    ragDocumentNames: (agent?.explicitRagDocumentNames || agent?.ragDocumentNames || []).join("\n"),
+    defaultMode: agent?.defaultMode || "query",
+    topN: agent?.topN || 4,
+    maxDecisions: agent?.executionPolicy?.maxDecisions || 50,
+    nodes,
+    edges,
+    previousRootNodeId: agent?.rootNodeId || nodes[0]?.id || "",
+  });
+}
+
+function ensureRootDraft(draft) {
+  const rootNode = {
+    id: "root",
+    kind: "task",
+    runtimeApprovalPolicy: "inherit",
+    resultApprovalPolicy: "none",
+    transitionInstruction: "",
+    name: "Root",
+    description: "智能体入口节点，负责接收用户任务并调度后续节点。",
+    systemPrompt: draft.systemPrompt || "",
+  };
+  let nodes = Array.isArray(draft.nodes) ? draft.nodes.filter((node) => node?.id) : [];
+  let edges = Array.isArray(draft.edges) ? draft.edges.filter((edge) => edge?.from && edge?.to) : [];
+  const existingRoot = nodes.find((node) => node.id === "root");
+  if (existingRoot) {
+    nodes = nodes.map((node) => node.id === "root" ? { ...rootNode, ...node, id: "root" } : node);
   } else {
-    form.elements.id.value = "";
-    form.elements.type.value = "single";
-    form.elements.runtimeId.value = "codex";
-    form.elements.defaultMode.value = "query";
-    form.elements.topN.value = 4;
-    form.elements.dagConcurrency.value = 4;
-    form.elements.rootNodeId.value = "";
-    form.elements.nodesJson.value = "";
-    form.elements.edgesJson.value = "";
+    const previousRoot = draft.previousRootNodeId && draft.previousRootNodeId !== "root" ? draft.previousRootNodeId : nodes[0]?.id;
+    nodes = [rootNode, ...nodes];
+    if (previousRoot && !edges.some((edge) => edge.from === "root" && edge.to === previousRoot)) {
+      edges = [{ from: "root", to: previousRoot }, ...edges];
+    }
   }
-  syncAgentTypeFields();
-  setDrawerOpen(true);
+  return { ...draft, nodes, edges };
 }
 
-function syncAgentTypeFields() {
-  const type = document.getElementById("agentTypeSelect")?.value || "single";
-  document.getElementById("agentDagFields")?.classList.toggle("hidden", type !== "dag");
-  if (type === "dag") renderDagBuilderFromJson();
+function renderAgentEditor(draft) {
+  return `
+    <form id="agentForm" class="agentEditor">
+      <input name="id" type="hidden" value="${escapeHtml(draft.id)}" />
+      <input name="type" type="hidden" value="dag" />
+      <input name="rootNodeId" type="hidden" value="root" />
+      <input name="maxDecisions" type="hidden" value="${escapeHtml(draft.maxDecisions)}" />
+      <textarea name="nodesJson" class="hidden">${escapeHtml(JSON.stringify(draft.nodes, null, 2))}</textarea>
+      <textarea name="edgesJson" class="hidden">${escapeHtml(JSON.stringify(draft.edges, null, 2))}</textarea>
+      <textarea name="systemPrompt" class="hidden">${escapeHtml(draft.systemPrompt)}</textarea>
+      <textarea name="skills" class="hidden">${escapeHtml(draft.skills)}</textarea>
+      <textarea name="mcpServers" class="hidden">${escapeHtml(draft.mcpServers)}</textarea>
+      <textarea name="ragDocumentNames" class="hidden">${escapeHtml(draft.ragDocumentNames)}</textarea>
+
+      <div class="agentEditorMeta">
+        <label>名称 <input name="name" required placeholder="例如：文档审查 Agent" value="${escapeHtml(draft.name)}" /></label>
+        <label>说明 <input name="description" placeholder="这个 Agent 擅长什么任务" value="${escapeHtml(draft.description)}" /></label>
+        <label>Runtime
+          <select name="runtimeId">
+            <option value="codex" ${draft.runtimeId === "codex" ? "selected" : ""}>Codex</option>
+          </select>
+        </label>
+        <label>默认模式
+          <select name="defaultMode">
+            ${["query", "chat", "automatic"].map((mode) =>
+              `<option value="${mode}" ${draft.defaultMode === mode ? "selected" : ""}>${mode === "query" ? "检索问答" : mode === "chat" ? "对话" : "自动"}</option>`
+            ).join("")}
+          </select>
+        </label>
+        <label>Top N <input name="topN" type="number" min="1" value="${escapeHtml(draft.topN)}" /></label>
+      </div>
+
+      <div class="agentCanvasLayout">
+        <div class="dagCanvasShell">
+          <div id="dagGraphPreview" class="dagGraphPreview"></div>
+        </div>
+        <aside class="dagInspector">
+          <div class="dagInspectorHeader">
+            <strong>节点配置</strong>
+            <button id="removeDagNodeBtn" type="button">删除节点</button>
+          </div>
+          <label>节点 ID <input id="dagNodeIdInput" readonly /></label>
+          <label>节点名称 <input id="dagNodeNameInput" placeholder="需求分析" /></label>
+          <label>执行命令审批
+            <select id="dagNodeRuntimeApprovalInput">
+              <option value="inherit">继承会话设置</option>
+              <option value="untrusted">仅信任命令免审</option>
+              <option value="on-request">按需请求审批</option>
+              <option value="never">不请求审批</option>
+            </select>
+          </label>
+          <label id="dagNodeResultApprovalField">完成结果审核
+            <select id="dagNodeResultApprovalInput">
+              <option value="none">免审</option>
+              <option value="manual">人工审批</option>
+              <option value="auto">自动审批</option>
+            </select>
+          </label>
+          <div class="dagEdgeEditor">
+            <div class="dagEdgeEditorHeader">
+              <strong>节点连接</strong>
+              <small id="dagConnectionCount"></small>
+            </div>
+            <div id="dagConnectionSummary" class="dagConnectionSummary"></div>
+          </div>
+          <label>接口描述 <textarea id="dagNodeDescriptionInput" rows="2" placeholder="说明该节点对 RootAgent 暴露的能力、适用场景和输出"></textarea></label>
+          <label>系统提示词 <textarea id="dagNodePromptInput" rows="3" placeholder="该节点执行任务时使用的系统提示词"></textarea></label>
+          <label>结果处置规则 <textarea id="dagNodeTransitionInput" rows="3" placeholder="RootAgent 收到该节点结果后，如何继续、重试、请求用户或结束任务"></textarea></label>
+        </aside>
+      </div>
+
+      <div class="agentCanvasConsole">
+        <button id="addDagNodeBtn" type="button">新增节点</button>
+        <button id="removeDagEdgeBtn" type="button" disabled>删除连线</button>
+        <button id="importAgentGraphBtn" type="button">导入</button>
+        <button id="alignDagCanvasBtn" type="button">对齐</button>
+        <button id="saveAgentCanvasBtn" class="primary" type="submit">保存</button>
+        <input id="agentGraphImportInput" class="hidden" type="file" accept="application/json,.json" />
+      </div>
+    </form>
+  `;
 }
 
-function renderDagBuilderFromJson() {
-  const form = document.getElementById("agentForm");
-  if (!form || form.elements.type.value !== "dag") return;
-  const nodes = parseJsonField(form.elements.nodesJson.value, []);
-  const edges = parseJsonField(form.elements.edgesJson.value, []);
-  renderDagBuilder(nodes, edges);
+function bindAgentEditorEvents() {
+  document.getElementById("agentForm")?.addEventListener("submit", saveAgent);
+  document.getElementById("addDagNodeBtn")?.addEventListener("click", addDagNodeFromBuilder);
+  document.getElementById("removeDagNodeBtn")?.addEventListener("click", removeSelectedDagNode);
+  document.getElementById("removeDagEdgeBtn")?.addEventListener("click", removeSelectedDagEdge);
+  document.getElementById("alignDagCanvasBtn")?.addEventListener("click", alignDagCanvas);
+  document.getElementById("importAgentGraphBtn")?.addEventListener("click", () => document.getElementById("agentGraphImportInput")?.click());
+  document.getElementById("agentGraphImportInput")?.addEventListener("change", importAgentGraphFile);
+  ["dagNodeNameInput", "dagNodeRuntimeApprovalInput", "dagNodeResultApprovalInput", "dagNodeDescriptionInput", "dagNodePromptInput", "dagNodeTransitionInput"].forEach((id) => {
+    document.getElementById(id)?.addEventListener("change", updateSelectedDagNodeFromInspector);
+  });
+}
+
+function submitActiveAgentEditor() {
+  document.getElementById("agentForm")?.requestSubmit();
 }
 
 function renderDagBuilder(nodes = [], edges = []) {
   const preview = document.getElementById("dagGraphPreview");
-  const fromSelect = document.getElementById("dagEdgeFromInput");
-  const toSelect = document.getElementById("dagEdgeToInput");
-  if (!preview || !fromSelect || !toSelect) return;
-  const options = nodes.map((node) => `<option value="${escapeHtml(node.id)}">${escapeHtml(node.id)}</option>`).join("");
-  fromSelect.innerHTML = options;
-  toSelect.innerHTML = options;
+  if (!preview) return;
+  nodes = ensureRootDraft({ nodes, edges }).nodes;
+  edges = ensureRootDraft({ nodes, edges }).edges;
+  const rootId = "root";
+  if (!state.selectedDagNodeId || !nodes.some((node) => node.id === state.selectedDagNodeId)) {
+    state.selectedDagNodeId = rootId;
+  }
+  if (state.selectedDagEdgeKey && !edges.some((edge) => dagEdgeKey(edge) === state.selectedDagEdgeKey)) {
+    state.selectedDagEdgeKey = "";
+  }
+  const edgeByTarget = groupEdgesByTarget(edges);
+  const edgeBySource = groupEdgesBySource(edges);
+  const layout = layoutDagNodes(nodes, edges, rootId);
+  const width = Math.max(760, ...Object.values(layout).map((item) => item.x + DAG_NODE_WIDTH + 40), 760);
+  const height = Math.max(430, ...Object.values(layout).map((item) => item.y + DAG_NODE_HEIGHT + 40), 430);
   preview.innerHTML = `
-    <div class="dagPreviewSection">
-      <strong>节点</strong>
+    <svg class="dagEdgeLayer" viewBox="0 0 ${width} ${height}" aria-label="节点连线">
+      <defs>
+        <marker id="dagArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#7c83ff"></path>
+        </marker>
+      </defs>
+      ${edges.map((edge) => renderDagEdgePath(edge, layout)).join("")}
+      <path id="dagPendingEdge" class="dagEdgePath pending hidden"></path>
+    </svg>
+    <div class="dagCanvas" aria-label="DAG 可视化画布" style="width:${width}px;height:${height}px">
       ${nodes.length ? nodes.map((node) => `
-        <div class="dagPreviewRow">
-          <span>${escapeHtml(node.id)} · ${escapeHtml(node.kind || "task")}</span>
-          <button type="button" data-remove-dag-node="${escapeHtml(node.id)}">删除</button>
+        <div class="dagCanvasNode ${node.id === rootId ? "root" : ""} ${node.id === state.selectedDagNodeId ? "selected" : ""}" style="left:${layout[node.id]?.x || 24}px;top:${layout[node.id]?.y || 24}px" data-select-dag-node="${escapeHtml(node.id)}" role="button" tabindex="0">
+          <span class="dagPort input ${node.id === rootId ? "disabled" : ""}" data-dag-input="${escapeHtml(node.id)}" title="输入端点"></span>
+          <div class="dagNodeHeader">
+            <strong>${escapeHtml(node.name || node.id)}</strong>
+            <span>${node.id === rootId ? `执行: ${formatNodeRuntimeApproval(node)} · Root` : `执行: ${formatNodeRuntimeApproval(node)} · 结果: ${formatNodeResultApproval(node)}`}</span>
+          </div>
+          <small>${escapeHtml(node.id)}</small>
+          ${node.description ? `<p>${escapeHtml(node.description)}</p>` : ""}
+          <div class="dagNodeIO">
+            <span>结果处置: ${node.transitionInstruction || node.routingInstruction ? "已配置" : "默认处理"}</span>
+            <span>入: ${edgeByTarget.get(node.id)?.map((edge) => edge.from).join(", ") || (node.id === rootId ? "任务输入" : "未连接")}</span>
+            <span>出: ${edgeBySource.get(node.id)?.map((edge) => edge.to).join(", ") || "终端输出"}</span>
+          </div>
+          <span class="dagPort output" data-dag-output="${escapeHtml(node.id)}" title="输出端点"></span>
         </div>
       `).join("") : `<small>还没有节点。</small>`}
     </div>
-    <div class="dagPreviewSection">
-      <strong>连边</strong>
-      ${edges.length ? edges.map((edge, index) => `
-        <div class="dagPreviewRow">
-          <span>${escapeHtml(edge.from)} -> ${escapeHtml(edge.to)} · ${escapeHtml(edge.type || "serial")}${edge.required === false ? " · optional" : ""}</span>
-          <button type="button" data-remove-dag-edge="${index}">删除</button>
-        </div>
-      `).join("") : `<small>还没有连边。</small>`}
-    </div>
   `;
-  preview.querySelectorAll("[data-remove-dag-node]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const nextNodes = nodes.filter((node) => node.id !== button.dataset.removeDagNode);
-      const nextEdges = edges.filter((edge) => edge.from !== button.dataset.removeDagNode && edge.to !== button.dataset.removeDagNode);
-      setDagJson(nextNodes, nextEdges);
+  const renderedLayout = measureRenderedDagLayout(preview, layout);
+  const renderedWidth = Math.max(width, ...Object.values(renderedLayout).map((item) => item.x + item.width + 40));
+  const renderedHeight = Math.max(height, ...Object.values(renderedLayout).map((item) => item.y + item.height + 40));
+  preview.style.minWidth = `${renderedWidth}px`;
+  preview.style.minHeight = `${renderedHeight}px`;
+  preview.querySelector(".dagEdgeLayer")?.setAttribute("viewBox", `0 0 ${renderedWidth} ${renderedHeight}`);
+  const canvas = preview.querySelector(".dagCanvas");
+  if (canvas) {
+    canvas.style.width = `${renderedWidth}px`;
+    canvas.style.height = `${renderedHeight}px`;
+  }
+  updateRenderedDagEdges(preview, renderedLayout);
+  preview.querySelectorAll("[data-select-dag-node]").forEach((nodeElement) => {
+    bindDagNodeInteraction(nodeElement, nodes, edges, renderedLayout);
+  });
+  preview.querySelectorAll("[data-dag-edge]").forEach((path) => {
+    path.addEventListener("click", (event) => {
+      event.stopPropagation();
+      state.selectedDagEdgeKey = path.dataset.dagEdge;
+      renderDagBuilder(nodes, edges);
+      preview.focus({ preventScroll: true });
     });
   });
-  preview.querySelectorAll("[data-remove-dag-edge]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const index = Number(button.dataset.removeDagEdge);
-      setDagJson(nodes, edges.filter((_, itemIndex) => itemIndex !== index));
-    });
-  });
+  preview.onclick = (event) => {
+    if (event.target === preview || event.target.classList.contains("dagCanvas")) {
+      state.selectedDagEdgeKey = "";
+      renderDagBuilder(nodes, edges);
+    }
+  };
+  preview.tabIndex = 0;
+  preview.onkeydown = (event) => {
+    if ((event.key === "Delete" || event.key === "Backspace") && state.selectedDagEdgeKey) {
+      event.preventDefault();
+      removeSelectedDagEdge();
+    }
+  };
+  const selectedNode = nodes.find((node) => node.id === state.selectedDagNodeId);
+  if (selectedNode) loadDagNodeIntoInspector(selectedNode);
+  syncDagEdgeSelection(edges);
 }
 
 function addDagNodeFromBuilder() {
   const form = document.getElementById("agentForm");
-  const nodeId = document.getElementById("dagNodeIdInput").value.trim();
-  if (!nodeId) return toast("请填写节点 ID。", true);
   const nodes = parseJsonField(form.elements.nodesJson.value, []);
   const edges = parseJsonField(form.elements.edgesJson.value, []);
-  if (nodes.some((node) => node.id === nodeId)) return toast("节点 ID 已存在。", true);
+  const nodeId = nextDagNodeId(nodes);
+  const selectedId = nodes.some((node) => node.id === state.selectedDagNodeId) ? state.selectedDagNodeId : "root";
+  const currentLayout = layoutDagNodes(nodes, edges, "root");
+  const selectedPosition = currentLayout[selectedId] || { x: 24, y: 28 };
+  const position = findAvailableDagPosition(nodes, currentLayout, {
+    x: selectedPosition.x + DAG_NODE_WIDTH + DAG_COLUMN_GAP,
+    y: selectedPosition.y,
+  });
   const node = {
     id: nodeId,
-    kind: document.getElementById("dagNodeKindInput").value || "task",
-    name: document.getElementById("dagNodeNameInput").value.trim() || nodeId,
+    kind: "task",
+    runtimeApprovalPolicy: "inherit",
+    resultApprovalPolicy: "none",
+    transitionInstruction: "",
+    name: "新节点",
+    description: "",
+    systemPrompt: "",
+    metadata: { canvasPosition: position },
   };
-  setDagJson([...nodes, node], edges);
-  if (!form.elements.rootNodeId.value) form.elements.rootNodeId.value = nodeId;
-  document.getElementById("dagNodeIdInput").value = "";
-  document.getElementById("dagNodeNameInput").value = "";
+  const nextNodes = [...nodes, node];
+  const nextEdges = selectedId && selectedId !== nodeId
+    ? [...edges, { from: selectedId, to: nodeId }]
+    : edges;
+  state.selectedDagNodeId = nodeId;
+  state.selectedDagEdgeKey = selectedId ? dagEdgeKey({ from: selectedId, to: nodeId }) : "";
+  setDagJson(nextNodes, nextEdges);
 }
 
-function addDagEdgeFromBuilder() {
+function loadDagNodeIntoInspector(node) {
+  document.getElementById("dagNodeIdInput").value = node.id || "";
+  document.getElementById("dagNodeNameInput").value = node.name || "";
+  document.getElementById("dagNodeRuntimeApprovalInput").value = normalizeNodeRuntimeApproval(node);
+  document.getElementById("dagNodeResultApprovalInput").value = normalizeNodeResultApproval(node);
+  document.getElementById("dagNodeResultApprovalField").classList.toggle("hidden", node.id === "root");
+  document.getElementById("dagNodeDescriptionInput").value = node.description || "";
+  document.getElementById("dagNodePromptInput").value = node.systemPrompt || "";
+  document.getElementById("dagNodeTransitionInput").value = node.transitionInstruction || node.routingInstruction || "";
+  document.getElementById("removeDagNodeBtn").disabled = node.id === "root";
+  renderDagConnectionSummary(node.id || "root");
+}
+
+function renderDagConnectionSummary(selectedNodeId) {
   const form = document.getElementById("agentForm");
+  const summary = document.getElementById("dagConnectionSummary");
+  const count = document.getElementById("dagConnectionCount");
+  if (!form || !summary || !count) return;
+  const edges = parseJsonField(form.elements.edgesJson.value, []);
+  const incoming = edges.filter((edge) => edge.to === selectedNodeId).map((edge) => edge.from);
+  const outgoing = edges.filter((edge) => edge.from === selectedNodeId).map((edge) => edge.to);
+  count.textContent = `${incoming.length} 入 / ${outgoing.length} 出`;
+  summary.innerHTML = `
+    <div><span>输入</span><strong>${escapeHtml(incoming.join(", ") || (selectedNodeId === "root" ? "会话任务" : "未连接"))}</strong></div>
+    <div><span>输出</span><strong>${escapeHtml(outgoing.join(", ") || "未连接")}</strong></div>
+    <small>从输出端点拖到其他节点的输入端点以创建连线。</small>
+  `;
+}
+
+function bindDagNodeInteraction(nodeElement, nodes, edges, layout) {
+  const nodeId = nodeElement.dataset.selectDagNode;
+  const selectNode = () => {
+    const node = nodes.find((item) => item.id === nodeId);
+    if (!node) return;
+    state.selectedDagNodeId = node.id;
+    state.selectedDagEdgeKey = "";
+    renderDagBuilder(nodes, edges);
+  };
+  nodeElement.addEventListener("click", (event) => {
+    if (event.target.closest(".dagPort") || nodeElement.dataset.dragged === "true") return;
+    selectNode();
+  });
+  nodeElement.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      selectNode();
+    }
+  });
+  nodeElement.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0 || event.target.closest(".dagPort")) return;
+    const start = layout[nodeId];
+    if (!start) return;
+    const origin = { x: event.clientX, y: event.clientY };
+    const liveLayout = Object.fromEntries(Object.entries(layout).map(([id, position]) => [id, { ...position }]));
+    let moved = false;
+    nodeElement.dataset.dragged = "false";
+    nodeElement.setPointerCapture(event.pointerId);
+    const move = (moveEvent) => {
+      const dx = moveEvent.clientX - origin.x;
+      const dy = moveEvent.clientY - origin.y;
+      if (!moved && Math.hypot(dx, dy) < 4) return;
+      moved = true;
+      nodeElement.dataset.dragged = "true";
+      const position = {
+        x: Math.max(12, Math.round(start.x + dx)),
+        y: Math.max(12, Math.round(start.y + dy)),
+      };
+      liveLayout[nodeId] = position;
+      nodeElement.style.left = `${position.x}px`;
+      nodeElement.style.top = `${position.y}px`;
+      updateRenderedDagEdges(nodeElement.closest(".dagGraphPreview"), liveLayout);
+    };
+    const end = (upEvent) => {
+      nodeElement.removeEventListener("pointermove", move);
+      nodeElement.removeEventListener("pointerup", end);
+      nodeElement.removeEventListener("pointercancel", end);
+      if (nodeElement.hasPointerCapture(upEvent.pointerId)) nodeElement.releasePointerCapture(upEvent.pointerId);
+      if (!moved) return;
+      const position = liveLayout[nodeId];
+      const nextNodes = nodes.map((node) => node.id === nodeId ? withDagCanvasPosition(node, position) : node);
+      state.selectedDagNodeId = nodeId;
+      state.selectedDagEdgeKey = "";
+      setDagJson(nextNodes, edges);
+    };
+    nodeElement.addEventListener("pointermove", move);
+    nodeElement.addEventListener("pointerup", end);
+    nodeElement.addEventListener("pointercancel", end);
+  });
+  nodeElement.querySelector("[data-dag-output]")?.addEventListener("pointerdown", (event) => {
+    startDagConnection(event, nodeId, layout);
+  });
+}
+
+function startDagConnection(event, sourceNodeId, layout) {
+  if (event.button !== 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const preview = event.currentTarget.closest(".dagGraphPreview");
+  const pending = preview?.querySelector("#dagPendingEdge");
+  const source = layout[sourceNodeId];
+  if (!preview || !pending || !source) return;
+  const start = dagOutputPoint(source);
+  pending.classList.remove("hidden");
+  const move = (moveEvent) => {
+    const point = dagPointerPosition(preview, moveEvent);
+    pending.setAttribute("d", dagEdgeCurve(start, point));
+    preview.querySelectorAll(".dagPort.input.connectionTarget").forEach((port) => port.classList.remove("connectionTarget"));
+    const target = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)?.closest("[data-dag-input]");
+    if (target && target.dataset.dagInput !== "root" && target.dataset.dagInput !== sourceNodeId) {
+      target.classList.add("connectionTarget");
+    }
+  };
+  const end = (upEvent) => {
+    const target = document.elementFromPoint(upEvent.clientX, upEvent.clientY)?.closest("[data-dag-input]");
+    cleanup();
+    if (target) createDagEdge(sourceNodeId, target.dataset.dagInput);
+  };
+  const cleanup = () => {
+    document.removeEventListener("pointermove", move);
+    document.removeEventListener("pointerup", end);
+    document.removeEventListener("pointercancel", cleanup);
+    pending.classList.add("hidden");
+    pending.removeAttribute("d");
+    preview.querySelectorAll(".dagPort.input.connectionTarget").forEach((port) => port.classList.remove("connectionTarget"));
+  };
+  document.addEventListener("pointermove", move);
+  document.addEventListener("pointerup", end);
+  document.addEventListener("pointercancel", cleanup);
+}
+
+function createDagEdge(from, to) {
+  const form = document.getElementById("agentForm");
+  if (!form || !from || !to) return;
+  if (to === "root") return toast("Root 是任务入口，不能连接上游节点。", true);
+  if (from === to) return toast("节点不能连接到自身。", true);
   const nodes = parseJsonField(form.elements.nodesJson.value, []);
   const edges = parseJsonField(form.elements.edgesJson.value, []);
-  const from = document.getElementById("dagEdgeFromInput").value;
-  const to = document.getElementById("dagEdgeToInput").value;
-  if (!from || !to) return toast("请先添加节点。", true);
-  if (from === to) return toast("连边不能指向同一个节点。", true);
-  const edge = {
-    from,
-    to,
-    type: document.getElementById("dagEdgeTypeInput").value || "serial",
-    required: document.getElementById("dagEdgeRequiredInput").checked,
+  if (!nodes.some((node) => node.id === from) || !nodes.some((node) => node.id === to)) return;
+  if (edges.some((edge) => edge.from === from && edge.to === to)) {
+    state.selectedDagEdgeKey = dagEdgeKey({ from, to });
+    renderDagBuilder(nodes, edges);
+    return toast("连线已存在。", true);
+  }
+  const nextEdges = [...edges, { from, to }];
+  if (wouldCreateDagCycle(nodes, nextEdges)) return toast("该连线会形成循环。", true);
+  state.selectedDagNodeId = to;
+  state.selectedDagEdgeKey = dagEdgeKey({ from, to });
+  setDagJson(nodes, nextEdges);
+}
+
+function removeSelectedDagEdge() {
+  const form = document.getElementById("agentForm");
+  if (!form || !state.selectedDagEdgeKey) return;
+  const nodes = parseJsonField(form.elements.nodesJson.value, []);
+  const edges = parseJsonField(form.elements.edgesJson.value, []);
+  const nextEdges = edges.filter((edge) => dagEdgeKey(edge) !== state.selectedDagEdgeKey);
+  state.selectedDagEdgeKey = "";
+  setDagJson(nodes, nextEdges);
+}
+
+function syncDagEdgeSelection(edges) {
+  const selected = edges.find((edge) => dagEdgeKey(edge) === state.selectedDagEdgeKey);
+  const button = document.getElementById("removeDagEdgeBtn");
+  if (!button) return;
+  button.disabled = !selected;
+  button.textContent = selected ? `删除连线 ${selected.from} → ${selected.to}` : "删除连线";
+}
+
+function alignDagCanvas() {
+  const form = document.getElementById("agentForm");
+  if (!form) return;
+  const nodes = parseJsonField(form.elements.nodesJson.value, []);
+  const edges = parseJsonField(form.elements.edgesJson.value, []);
+  const layout = autoLayoutDagNodes(nodes, edges, "root");
+  setDagJson(nodes.map((node) => withDagCanvasPosition(node, layout[node.id])), edges);
+}
+
+function withDagCanvasPosition(node, position) {
+  return {
+    ...node,
+    metadata: {
+      ...(node.metadata || {}),
+      canvasPosition: { x: Math.round(position.x), y: Math.round(position.y) },
+    },
   };
-  setDagJson(nodes, [...edges, edge]);
+}
+
+function findAvailableDagPosition(nodes, layout, preferred) {
+  const occupied = nodes.map((node) => layout[node.id]).filter(Boolean);
+  let position = { ...preferred };
+  while (occupied.some((item) => Math.abs(item.x - position.x) < DAG_NODE_WIDTH + 20 && Math.abs(item.y - position.y) < DAG_NODE_HEIGHT + 20)) {
+    position.y += DAG_NODE_HEIGHT + DAG_ROW_GAP;
+  }
+  return position;
+}
+
+function updateSelectedDagNodeFromInspector() {
+  const form = document.getElementById("agentForm");
+  const nodeId = state.selectedDagNodeId || "root";
+  const nodes = parseJsonField(form.elements.nodesJson.value, []);
+  const edges = parseJsonField(form.elements.edgesJson.value, []);
+  const nextNodes = nodes.map((node) => {
+    if (node.id !== nodeId) return node;
+    return stripEmpty({
+      ...node,
+      id: node.id,
+      kind: "task",
+      runtimeApprovalPolicy: document.getElementById("dagNodeRuntimeApprovalInput").value || "inherit",
+      resultApprovalPolicy: document.getElementById("dagNodeResultApprovalInput").value || "none",
+      transitionInstruction: document.getElementById("dagNodeTransitionInput").value.trim(),
+      name: document.getElementById("dagNodeNameInput").value.trim() || (node.id === "root" ? "Root" : node.id),
+      description: document.getElementById("dagNodeDescriptionInput").value.trim(),
+      systemPrompt: document.getElementById("dagNodePromptInput").value.trim(),
+    });
+  });
+  form.elements.nodesJson.value = JSON.stringify(nextNodes, null, 2);
+  if (nodeId === "root") form.elements.systemPrompt.value = document.getElementById("dagNodePromptInput").value.trim();
+  renderDagBuilder(nextNodes, edges);
+}
+
+function nextDagNodeId(nodes) {
+  const ids = new Set(nodes.map((node) => node.id));
+  let index = Math.max(2, nodes.length + 1);
+  while (ids.has(`node-${index}`)) index += 1;
+  return `node-${index}`;
+}
+
+function normalizeNodeResultApproval(node = {}) {
+  if (["manual", "auto", "none"].includes(node.resultApprovalPolicy)) return node.resultApprovalPolicy;
+  if (["manual", "auto", "none"].includes(node.approvalPolicy)) return node.approvalPolicy;
+  if (["manual", "auto", "none"].includes(node.approval)) return node.approval;
+  return node.kind === "wait" ? "manual" : "none";
+}
+
+function normalizeNodeRuntimeApproval(node = {}) {
+  return ["untrusted", "on-request", "never"].includes(node.runtimeApprovalPolicy)
+    ? node.runtimeApprovalPolicy
+    : "inherit";
+}
+
+
+function formatNodeResultApproval(node = {}) {
+  const approval = normalizeNodeResultApproval(node);
+  if (approval === "manual") return "人工审批";
+  if (approval === "auto") return "自动审批";
+  return "免审";
+}
+
+function formatNodeRuntimeApproval(node = {}) {
+  const approval = normalizeNodeRuntimeApproval(node);
+  if (approval === "untrusted") return "信任命令免审";
+  if (approval === "on-request") return "按需审批";
+  if (approval === "never") return "不请求审批";
+  return "继承会话";
+}
+
+function renderDagEdgePath(edge, layout) {
+  const from = layout[edge.from];
+  const to = layout[edge.to];
+  if (!from || !to) return "";
+  const key = dagEdgeKey(edge);
+  const path = dagEdgeCurve(dagOutputPoint(from), dagInputPoint(to));
+  const selected = key === state.selectedDagEdgeKey ? "selected" : "";
+  return `
+    <path class="dagEdgePath ${selected}" d="${path}" marker-end="url(#dagArrow)" data-edge-from="${escapeHtml(edge.from)}" data-edge-to="${escapeHtml(edge.to)}"></path>
+    <path class="dagEdgeHit" d="${path}" data-dag-edge="${escapeHtml(key)}" data-edge-from="${escapeHtml(edge.from)}" data-edge-to="${escapeHtml(edge.to)}"></path>
+  `;
+}
+
+function layoutDagNodes(nodes, edges, rootId) {
+  const layout = autoLayoutDagNodes(nodes, edges, rootId);
+  for (const node of nodes) {
+    const position = node.metadata?.canvasPosition;
+    if (Number.isFinite(position?.x) && Number.isFinite(position?.y)) {
+      layout[node.id] = { x: Math.max(12, position.x), y: Math.max(12, position.y) };
+    }
+  }
+  return layout;
+}
+
+function autoLayoutDagNodes(nodes, edges, rootId) {
+  const levels = computeDagLevels(nodes, edges, rootId);
+  const byLevel = new Map();
+  for (const node of nodes) {
+    const level = levels.get(node.id) || 0;
+    byLevel.set(level, [...(byLevel.get(level) || []), node]);
+  }
+  const layout = {};
+  for (const [level, levelNodes] of byLevel.entries()) {
+    levelNodes.forEach((node, index) => {
+      layout[node.id] = {
+        x: 24 + level * (DAG_NODE_WIDTH + DAG_COLUMN_GAP),
+        y: 28 + index * (DAG_NODE_HEIGHT + DAG_ROW_GAP),
+      };
+    });
+  }
+  return layout;
+}
+
+function updateRenderedDagEdges(preview, layout) {
+  preview?.querySelectorAll("[data-edge-from][data-edge-to]").forEach((path) => {
+    const from = layout[path.dataset.edgeFrom];
+    const to = layout[path.dataset.edgeTo];
+    if (from && to) path.setAttribute("d", dagEdgeCurve(dagOutputPoint(from), dagInputPoint(to)));
+  });
+}
+
+function measureRenderedDagLayout(preview, layout) {
+  const measured = Object.fromEntries(Object.entries(layout).map(([id, position]) => [id, { ...position }]));
+  preview.querySelectorAll("[data-select-dag-node]").forEach((nodeElement) => {
+    const nodeId = nodeElement.dataset.selectDagNode;
+    if (!measured[nodeId]) return;
+    measured[nodeId] = {
+      ...measured[nodeId],
+      width: nodeElement.offsetWidth,
+      height: nodeElement.offsetHeight,
+    };
+  });
+  return measured;
+}
+
+function dagEdgeKey(edge) {
+  return `${edge.from}->${edge.to}`;
+}
+
+function dagOutputPoint(position) {
+  return {
+    x: position.x + (position.width || DAG_NODE_WIDTH),
+    y: position.y + (position.height || DAG_NODE_HEIGHT) / 2,
+  };
+}
+
+function dagInputPoint(position) {
+  return { x: position.x, y: position.y + (position.height || DAG_NODE_HEIGHT) / 2 };
+}
+
+function dagPointerPosition(preview, event) {
+  const rect = preview.getBoundingClientRect();
+  return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+}
+
+function dagEdgeCurve(start, end) {
+  const curve = Math.max(48, Math.abs(end.x - start.x) * 0.45);
+  return `M ${start.x} ${start.y} C ${start.x + curve} ${start.y}, ${end.x - curve} ${end.y}, ${end.x} ${end.y}`;
+}
+
+function computeDagLevels(nodes, edges, rootId) {
+  const ids = new Set(nodes.map((node) => node.id));
+  const outgoing = groupEdgesBySource(edges);
+  const levels = new Map();
+  const queue = [];
+  const roots = rootId && ids.has(rootId)
+    ? [rootId]
+    : nodes.filter((node) => !(groupEdgesByTarget(edges).get(node.id) || []).length).map((node) => node.id);
+  for (const id of roots) {
+    levels.set(id, 0);
+    queue.push(id);
+  }
+  while (queue.length) {
+    const id = queue.shift();
+    const level = levels.get(id) || 0;
+    for (const edge of outgoing.get(id) || []) {
+      const nextLevel = level + 1;
+      if (!levels.has(edge.to) || nextLevel > levels.get(edge.to)) {
+        levels.set(edge.to, nextLevel);
+        queue.push(edge.to);
+      }
+    }
+  }
+  nodes.forEach((node) => {
+    if (!levels.has(node.id)) levels.set(node.id, 0);
+  });
+  return levels;
+}
+
+function removeSelectedDagNode() {
+  const form = document.getElementById("agentForm");
+  const nodeId = document.getElementById("dagNodeIdInput").value.trim() || state.selectedDagNodeId;
+  if (!nodeId) return toast("请先选择节点。", true);
+  if (nodeId === "root") return toast("Root 节点不能删除。", true);
+  const nodes = parseJsonField(form.elements.nodesJson.value, []);
+  const edges = parseJsonField(form.elements.edgesJson.value, []);
+  const nextNodes = nodes.filter((node) => node.id !== nodeId);
+  const nextEdges = edges.filter((edge) => edge.from !== nodeId && edge.to !== nodeId);
+  state.selectedDagNodeId = "root";
+  setDagJson(nextNodes, nextEdges);
 }
 
 function setDagJson(nodes, edges) {
   const form = document.getElementById("agentForm");
-  form.elements.nodesJson.value = JSON.stringify(nodes, null, 2);
-  form.elements.edgesJson.value = JSON.stringify(edges, null, 2);
-  renderDagBuilder(nodes, edges);
+  const draft = ensureRootDraft({ nodes, edges });
+  form.elements.rootNodeId.value = "root";
+  form.elements.nodesJson.value = JSON.stringify(draft.nodes, null, 2);
+  form.elements.edgesJson.value = JSON.stringify(draft.edges, null, 2);
+  const root = draft.nodes.find((node) => node.id === "root");
+  form.elements.systemPrompt.value = root?.systemPrompt || "";
+  renderDagBuilder(draft.nodes, draft.edges);
+}
+
+function applyDevDagTemplate() {
+  const form = document.getElementById("agentForm");
+  const nodes = [
+    {
+      id: "root",
+      kind: "task",
+      runtimeApprovalPolicy: "inherit",
+      resultApprovalPolicy: "none",
+      transitionInstruction: "按默认拓扑调用需求分析节点。",
+      name: "Root",
+      description: "接收用户任务，输出给需求分析节点。",
+      systemPrompt: "",
+    },
+    {
+      id: "requirements",
+      kind: "task",
+      runtimeApprovalPolicy: "inherit",
+      resultApprovalPolicy: "manual",
+      transitionInstruction: "如果需求边界清晰且可以实施，继续调用 development；如果缺少关键信息，向用户请求补充。",
+      name: "需求分析",
+      description: "分析用户需求、澄清边界、输出可执行开发计划。",
+      systemPrompt: "你负责需求分析。请输出目标、约束、验收标准和开发步骤，避免直接写代码。",
+    },
+    {
+      id: "development",
+      kind: "task",
+      runtimeApprovalPolicy: "inherit",
+      resultApprovalPolicy: "none",
+      transitionInstruction: "实现完成后调用 qa；如果实现失败，根据错误决定重试或请求用户协调。",
+      name: "开发",
+      description: "根据需求分析结果实现代码变更，并说明关键实现点。",
+      systemPrompt: "你负责开发实现。请基于上游需求分析输出完成代码修改，并记录影响范围。",
+    },
+    {
+      id: "qa",
+      kind: "task",
+      runtimeApprovalPolicy: "inherit",
+      resultApprovalPolicy: "none",
+      transitionInstruction: "验证通过则完成运行；存在可修复问题时回到 development，并附上失败信息。",
+      name: "QA",
+      description: "验证开发结果，执行回归测试，输出问题和修复建议。",
+      systemPrompt: "你负责 QA。请基于需求和开发输出执行验证，列出通过项、失败项和剩余风险。",
+    },
+  ];
+  const edges = [
+    { from: "root", to: "requirements" },
+    { from: "requirements", to: "development" },
+    { from: "development", to: "qa" },
+  ];
+  form.elements.rootNodeId.value = "root";
+  form.elements.maxDecisions.value = 50;
+  setDagJson(nodes, edges);
+}
+
+async function importAgentGraphFile(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  try {
+    const content = await file.text();
+    const data = JSON.parse(content);
+    const nodes = Array.isArray(data.nodes) ? data.nodes : Array.isArray(data.agent?.nodes) ? data.agent.nodes : [];
+    const edges = Array.isArray(data.edges) ? data.edges : Array.isArray(data.agent?.edges) ? data.agent.edges : [];
+    if (!nodes.length) throw new Error("JSON 中没有 nodes。");
+    if (data.name && document.getElementById("agentForm")?.elements.name && !document.getElementById("agentForm").elements.name.value) {
+      document.getElementById("agentForm").elements.name.value = data.name;
+    }
+    state.selectedDagNodeId = "root";
+    setDagJson(nodes, edges);
+    toast("已导入智能体画布。");
+  } catch (error) {
+    toast(`导入失败：${error.message}`, true);
+  } finally {
+    event.target.value = "";
+  }
+}
+
+function validateDagDraft(body) {
+  if (!body.nodes.length) throw new Error("DAG 至少需要一个节点。");
+  const ids = new Set(body.nodes.map((node) => node.id));
+  if (!body.rootNodeId || !ids.has(body.rootNodeId)) throw new Error("Root Node ID 必须指向已有节点。");
+  for (const edge of body.edges) {
+    if (!ids.has(edge.from) || !ids.has(edge.to)) throw new Error(`连边 ${edge.from} -> ${edge.to} 指向不存在的节点。`);
+    if (edge.from === edge.to) throw new Error("连边不能指向同一个节点。");
+  }
+  if (wouldCreateDagCycle(body.nodes, body.edges)) throw new Error("DAG 不能包含循环连边。");
+}
+
+function wouldCreateDagCycle(nodes, edges) {
+  const outgoing = new Map(nodes.map((node) => [node.id, []]));
+  for (const edge of edges) {
+    if (!outgoing.has(edge.from) || !outgoing.has(edge.to)) continue;
+    outgoing.get(edge.from).push(edge.to);
+  }
+  const visiting = new Set();
+  const visited = new Set();
+  const visit = (nodeId) => {
+    if (visiting.has(nodeId)) return true;
+    if (visited.has(nodeId)) return false;
+    visiting.add(nodeId);
+    for (const next of outgoing.get(nodeId) || []) {
+      if (visit(next)) return true;
+    }
+    visiting.delete(nodeId);
+    visited.add(nodeId);
+    return false;
+  };
+  return nodes.some((node) => visit(node.id));
+}
+
+function groupEdgesByTarget(edges) {
+  return edges.reduce((map, edge) => {
+    map.set(edge.to, [...(map.get(edge.to) || []), edge]);
+    return map;
+  }, new Map());
+}
+
+function groupEdgesBySource(edges) {
+  return edges.reduce((map, edge) => {
+    map.set(edge.from, [...(map.get(edge.from) || []), edge]);
+    return map;
+  }, new Map());
 }
 
 function showDrawerForm(type) {
-  document.getElementById("projectForm").classList.toggle("hidden", type !== "project");
-  document.getElementById("agentForm").classList.toggle("hidden", type !== "agent");
-  document.getElementById("agentListSection").classList.toggle("hidden", type !== "agent");
+  document.getElementById("configDrawer")?.classList.remove("wide");
+  document.getElementById("projectForm")?.classList.toggle("hidden", type !== "project");
+  document.getElementById("agentForm")?.classList.toggle("hidden", type !== "agent");
+  document.getElementById("agentListSection")?.classList.toggle("hidden", type !== "agent");
   document.getElementById("drawerTitle").textContent = type === "agent" ? "Agent 配置" : "工作区设置";
   document.getElementById("drawerSubtitle").textContent = type === "agent"
     ? "创建全局 Agent：预置提示词、Skill、MCP 和 runtime。"
@@ -1645,6 +2376,12 @@ function summarizeAgentRun(run) {
     status: run?.status || "pending",
     agentType: run?.agentSnapshot?.type || "single",
     agentName: run?.agentSnapshot?.name || "",
+    rootCoordinator: run?.rootCoordinator ? {
+      status: run.rootCoordinator.status,
+      decisionCount: run.rootCoordinator.decisionCount || 0,
+      runtimeSessionId: run.rootCoordinator.runtimeSession?.sessionId || "",
+      lastDecision: run.rootCoordinator.lastDecision,
+    } : undefined,
     nodes,
   };
 }
@@ -1667,7 +2404,7 @@ function updateRunSummaryNode(summary, event) {
     ...current,
     id: event.nodeRunId || current.id,
     nodeId: event.nodeId || current.nodeId,
-    status: event.type === "dag_node_completed" ? "completed" : event.type === "dag_node_waiting" ? "waiting" : "running",
+    status: event.type === "dag_node_completed" ? "completed" : event.type === "dag_node_waiting" ? "waiting_approval" : "running",
     runtimeSessionId: event.result?.runtimeSession?.sessionId || current.runtimeSessionId || "",
     text: event.result ? summarizeRunOutput(event.result) : current.text || "",
   };
@@ -1675,8 +2412,8 @@ function updateRunSummaryNode(summary, event) {
   else nodes[index] = updated;
   return {
     ...summary,
-    status: nodes.some((node) => node.status === "waiting")
-      ? "waiting"
+    status: nodes.some((node) => ["waiting", "waiting_approval"].includes(node.status))
+      ? "waiting_approval"
       : event.type === "dag_node_completed" && nodes.every((node) => node.status === "completed")
         ? "completed"
         : "running",
@@ -1698,9 +2435,15 @@ function renderAgentRunSummary(summary, messageRunId = "") {
       </div>
       ${summary.agentName ? `<small>${escapeHtml(summary.agentName)}</small>` : ""}
       <div class="runNodeList">
+        ${summary.rootCoordinator ? `
+          <div class="runNode ${escapeHtml(summary.rootCoordinator.status || "pending")}">
+            <span>RootAgent · ${escapeHtml(summary.rootCoordinator.decisionCount || 0)} 次决策</span>
+            <small>${escapeHtml(summary.rootCoordinator.status || "pending")}${summary.rootCoordinator.runtimeSessionId ? ` · ${escapeHtml(summary.rootCoordinator.runtimeSessionId.slice(0, 8))}` : ""}</small>
+          </div>
+        ` : ""}
         ${nodes.map((node) => `
           <div class="runNode ${escapeHtml(node.status || "pending")}">
-            <span>${escapeHtml(node.nodeId || "node")}${node.kind === "wait" ? " · 等待" : ""}</span>
+            <span>${escapeHtml(node.nodeId || "node")}${["waiting", "waiting_approval"].includes(node.status) ? " · 待审批" : ""}</span>
             <small>${escapeHtml(node.status || "pending")}${node.runtimeSessionId ? ` · ${escapeHtml(node.runtimeSessionId.slice(0, 8))}` : ""}</small>
           </div>
         `).join("")}
@@ -1848,9 +2591,16 @@ function splitLinesOrComma(value) {
 }
 
 function stripEmpty(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  if (Array.isArray(value)) {
+    return value
+      .map(stripEmpty)
+      .filter((item) => item !== undefined && item !== "");
+  }
+  if (!value || typeof value !== "object") return value;
   return Object.fromEntries(
-    Object.entries(value).filter(([, item]) => item !== undefined && item !== "")
+    Object.entries(value)
+      .map(([key, item]) => [key, stripEmpty(item)])
+      .filter(([, item]) => item !== undefined && item !== "")
   );
 }
 

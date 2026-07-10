@@ -9,13 +9,14 @@ export class ResourceManager {
   constructor({ rootPath = config.resourceRootPath, client }) {
     this.rootPath = rootPath;
     this.client = client;
-    this.projectsDir = path.join(rootPath, "projects");
+    this.workspacesDir = path.join(rootPath, "workspaces");
+    this.projectsDir = this.workspacesDir;
     this.knowledgeDir = path.join(rootPath, "knowledge");
     this.indexPath = path.join(rootPath, KNOWLEDGE_INDEX_FILE);
   }
 
   async ensureBaseDirectories() {
-    await fs.mkdir(this.projectsDir, { recursive: true });
+    await fs.mkdir(this.workspacesDir, { recursive: true });
     await fs.mkdir(this.knowledgeDir, { recursive: true });
   }
 
@@ -23,7 +24,8 @@ export class ResourceManager {
     await this.ensureBaseDirectories();
     return {
       rootPath: this.rootPath,
-      projectsDir: this.projectsDir,
+      workspacesDir: this.workspacesDir,
+      projectsDir: this.workspacesDir,
       knowledgeDir: this.knowledgeDir,
       indexPath: this.indexPath,
     };
@@ -32,7 +34,7 @@ export class ResourceManager {
   async createProjectWorkspace({ projectId, projectName }) {
     await this.ensureBaseDirectories();
     const folderName = `${slugify(projectName)}-${projectId.slice(0, 8)}`;
-    const workspacePath = path.join(this.projectsDir, folderName);
+    const workspacePath = path.join(this.workspacesDir, folderName);
     await fs.mkdir(workspacePath, { recursive: true });
     await fs.writeFile(
       path.join(workspacePath, "workspace.json"),

@@ -80,7 +80,7 @@
         request("/api/workspaces"),
         request("/api/agents"),
       ]);
-      projects = projectData.projects || [];
+      projects = projectData.workspaces || projectData.projects || [];
       agents = agentData.agents || [];
       if (activeProjectId && !projects.some((project) => project.id === activeProjectId)) {
         activeProjectId = "";

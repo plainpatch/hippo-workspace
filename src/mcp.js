@@ -436,7 +436,7 @@ export function createMcpServer() {
     "hippo_create_agent_run",
     {
       title: "Create agent run",
-      description: "Create a persisted DAG AgentRun without executing it. Use advance to execute ready nodes.",
+      description: "Create a persisted AgentRun with a Root coordinator and an initially empty runtime graph.",
       inputSchema: {
         workspaceId: z.string().min(1),
         agentId: z.string().min(1),
@@ -459,6 +459,7 @@ export function createMcpServer() {
     {
       title: "Get agent run",
       description: "Get a persisted AgentRun, including its frozen agent snapshot and NodeRun state.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         workspaceId: z.string().min(1),
         runId: z.string().min(1),
@@ -471,7 +472,7 @@ export function createMcpServer() {
     "hippo_advance_agent_run",
     {
       title: "Advance agent run",
-      description: "Advance a persisted DAG AgentRun by executing ready nodes until completion, failure, or waiting state.",
+      description: "Resume the persisted Root coordinator session so it can inspect the runtime graph and decide the next action.",
       inputSchema: {
         workspaceId: z.string().min(1),
         runId: z.string().min(1),
@@ -481,10 +482,96 @@ export function createMcpServer() {
   );
 
   server.registerTool(
+    "hippo_dispatch_graph_node",
+    {
+      title: "Dispatch graph node",
+      description: "Create a new append-only NodeRun attempt and execute it in an isolated runtime session.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: {
+        workspaceId: z.string().min(1),
+        runId: z.string().min(1),
+        nodeId: z.string().min(1),
+        input: z.unknown().optional(),
+        parentNodeRunId: z.string().optional(),
+        reason: z.string().optional(),
+      },
+    },
+    async ({ workspaceId, runId, ...payload }) =>
+      jsonContent(await agentOrchestrator.dispatchGraphNode(workspaceId, runId, payload))
+  );
+
+  server.registerTool(
+    "hippo_request_graph_user",
+    {
+      title: "Request user input for graph run",
+      description: "Pause a graph run and expose the Root coordinator's question to the user.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        workspaceId: z.string().min(1),
+        runId: z.string().min(1),
+        question: z.string().min(1),
+        reason: z.string().optional(),
+      },
+    },
+    async ({ workspaceId, runId, ...payload }) =>
+      jsonContent(await agentOrchestrator.requestGraphRunUser(workspaceId, runId, payload))
+  );
+
+  server.registerTool(
+    "hippo_resume_graph_with_user_input",
+    {
+      title: "Resume graph run with user input",
+      description: "Resume the same Root coordinator session after the user answers its question.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: {
+        workspaceId: z.string().min(1),
+        runId: z.string().min(1),
+        input: z.unknown(),
+      },
+    },
+    async ({ workspaceId, runId, input }) =>
+      jsonContent(await agentOrchestrator.resumeGraphRunWithUserInput(workspaceId, runId, { input }))
+  );
+
+  server.registerTool(
+    "hippo_complete_graph_run",
+    {
+      title: "Complete graph run",
+      description: "Mark a graph run completed with the Root coordinator's final output.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        workspaceId: z.string().min(1),
+        runId: z.string().min(1),
+        output: z.unknown().optional(),
+        reason: z.string().optional(),
+      },
+    },
+    async ({ workspaceId, runId, ...payload }) =>
+      jsonContent(await agentOrchestrator.completeGraphRun(workspaceId, runId, payload))
+  );
+
+  server.registerTool(
+    "hippo_fail_graph_run",
+    {
+      title: "Fail graph run",
+      description: "Mark a graph run failed with the Root coordinator's reason.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        workspaceId: z.string().min(1),
+        runId: z.string().min(1),
+        output: z.unknown().optional(),
+        reason: z.string().optional(),
+      },
+    },
+    async ({ workspaceId, runId, ...payload }) =>
+      jsonContent(await agentOrchestrator.failGraphRun(workspaceId, runId, payload))
+  );
+
+  server.registerTool(
     "hippo_retry_node_run",
     {
       title: "Retry node run",
-      description: "Reset one failed or completed node run and advance the DAG again.",
+      description: "Create a new NodeRun attempt from a previous node run, preserving the previous attempt and trace.",
       inputSchema: {
         workspaceId: z.string().min(1),
         runId: z.string().min(1),
@@ -594,11 +681,15 @@ function skillInputSchema() {
 function agentNodeInputSchema() {
   return z.object({
     id: z.string().min(1),
-    kind: z.enum(["task", "wait"]).default("task"),
+    kind: z.enum(["task"]).default("task"),
+    approvalPolicy: z.enum(["none", "auto", "manual"]).optional(),
+    resultApprovalPolicy: z.enum(["none", "auto", "manual"]).optional(),
+    runtimeApprovalPolicy: z.enum(["inherit", "untrusted", "on-request", "never"]).default("inherit"),
+    transitionInstruction: z.string().optional().describe("Plain-language result handling rule shown to RootAgent together with this node's output."),
     name: z.string().min(1).optional(),
-    description: z.string().optional(),
+    description: z.string().optional().describe("External interface description used by RootAgent to decide when and how to dispatch this node."),
     agentId: z.string().optional(),
-    systemPrompt: z.string().optional(),
+    systemPrompt: z.string().optional().describe("System prompt used by the worker runtime when this node executes."),
     runtimeId: z.string().optional(),
     skills: z.array(skillInputSchema()).default([]),
     mcpServers: z.array(z.string()).default([]),
@@ -612,8 +703,6 @@ function agentEdgeInputSchema() {
     id: z.string().optional(),
     from: z.string().min(1),
     to: z.string().min(1),
-    type: z.enum(["serial", "parallel"]).default("serial"),
-    required: z.boolean().default(true),
     metadata: z.record(z.string(), z.unknown()).optional(),
   });
 }

@@ -1,5 +1,6 @@
 import path from "node:path";
 import fs from "node:fs";
+import os from "node:os";
 import { config } from "./config.js";
 
 export class AppSettingsService {
@@ -16,7 +17,8 @@ export class AppSettingsService {
     return {
       appHomePath: this.initial.appHomePath,
       resourceRootPath,
-      projectsPath: path.join(resourceRootPath, "projects"),
+      workspacesPath: path.join(resourceRootPath, "workspaces"),
+      projectsPath: path.join(resourceRootPath, "workspaces"),
       knowledgePath: path.join(resourceRootPath, "knowledge"),
       settingsPath: this.settingsPath,
       agentStorePath: this.initial.agentStorePath,
@@ -27,7 +29,7 @@ export class AppSettingsService {
           id: "codex",
           name: "Codex",
           command: overrides.codexCommand || this.initial.codexCommand,
-          model: overrides.codexModel || this.initial.codexModel || undefined,
+          model: overrides.codexModel || this.initial.codexModel || readCodexDefaultModel() || undefined,
           sandboxMode: overrides.codexSandboxMode || this.initial.codexSandboxMode || "workspace-write",
           serviceTier: overrides.codexServiceTier || this.initial.codexServiceTier || "fast",
         },
@@ -76,6 +78,17 @@ export class AppSettingsService {
       if (error.code === "ENOENT") return {};
       throw error;
     }
+  }
+}
+
+function readCodexDefaultModel() {
+  try {
+    const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+    const content = fs.readFileSync(path.join(codexHome, "config.toml"), "utf8");
+    const topLevel = content.split(/^\s*\[/m, 1)[0];
+    return topLevel.match(/^\s*model\s*=\s*["']([^"']+)["']/m)?.[1] || "";
+  } catch {
+    return "";
   }
 }
 

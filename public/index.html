@@ -125,92 +125,7 @@
           <button class="primary" type="submit">保存工作区</button>
         </form>
 
-        <form id="agentForm" class="drawerForm hidden">
-          <input name="id" type="hidden" />
-          <label>Agent 类型
-            <select name="type" id="agentTypeSelect">
-              <option value="single">单节点</option>
-              <option value="dag">DAG 编排</option>
-            </select>
-          </label>
-          <label>Agent 名称 <input name="name" required placeholder="例如：文档审查 Agent" /></label>
-          <label>Agent 说明 <input name="description" placeholder="这个 Agent 擅长什么任务" /></label>
-          <label>系统提示词
-            <textarea name="systemPrompt" rows="6" placeholder="定义这个 Agent 应该如何工作"></textarea>
-          </label>
-          <label>可访问 Skill
-            <textarea name="skills" rows="5" placeholder="检索回答: 基于绑定知识库组织答案&#10;审查: 识别风险和缺失证据"></textarea>
-          </label>
-          <label>可访问 MCP
-            <textarea name="mcpServers" rows="3" placeholder="例如：hippo-system&#10;github"></textarea>
-          </label>
-          <label>Runtime
-            <select name="runtimeId">
-              <option value="codex">Codex</option>
-            </select>
-          </label>
-          <label>补充 RAG 文档名
-            <textarea name="ragDocumentNames" rows="3" placeholder="可选：custom-documents/example.json"></textarea>
-          </label>
-          <div class="formGrid">
-            <label>默认模式
-              <select name="defaultMode">
-                <option value="query">检索问答</option>
-                <option value="chat">对话</option>
-                <option value="automatic">自动</option>
-              </select>
-            </label>
-            <label>Top N <input name="topN" type="number" min="1" value="4" /></label>
-          </div>
-          <div id="agentDagFields" class="dagFields hidden">
-            <label>Root Node ID <input name="rootNodeId" placeholder="例如：root" /></label>
-            <label>并发数 <input name="dagConcurrency" type="number" min="1" max="8" value="4" /></label>
-            <div class="dagBuilder">
-              <div class="dagBuilderHeader">
-                <strong>图编辑器</strong>
-                <button id="syncDagJsonBtn" type="button">同步 JSON</button>
-              </div>
-              <div class="dagBuilderGrid">
-                <div class="dagBuilderPanel">
-                  <label>节点 ID <input id="dagNodeIdInput" placeholder="root" /></label>
-                  <label>节点名称 <input id="dagNodeNameInput" placeholder="Root" /></label>
-                  <label>节点类型
-                    <select id="dagNodeKindInput">
-                      <option value="task">任务</option>
-                      <option value="wait">等待</option>
-                    </select>
-                  </label>
-                  <button id="addDagNodeBtn" type="button">添加节点</button>
-                </div>
-                <div class="dagBuilderPanel">
-                  <label>From <select id="dagEdgeFromInput"></select></label>
-                  <label>To <select id="dagEdgeToInput"></select></label>
-                  <label>关系
-                    <select id="dagEdgeTypeInput">
-                      <option value="serial">串行</option>
-                      <option value="parallel">并行</option>
-                    </select>
-                  </label>
-                  <label class="dryRunToggle"><input id="dagEdgeRequiredInput" type="checkbox" checked /> required</label>
-                  <button id="addDagEdgeBtn" type="button">添加连边</button>
-                </div>
-              </div>
-              <div id="dagGraphPreview" class="dagGraphPreview"></div>
-            </div>
-            <label>DAG Nodes JSON
-              <textarea name="nodesJson" rows="7" placeholder='[{"id":"root","kind":"task","name":"Root"},{"id":"approval","kind":"wait","name":"人工确认"}]'></textarea>
-            </label>
-            <label>DAG Edges JSON
-              <textarea name="edgesJson" rows="5" placeholder='[{"from":"root","to":"review","type":"serial"}]'></textarea>
-            </label>
-          </div>
-          <button class="primary" type="submit">保存 Agent</button>
-        </form>
-
-        <div id="agentListSection" class="drawerSection hidden">
-          <h3>已创建 Agent</h3>
-          <div id="agentList" class="agentList"></div>
-        </div>
+        <div id="agentListSection" class="drawerSection hidden"></div>
 
         <div class="drawerSection">
           <h3>系统知识库入库</h3>
@@ -230,6 +145,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=turn-sandbox-control" type="module"></script>
+    <script src="/app.js?v=dag-visual-editor" type="module"></script>
   </body>
 </html>

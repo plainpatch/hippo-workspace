@@ -123,7 +123,8 @@ export class CodexRuntimeAdapter {
   buildArgs(project, outputPath, { existingSessionId = "", runtimeOptions } = {}) {
     const serviceTierConfig = this.serviceTier ? `service_tier="${this.serviceTier}"` : "";
     const sandboxMode = runtimeOptions?.sandboxMode || this.sandboxMode;
-    const args = existingSessionId ? [
+    const runtimeApprovalPolicy = normalizeRuntimeApprovalPolicy(runtimeOptions?.runtimeApprovalPolicy);
+    const commandArgs = existingSessionId ? [
       "exec",
       "resume",
       "--json",
@@ -139,11 +140,21 @@ export class CodexRuntimeAdapter {
       "--output-last-message",
       outputPath,
     ];
-    if (serviceTierConfig) args.splice(existingSessionId ? 4 : 4, 0, "-c", serviceTierConfig);
-    if (!existingSessionId && sandboxMode) args.splice(args.length - 2, 0, "--sandbox", sandboxMode);
-    if (this.model) args.push("--model", this.model);
-    if (existingSessionId) args.push(existingSessionId);
-    return args;
+    if (serviceTierConfig) commandArgs.splice(4, 0, "-c", serviceTierConfig);
+    if (runtimeOptions?.ignoreUserConfig) commandArgs.splice(existingSessionId ? 2 : 1, 0, "--ignore-user-config");
+    if (this.model) commandArgs.push("--model", this.model);
+    if (existingSessionId) commandArgs.push(existingSessionId);
+
+    const globalArgs = [];
+    if (sandboxMode) globalArgs.push("--sandbox", sandboxMode);
+    if (runtimeApprovalPolicy !== "inherit") {
+      globalArgs.push("--ask-for-approval", runtimeApprovalPolicy);
+    }
+    for (const [name, url] of Object.entries(runtimeOptions?.mcpServerUrls || {})) {
+      if (!/^[A-Za-z0-9_-]+$/.test(name) || !url) continue;
+      globalArgs.push("-c", `mcp_servers.${name}.url=${JSON.stringify(String(url))}`);
+    }
+    return [...globalArgs, ...commandArgs];
   }
 
   cancel(runId) {
@@ -242,7 +253,14 @@ function buildRuntimeSession({ project, rootSession, sessionId, resumedFromSessi
 function normalizeRuntimeOptions(options, adapter) {
   return {
     sandboxMode: options?.sandboxMode || adapter.sandboxMode || "",
+    runtimeApprovalPolicy: normalizeRuntimeApprovalPolicy(options?.runtimeApprovalPolicy),
+    mcpServerUrls: options?.mcpServerUrls || {},
+    ignoreUserConfig: options?.ignoreUserConfig === true,
   };
+}
+
+function normalizeRuntimeApprovalPolicy(value) {
+  return ["untrusted", "on-request", "never"].includes(value) ? value : "inherit";
 }
 
 function normalizeContextPolicy(policy) {

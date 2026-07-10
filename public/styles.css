@@ -560,10 +560,16 @@ dd {
 }
 
 .projectTitle {
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.projectTitle > div {
+  min-width: 0;
 }
 
 .projectTitle h1 {
@@ -644,6 +650,11 @@ dd {
   min-height: 0;
   overflow: auto;
   padding: 34px clamp(18px, 6vw, 76px) 24px;
+}
+
+.chatStream.agentEditorStream {
+  overflow: hidden;
+  padding: 10px 14px 12px;
 }
 
 .chatStream:empty::before {
@@ -764,7 +775,10 @@ dd {
   color: #9bc3ff;
 }
 
-.runStatus.waiting {
+.runStatus.waiting,
+.runStatus.waiting_approval,
+.runStatus.waiting_user,
+.runStatus.coordinating {
   border-color: rgba(245, 158, 11, 0.44);
   color: #f6c164;
 }
@@ -824,7 +838,8 @@ dd {
   border-color: rgba(59, 130, 246, 0.3);
 }
 
-.runNode.waiting {
+.runNode.waiting,
+.runNode.waiting_approval {
   border-color: rgba(245, 158, 11, 0.32);
 }
 
@@ -1162,6 +1177,20 @@ dd {
   pointer-events: auto;
 }
 
+.configDrawer.wide {
+  left: var(--sidebar-width);
+  right: 0;
+  width: auto;
+  padding: 18px 22px;
+  border-left: 0;
+  background: var(--main-bg);
+  box-shadow: none;
+}
+
+.configDrawer[inert] {
+  display: none;
+}
+
 .drawerHeader {
   display: flex;
   align-items: flex-start;
@@ -1224,6 +1253,40 @@ dd {
   gap: 12px;
 }
 
+.configDrawer.wide #agentForm {
+  grid-template-columns: minmax(190px, 220px) minmax(0, 1fr);
+  align-items: start;
+  max-width: 1360px;
+  margin-inline: auto;
+}
+
+.configDrawer.wide #agentForm > label,
+.configDrawer.wide #agentForm > .formGrid {
+  min-width: 0;
+}
+
+.configDrawer.wide #agentDagFields {
+  grid-column: 2;
+  grid-row: 1 / span 5;
+  position: sticky;
+  top: 0;
+}
+
+.configDrawer.wide #agentForm > .primary {
+  grid-column: 1 / -1;
+}
+
+.configDrawer.wide [data-advanced-agent-field],
+.configDrawer.wide #agentListSection,
+.configDrawer.wide .drawerSection {
+  display: none !important;
+}
+
+.configDrawer.wide .drawerHeader {
+  max-width: 1360px;
+  margin-inline: auto;
+}
+
 .dagBuilder {
   display: grid;
   gap: 10px;
@@ -1241,27 +1304,292 @@ dd {
   gap: 10px;
 }
 
+.dagBuilderActions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .dagBuilderHeader button,
 .dagPreviewRow button,
-.dagBuilderPanel button {
+.dagInspector button {
   min-height: 28px;
   padding: 4px 8px;
 }
 
-.dagBuilderGrid {
+.dagVisualEditor {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr) minmax(210px, 250px);
   gap: 10px;
+  min-height: calc(100vh - 220px);
 }
 
-.dagBuilderPanel {
-  display: grid;
-  gap: 8px;
+.dagCanvasShell {
+  min-width: 0;
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background:
+    radial-gradient(circle, rgba(255, 255, 255, 0.08) 1px, transparent 1px) 0 0 / 18px 18px,
+    #151515;
 }
 
 .dagGraphPreview {
+  position: relative;
+  min-width: 760px;
+  min-height: calc(100vh - 222px);
+}
+
+.dagCanvas {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.dagCanvasNode {
+  position: absolute;
+  width: 210px;
+  height: 172px;
+  min-height: 172px;
+  display: grid;
+  gap: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 8px;
+  padding: 10px;
+  background: #222222;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.24);
+  text-align: left;
+  color: #f4f4f5;
+  cursor: grab;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  overflow: visible;
+}
+
+.dagCanvasNode:active {
+  cursor: grabbing;
+}
+
+.dagCanvasNode.root {
+  border-color: rgba(16, 185, 129, 0.45);
+  background: #1b2924;
+}
+
+.dagCanvasNode.selected {
+  border-color: rgba(129, 140, 248, 0.85);
+  box-shadow: 0 0 0 2px rgba(129, 140, 248, 0.22), 0 16px 36px rgba(0, 0, 0, 0.28);
+}
+
+.dagNodeHeader,
+.dagNodeIO {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dagNodeHeader strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.dagNodeHeader span,
+.dagCanvasNode small,
+.dagNodeIO span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.dagCanvasNode p {
+  margin: 0;
+  color: #d8d8d8;
+  font-size: 12px;
+  line-height: 1.45;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.dagNodeIO {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.dagNodeIO span {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.dagPort {
+  position: absolute;
+  top: 50%;
+  z-index: 3;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #868cf5;
+  border-radius: 50%;
+  background: #151515;
+  transform: translateY(-50%);
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.dagPort.input {
+  left: -8px;
+}
+
+.dagPort.output {
+  right: -8px;
+}
+
+.dagPort:hover,
+.dagPort.connectionTarget {
+  border-color: #c7c9ff;
+  background: #7c83ff;
+  box-shadow: 0 0 0 5px rgba(124, 131, 255, 0.18);
+}
+
+.dagPort.disabled {
+  opacity: 0.28;
+  pointer-events: none;
+}
+
+.dagEdgeLayer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.dagEdgePath {
+  fill: none;
+  stroke: #7c83ff;
+  stroke-width: 2;
+  opacity: 0.86;
+}
+
+.dagEdgePath.selected {
+  stroke: #c7c9ff;
+  stroke-width: 3;
+  opacity: 1;
+}
+
+.dagEdgePath.pending {
+  stroke-dasharray: 6 5;
+  marker-end: none;
+}
+
+.dagEdgeHit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.dagInspector {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 9px;
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 10px;
+  background: #202020;
+}
+
+.dagInspectorHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dagInspectorActions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.dagInspectorHeader strong,
+.dagEdgeEditor strong {
+  color: #f1f1f1;
+  font-size: 12px;
+}
+
+.dagEdgeEditor {
   display: grid;
   gap: 8px;
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+  padding-top: 10px;
+}
+
+.dagEdgeEditorHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dagEdgeEditorHeader small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.dagConnectionSummary {
+  display: grid;
+  gap: 7px;
+}
+
+.dagConnectionSummary div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.dagConnectionSummary span,
+.dagConnectionSummary small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.dagConnectionSummary strong {
+  min-width: 0;
+  color: #e7e7e7;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dagJsonDetails {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #1b1b1b;
+}
+
+.dagJsonDetails summary {
+  cursor: pointer;
+  color: #d8d8d8;
+  font-weight: 650;
+  font-size: 12px;
 }
 
 .dagPreviewSection {
@@ -1451,16 +1779,9 @@ dd {
   font-size: 12px;
 }
 
-.agentPageHeader,
-.agentCards {
-  max-width: 980px;
+.agentHome {
+  width: min(1040px, 100%);
   margin: 0 auto;
-}
-
-.agentPageHeader {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 12px;
 }
 
 .agentCards {
@@ -1478,6 +1799,28 @@ dd {
   border-color: var(--line-strong);
   background: #202020;
   text-align: left;
+}
+
+.agentCard:hover {
+  border-color: rgba(255, 255, 255, 0.24);
+  background: #252525;
+}
+
+.agentCreateCard {
+  border-style: dashed;
+  background: #1b1b1b;
+}
+
+.agentCreateCard small {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  color: #111111;
+  background: #f4f4f5;
+  font-size: 18px;
+  font-weight: 800;
 }
 
 .agentCard strong,
@@ -1501,6 +1844,76 @@ dd {
 .agentCard small {
   color: var(--muted);
   font-size: 12px;
+}
+
+.agentEditor {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  margin: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.agentEditorMeta {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(180px, 1.2fr) minmax(220px, 2fr) 140px 140px 92px;
+  gap: 8px;
+  align-items: end;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #181818;
+}
+
+.agentEditorMeta label,
+.dagInspector label {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  color: #d8d8d8;
+  font-size: 12px;
+}
+
+.agentCanvasLayout {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 286px;
+  gap: 10px;
+}
+
+.agentCanvasLayout .dagCanvasShell {
+  min-height: 0;
+  height: 100%;
+}
+
+.agentCanvasLayout .dagGraphPreview {
+  min-height: 100%;
+}
+
+.agentCanvasConsole {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #1f1f1f;
+}
+
+.agentCanvasConsole button {
+  min-height: 31px;
+  padding: 5px 11px;
+  border-color: var(--line-strong);
+  background: #292929;
+}
+
+.agentCanvasConsole .primary {
+  margin-left: auto;
+  background: #f4f4f5;
 }
 
 .knowledgeManager {
@@ -1898,8 +2311,29 @@ dd {
 
   .knowledgeInlineForm,
   .knowledgeMetaFields,
-  .knowledgeDirectoryItem {
+  .knowledgeDirectoryItem,
+  .dagVisualEditor,
+  .agentCanvasLayout,
+  .agentEditorMeta {
     grid-template-columns: 1fr;
+  }
+
+  .agentEditor {
+    min-height: calc(100vh - 140px);
+  }
+
+  .configDrawer.wide #agentForm {
+    grid-template-columns: 1fr;
+  }
+
+  .configDrawer.wide #agentDagFields {
+    grid-column: auto;
+    grid-row: auto;
+    position: static;
+  }
+
+  .dagGraphPreview {
+    min-width: 640px;
   }
 }
 

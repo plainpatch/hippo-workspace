@@ -1,5 +1,7 @@
 # Agent Runtime and DAG Orchestration Plan
 
+> Superseded for graph execution by [root-agent-runtime.md](./root-agent-runtime.md). This file remains as historical context; automatic ready-node scheduling, wait nodes, edge success rules, and serial/parallel edge types are no longer the target architecture.
+
 ## Objective
 
 Hippo must evolve from a single `codex exec` wrapper into a workspace-scoped agent orchestration system. The system must separate agent prototypes from runtime execution state, support Codex session reuse, and provide a DAG orchestration layer that can be exposed as a stateful tool.

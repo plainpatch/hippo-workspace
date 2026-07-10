@@ -11,14 +11,23 @@ const skillSchema = z.object({
   instructions: z.string().optional(),
 });
 
+const optionalRuntimeIdSchema = z.preprocess(
+  (value) => typeof value === "string" && !value.trim() ? undefined : value,
+  z.string().min(1).optional()
+);
+
 const agentNodeSchema = z.object({
   id: z.string().min(1),
   kind: z.enum(["task", "wait"]).default("task"),
+  approvalPolicy: z.enum(["none", "auto", "manual"]).optional(),
+  resultApprovalPolicy: z.enum(["none", "auto", "manual"]).optional(),
+  runtimeApprovalPolicy: z.enum(["inherit", "untrusted", "on-request", "never"]).default("inherit"),
+  transitionInstruction: z.string().optional(),
   name: z.string().min(1).optional(),
   description: z.string().optional(),
   agentId: z.string().optional(),
   systemPrompt: z.string().optional(),
-  runtimeId: z.string().min(1).optional(),
+  runtimeId: optionalRuntimeIdSchema,
   skills: z.array(skillSchema).default([]),
   mcpServers: z.array(z.string().min(1)).default([]),
   input: z.unknown().optional(),
@@ -29,8 +38,6 @@ const agentEdgeSchema = z.object({
   id: z.string().min(1).optional(),
   from: z.string().min(1),
   to: z.string().min(1),
-  type: z.enum(["serial", "parallel"]).default("serial"),
-  required: z.boolean().default(true),
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
@@ -130,6 +137,23 @@ const resumeNodeRunSchema = z.object({
   output: z.unknown().optional(),
 });
 
+const dispatchGraphNodeSchema = z.object({
+  nodeId: z.string().min(1),
+  input: z.unknown().optional(),
+  parentNodeRunId: z.string().min(1).optional(),
+  reason: z.string().optional(),
+});
+
+const requestUserSchema = z.object({
+  question: z.string().min(1),
+  reason: z.string().optional(),
+});
+
+const resolveGraphRunSchema = z.object({
+  output: z.unknown().optional(),
+  reason: z.string().optional(),
+});
+
 const appendTraceSchema = z.object({
   type: z.string().min(1),
   payload: z.unknown().optional(),
@@ -157,7 +181,7 @@ export class AgentOrchestrator {
 
   async listProjects() {
     const store = await this.readStore();
-    return { projects: store.projects };
+    return workspaceResultList(store.projects);
   }
 
   async listAgents() {
@@ -276,7 +300,7 @@ export class AgentOrchestrator {
     const store = await this.readStore();
     const project = store.projects.find((item) => item.id === id);
     if (!project) throw new AgentOrchestratorError(`Workspace ${id} was not found.`, 404);
-    return { project };
+    return workspaceResult(project);
   }
 
   async listConversations(projectId) {
@@ -450,8 +474,66 @@ export class AgentOrchestrator {
       sessionId: run.rootSessionId,
       reset: true,
     };
-    const updated = await this.runDagToCompletion(project, run.agentSnapshot, request, runId);
+    const updated = await this.coordinateGraphRun(project, run.agentSnapshot, request, runId);
     return { project, run: updated.run };
+  }
+
+  async dispatchGraphNode(projectId, runId, input = {}, onEvent) {
+    const payload = dispatchGraphNodeSchema.parse(input);
+    const { project } = await this.getProject(projectId);
+    const { run } = await this.getAgentRun(projectId, runId);
+    if (run.agentSnapshot?.type !== "dag") {
+      throw new AgentOrchestratorError("Only graph runs can dispatch nodes.", 400);
+    }
+    if (payload.nodeId === run.agentSnapshot.rootNodeId) {
+      throw new AgentOrchestratorError("Root is the coordinator and cannot be dispatched as a worker node.", 400);
+    }
+    const nodeDef = run.agentSnapshot.nodes.find((node) => node.id === payload.nodeId);
+    if (!nodeDef) throw new AgentOrchestratorError(`Graph node ${payload.nodeId} was not found.`, 404);
+    let nodeRun;
+    await this.updateAgentRun(projectId, runId, (current, updatedAt) => {
+      if (["completed", "failed", "cancelled"].includes(current.status)) {
+        throw new AgentOrchestratorError(`Run ${runId} is already ${current.status}.`, 409);
+      }
+      const attempt = Object.values(current.nodeRuns || {})
+        .filter((item) => item.prototypeNodeId === payload.nodeId || item.nodeId === payload.nodeId)
+        .length + 1;
+      nodeRun = createNodeRun({
+        runId,
+        request: current.request,
+        agentSnapshot: current.agentSnapshot,
+        nodeId: payload.nodeId,
+        kind: nodeDef.kind || "task",
+        input: payload.input,
+        upstreamNodeIds: [],
+        downstreamNodeIds: downstreamNodeIds(payload.nodeId, current.agentSnapshot.edges),
+        attempt,
+        parentNodeRunId: payload.parentNodeRunId || "",
+        now: updatedAt,
+      });
+      nodeRun.status = "pending";
+      current.nodeRuns[nodeRun.id] = nodeRun;
+      current.status = "running";
+      current.trace.push(createTrace("graph_node_dispatched", {
+        nodeRunId: nodeRun.id,
+        nodeId: payload.nodeId,
+        attempt: nodeRun.attempt,
+        parentNodeRunId: payload.parentNodeRunId || "",
+        reason: payload.reason || "",
+      }, updatedAt));
+      return current;
+    });
+    const request = run.request || {
+      runtimeId: run.agentSnapshot.runtimeId || config.defaultRuntimeId,
+      runId: run.id,
+      projectId,
+      mode: run.agentSnapshot.defaultMode || "chat",
+      sessionId: run.rootSessionId,
+      runtimeOptions: {},
+    };
+    const result = await this.executeDagNode(project, run.agentSnapshot, request, runId, nodeRun.id, onEvent)
+      .catch(() => undefined);
+    return { project, ...(await this.getAgentRun(projectId, runId)), nodeRunId: nodeRun.id, result };
   }
 
   async retryNodeRun(projectId, runId, input = {}) {
@@ -459,23 +541,14 @@ export class AgentOrchestrator {
     const { run } = await this.getAgentRun(projectId, runId);
     const nodeRun = payload.nodeRunId
       ? run.nodeRuns?.[payload.nodeRunId]
-      : Object.values(run.nodeRuns || {}).find((item) => item.nodeId === payload.nodeId);
+      : findLatestNodeRunByPrototype(run, payload.nodeId);
     if (!nodeRun) throw new AgentOrchestratorError("Node run was not found.", 404);
-    await this.updateAgentRun(projectId, runId, (current, now) => {
-      const currentNode = current.nodeRuns[nodeRun.id];
-      currentNode.status = upstreamCompleted(current, currentNode) ? "ready" : "pending";
-      currentNode.output = undefined;
-      currentNode.error = undefined;
-      currentNode.runtimeSession = undefined;
-      currentNode.runtimeRunId = "";
-      currentNode.updatedAt = now;
-      currentNode.trace.push(createTrace("node_run_retry_scheduled", { nodeRunId: nodeRun.id }, now));
-      current.status = "pending";
-      current.error = undefined;
-      current.trace.push(createTrace("agent_run_retry_scheduled", { runId, nodeRunId: nodeRun.id }, now));
-      return current;
+    return this.dispatchGraphNode(projectId, runId, {
+      nodeId: nodeRun.prototypeNodeId || nodeRun.nodeId,
+      input: nodeRun.input?.dispatchInput ?? nodeRun.input,
+      parentNodeRunId: nodeRun.id,
+      reason: "Root coordinator requested a retry.",
     });
-    return this.advanceGraphRun(projectId, runId);
   }
 
   async resumeNodeRun(projectId, runId, input = {}) {
@@ -483,31 +556,98 @@ export class AgentOrchestrator {
     const { run } = await this.getAgentRun(projectId, runId);
     const nodeRun = payload.nodeRunId
       ? run.nodeRuns?.[payload.nodeRunId]
-      : Object.values(run.nodeRuns || {}).find((item) => item.nodeId === payload.nodeId);
+      : findLatestNodeRunByPrototype(run, payload.nodeId);
     if (!nodeRun) throw new AgentOrchestratorError("Node run was not found.", 404);
-    if (nodeRun.status !== "waiting") {
-      throw new AgentOrchestratorError("Only waiting node runs can be resumed.", 400);
+    if (!["waiting", "waiting_approval"].includes(nodeRun.status)) {
+      throw new AgentOrchestratorError("Only node runs waiting for approval can be resumed.", 400);
     }
     await this.updateAgentRun(projectId, runId, (current, now) => {
       const currentNode = current.nodeRuns[nodeRun.id];
       currentNode.status = "completed";
-      currentNode.output = {
-        kind: "wait",
-        resumed: true,
-        value: payload.output,
-      };
+      currentNode.approval = { resumed: true, value: payload.output, updatedAt: now };
       currentNode.updatedAt = now;
       currentNode.trace.push(createTrace("node_run_resumed", {
         nodeRunId: nodeRun.id,
         nodeId: currentNode.nodeId,
         output: payload.output,
       }, now));
-      current.status = "running";
+      current.status = graphRunStatusAfterNodeUpdate(current);
       current.trace.push(createTrace("agent_run_resumed", { runId, nodeRunId: nodeRun.id }, now));
-      markReadyNodes(current, now);
       return current;
     });
     return this.advanceGraphRun(projectId, runId);
+  }
+
+  async requestGraphRunUser(projectId, runId, input = {}) {
+    const payload = requestUserSchema.parse(input);
+    return this.updateAgentRun(projectId, runId, (run, now) => {
+      assertGraphRunMutable(run);
+      run.status = "waiting_user";
+      run.output = { kind: "user_request", question: payload.question, reason: payload.reason || "" };
+      run.rootCoordinator.status = "waiting_user";
+      run.rootCoordinator.updatedAt = now;
+      run.trace.push(createTrace("graph_run_user_requested", payload, now));
+      return run;
+    });
+  }
+
+  async resumeGraphRunWithUserInput(projectId, runId, input = {}, onEvent) {
+    const userInput = input.input ?? input.message ?? input.text;
+    if (userInput === undefined || userInput === "") {
+      throw new AgentOrchestratorError("A user response is required to resume the graph run.", 400);
+    }
+    const { project } = await this.getProject(projectId);
+    const { run } = await this.getAgentRun(projectId, runId);
+    if (run.status !== "waiting_user") {
+      throw new AgentOrchestratorError("Only graph runs waiting for user input can be resumed.", 409);
+    }
+    await this.updateAgentRun(projectId, runId, (current, now) => {
+      current.status = "coordinating";
+      current.output = undefined;
+      current.userResponses = [...(current.userResponses || []), { input: userInput, createdAt: now }];
+      current.rootCoordinator.status = "ready";
+      current.rootCoordinator.updatedAt = now;
+      current.trace.push(createTrace("graph_run_user_resumed", { input: userInput }, now));
+      return current;
+    });
+    const request = run.request || {
+      runtimeId: run.agentSnapshot.runtimeId || config.defaultRuntimeId,
+      runId: run.id,
+      projectId,
+      sessionId: run.rootSessionId,
+      runtimeOptions: {},
+    };
+    const completedRun = await this.coordinateGraphRun(project, run.agentSnapshot, request, runId, onEvent);
+    const result = {
+      runtimeId: request.runtimeId,
+      runId,
+      text: completedRun.run.status === "waiting_user"
+        ? completedRun.run.output?.question || "RootAgent 正在等待用户输入。"
+        : stringifyDagOutput(completedRun.run.output),
+      output: completedRun.run.output,
+    };
+    onEvent?.({ type: "done", project, agent: run.agentSnapshot, request, result, agentRun: completedRun.run });
+    return { project, agent: run.agentSnapshot, request, result, agentRun: completedRun.run, run: completedRun.run };
+  }
+
+  async completeGraphRun(projectId, runId, input = {}) {
+    const payload = resolveGraphRunSchema.parse(input);
+    const { run } = await this.getAgentRun(projectId, runId);
+    assertGraphRunMutable(run);
+    return this.completeDagRun(projectId, runId, {
+      status: "completed",
+      output: payload.output === undefined ? collectDagOutput(run) : payload.output,
+    });
+  }
+
+  async failGraphRun(projectId, runId, input = {}) {
+    const payload = resolveGraphRunSchema.parse(input);
+    assertGraphRunMutable((await this.getAgentRun(projectId, runId)).run);
+    return this.completeDagRun(projectId, runId, {
+      status: "failed",
+      output: payload.output,
+      error: { message: payload.reason || "Root coordinator marked the run as failed." },
+    });
   }
 
   async createProject(input) {
@@ -537,7 +677,7 @@ export class AgentOrchestrator {
 
     store.projects.push(project);
     await this.writeStore(store);
-    return { project };
+    return workspaceResult(project);
   }
 
   async updateProject(id, input) {
@@ -568,7 +708,7 @@ export class AgentOrchestrator {
 
     store.projects[index] = updated;
     await this.writeStore(store);
-    return { project: updated };
+    return workspaceResult(updated);
   }
 
   async deleteProject(id) {
@@ -583,7 +723,7 @@ export class AgentOrchestrator {
     store.conversations = store.conversations.filter((conversation) => conversation.projectId !== id);
     store.agentRuns = store.agentRuns.filter((run) => run.workspaceId !== id && run.projectId !== id);
     await this.writeStore(store);
-    return { deleted: true, id, deletedConversations, deletedRuns };
+    return { deleted: true, id, workspaceId: id, projectId: id, deletedConversations, deletedRuns };
   }
 
   async executeAgentTask(id, input) {
@@ -720,6 +860,13 @@ export class AgentOrchestrator {
 
   async executeDagAgentTask(prepared, onEvent) {
     const { payload, project, agent, request, retrieval, rootSession } = prepared;
+    if (rootSession?.id) {
+      const waitingRun = (await this.listAgentRuns(project.id, { rootSessionId: rootSession.id })).runs
+        .find((run) => run.agentId === agent.id && run.status === "waiting_user");
+      if (waitingRun) {
+        return this.resumeGraphRunWithUserInput(project.id, waitingRun.id, { input: payload.task }, onEvent);
+      }
+    }
     const agentRun = await this.createAgentRun(project, rootSession, agent, request, {
       input: { task: payload.task, context: payload.context || {} },
       retrieval,
@@ -737,11 +884,13 @@ export class AgentOrchestrator {
     }
 
     try {
-      const completedRun = await this.runDagToCompletion(project, agent, request, agentRun.id, onEvent);
+      const completedRun = await this.coordinateGraphRun(project, agent, request, agentRun.id, onEvent);
       const result = {
         runtimeId: request.runtimeId,
         runId: agentRun.id,
-        text: stringifyDagOutput(completedRun.run.output),
+        text: completedRun.run.status === "waiting_user"
+          ? completedRun.run.output?.question || "RootAgent 正在等待用户输入。"
+          : stringifyDagOutput(completedRun.run.output),
         output: completedRun.run.output,
       };
       onEvent?.({ type: "done", project, agent, request, retrieval, result, agentRun: completedRun.run });
@@ -838,11 +987,14 @@ export class AgentOrchestrator {
     const now = new Date().toISOString();
     const run = normalizeAgentRun(store.agentRuns[index]);
     const cancellations = [];
+    if (run.rootCoordinator?.status === "running" && run.rootCoordinator.runtimeRunId) {
+      cancellations.push(this.cancelRuntimeRun(run.rootCoordinator.runtimeRunId));
+    }
     for (const nodeRun of Object.values(run.nodeRuns || {})) {
       if (nodeRun.status === "running" && nodeRun.runtimeRunId) {
         cancellations.push(this.cancelRuntimeRun(nodeRun.runtimeRunId));
       }
-      if (["pending", "ready", "running", "waiting"].includes(nodeRun.status)) {
+      if (["pending", "ready", "running", "waiting", "waiting_approval"].includes(nodeRun.status)) {
         nodeRun.status = "cancelled";
         nodeRun.updatedAt = now;
         nodeRun.trace.push(createTrace("node_run_cancelled", { nodeRunId: nodeRun.id }, now));
@@ -851,6 +1003,11 @@ export class AgentOrchestrator {
     cancellations.push(this.cancelRuntimeRun(runId));
     run.status = "cancelled";
     run.error = { message: "Agent run was cancelled." };
+    if (run.rootCoordinator) {
+      run.rootCoordinator.status = "cancelled";
+      run.rootCoordinator.runtimeRunId = "";
+      run.rootCoordinator.updatedAt = now;
+    }
     run.updatedAt = now;
     run.trace.push(createTrace("agent_run_cancelled", { runId, cancellations }, now));
     store.agentRuns[index] = run;
@@ -883,6 +1040,14 @@ export class AgentOrchestrator {
       error: undefined,
       request,
       nodeRuns,
+      rootCoordinator: agentSnapshot.type === "dag" ? {
+        prototypeNodeId: agentSnapshot.rootNodeId,
+        status: "pending",
+        decisionCount: 0,
+        runtimeSession: undefined,
+        lastDecision: undefined,
+        updatedAt: now,
+      } : undefined,
       trace: [{
         id: randomUUID(),
         type: "agent_run_created",
@@ -975,91 +1140,191 @@ export class AgentOrchestrator {
       run.output = {
         dryRun: true,
         request,
-        nodeOrder: topologicalNodeIds(run.agentSnapshot),
+        prototype: {
+          rootNodeId: run.agentSnapshot.rootNodeId,
+          nodes: run.agentSnapshot.nodes,
+          edges: run.agentSnapshot.edges,
+        },
       };
-      for (const nodeRun of Object.values(run.nodeRuns || {})) {
-        nodeRun.status = "completed";
-        nodeRun.output = { dryRun: true, nodeId: nodeRun.nodeId, request };
-        nodeRun.updatedAt = now;
-        nodeRun.trace.push(createTrace("node_run_dry_completed", { nodeId: nodeRun.nodeId }, now));
-      }
+      run.rootCoordinator.status = "completed";
+      run.rootCoordinator.updatedAt = now;
       run.trace.push(createTrace("agent_run_dry_completed", { runId }, now));
       return run;
     });
   }
 
-  async runDagToCompletion(project, agent, request, runId, onEvent) {
-    await this.updateAgentRun(project.id, runId, (run, now) => {
-      run.status = "running";
-      markReadyNodes(run, now);
-      run.trace.push(createTrace("dag_run_started", { runId }, now));
-      return run;
-    });
-
+  async coordinateGraphRun(project, agent, request, runId, onEvent) {
+    const maxDecisions = Math.max(1, Number(agent.executionPolicy?.maxDecisions || 50));
     while (true) {
       const { run } = await this.getAgentRun(project.id, runId);
-      if (hasFailedRequiredNode(run)) {
+      if (["completed", "failed", "cancelled", "waiting_user", "waiting_approval"].includes(run.status)) {
+        return { run };
+      }
+      if ((run.rootCoordinator?.decisionCount || 0) >= maxDecisions) {
         return this.completeDagRun(project.id, runId, {
           status: "failed",
-          error: { message: "DAG run failed because a required node failed." },
-        });
-      }
-      const ready = readyNodeRuns(run);
-      if (!ready.length) {
-        if (allNodesCompleted(run)) {
-          return this.completeDagRun(project.id, runId, {
-            status: "completed",
-            output: collectDagOutput(run),
-          });
-        }
-        return this.updateAgentRun(project.id, runId, (current, now) => {
-          current.status = "waiting";
-          current.trace.push(createTrace("dag_run_waiting", { runId }, now));
-          return current;
+          error: { message: `Root coordinator exceeded the ${maxDecisions} decision limit.` },
         });
       }
 
-      const batch = ready.slice(0, dagConcurrency(run.agentSnapshot));
-      await Promise.all(batch.map((nodeRun) =>
-        this.executeDagNode(project, agent, request, runId, nodeRun.id, onEvent)
-      ));
+      const rootNode = run.agentSnapshot.nodes.find((node) => node.id === run.agentSnapshot.rootNodeId);
+      if (!rootNode) throw new AgentOrchestratorError("Root coordinator node was not found in the agent snapshot.", 500);
+      const runtimeId = rootNode.runtimeId || run.agentSnapshot.runtimeId || request.runtimeId;
+      const runtime = this.runtimeRegistry.getRuntime(runtimeId);
+      const rootSession = await this.getRootRuntimeSession(project.id, run);
+      const coordinatorRunId = `${runId}:root:${(run.rootCoordinator?.decisionCount || 0) + 1}`;
+      const runtimeApprovalPolicy = resolveNodeRuntimeApprovalPolicy(
+        rootNode.runtimeApprovalPolicy,
+        request.runtimeOptions?.runtimeApprovalPolicy
+      );
+      const prompt = buildRootCoordinatorPrompt(project, run, rootNode, { nativeGraphTools: runtimeId === "codex" });
+      const rootAgent = buildRootCoordinatorAgent(run.agentSnapshot, rootNode);
+
       await this.updateAgentRun(project.id, runId, (current, now) => {
-        markReadyNodes(current, now);
+        current.status = "coordinating";
+        current.rootCoordinator.status = "running";
+        current.rootCoordinator.runtimeRunId = coordinatorRunId;
+        current.rootCoordinator.updatedAt = now;
+        current.trace.push(createTrace("root_coordinator_started", { coordinatorRunId }, now));
         return current;
       });
+      onEvent?.({ type: "root_coordinator_started", runId, coordinatorRunId });
+
+      let result;
+      let decision;
+      try {
+        result = await runtime.execute({
+          project,
+          agent: rootAgent,
+          prompt,
+          rootSession,
+          reset: false,
+          runId: coordinatorRunId,
+          contextPolicy: {
+            strategy: "runtime",
+            rootSessionId: run.rootSessionId,
+            previousRuntimeSessionId: rootSession?.runtimeSessions?.codex?.sessionId || "",
+          },
+          runtimeOptions: {
+            ...request.runtimeOptions,
+            runtimeApprovalPolicy,
+            mcpServerUrls: {
+              ...(request.runtimeOptions?.mcpServerUrls || {}),
+              hippo: `http://127.0.0.1:${config.wrapperPort}/mcp`,
+            },
+            ignoreUserConfig: true,
+          },
+        });
+      } catch (error) {
+        return this.completeDagRun(project.id, runId, {
+          status: "failed",
+          error: serializeError(error),
+        });
+      }
+
+      await this.persistRuntimeSession(project.id, run.rootSessionId, result.runtimeSession, run.agentId, runId);
+      const afterNativeTools = (await this.getAgentRun(project.id, runId)).run;
+      if (["completed", "failed", "cancelled", "waiting_user", "waiting_approval"].includes(afterNativeTools.status)) {
+        const updated = await this.updateAgentRun(project.id, runId, (current, now) => {
+          current.rootCoordinator.decisionCount += 1;
+          current.rootCoordinator.runtimeSession = result.runtimeSession;
+          current.rootCoordinator.runtimeRunId = "";
+          current.rootCoordinator.lastDecision = { action: "mcp_tool_managed" };
+          current.rootCoordinator.updatedAt = now;
+          for (const event of result.events || []) {
+            current.trace.push(createTrace(event.type || "root_runtime_event", event, now));
+          }
+          current.trace.push(createTrace("root_coordinator_tool_managed", { runtimeSession: result.runtimeSession }, now));
+          return current;
+        });
+        return updated;
+      }
+
+      decision = parseRootCoordinatorDecision(result.text);
+      await this.updateAgentRun(project.id, runId, (current, now) => {
+        current.status = "coordinating";
+        current.rootCoordinator.status = "ready";
+        current.rootCoordinator.decisionCount += 1;
+        current.rootCoordinator.runtimeSession = result.runtimeSession;
+        current.rootCoordinator.runtimeRunId = "";
+        current.rootCoordinator.lastDecision = decision;
+        current.rootCoordinator.updatedAt = now;
+        for (const event of result.events || []) {
+          current.trace.push(createTrace(event.type || "root_runtime_event", event, now));
+        }
+        current.trace.push(createTrace("root_coordinator_decision", { decision, runtimeSession: result.runtimeSession }, now));
+        return current;
+      });
+      onEvent?.({ type: "root_coordinator_decision", runId, decision });
+
+      if (decision.action === "dispatch" || decision.action === "retry") {
+        await this.dispatchGraphNode(project.id, runId, {
+          nodeId: decision.nodeId,
+          input: decision.input,
+          parentNodeRunId: decision.parentNodeRunId,
+          reason: decision.reason,
+        }, onEvent);
+        continue;
+      }
+      if (decision.action === "dispatch_many") {
+        const nodes = Array.isArray(decision.nodes) ? decision.nodes : [];
+        if (!nodes.length) throw new AgentOrchestratorError("dispatch_many requires at least one node.", 400);
+        await Promise.all(nodes.map((item) => this.dispatchGraphNode(project.id, runId, {
+          nodeId: item.nodeId,
+          input: item.input,
+          parentNodeRunId: item.parentNodeRunId,
+          reason: item.reason || decision.reason,
+        }, onEvent)));
+        continue;
+      }
+      if (decision.action === "request_user") {
+        return this.requestGraphRunUser(project.id, runId, {
+          question: decision.question,
+          reason: decision.reason,
+        });
+      }
+      if (decision.action === "complete") {
+        return this.completeGraphRun(project.id, runId, { output: decision.output, reason: decision.reason });
+      }
+      if (decision.action === "fail") {
+        return this.failGraphRun(project.id, runId, { output: decision.output, reason: decision.reason });
+      }
+      return this.completeDagRun(project.id, runId, {
+        status: "failed",
+        error: { message: `Unsupported Root coordinator action: ${decision.action}` },
+      });
     }
+  }
+
+  async getRootRuntimeSession(projectId, run) {
+    if (run.rootSessionId) {
+      try {
+        return (await this.getConversation(projectId, run.rootSessionId)).conversation;
+      } catch (error) {
+        if (error.status !== 404) throw error;
+      }
+    }
+    const runtimeSession = run.rootCoordinator?.runtimeSession;
+    return runtimeSession ? {
+      id: run.rootSessionId || `root:${run.id}`,
+      runtimeSessions: { [runtimeSession.provider || "codex"]: runtimeSession },
+    } : undefined;
   }
 
   async executeDagNode(project, agent, request, runId, nodeRunId, onEvent) {
     const { run, nodeRun } = await this.getNodeRun(project.id, runId, nodeRunId);
     const nodeDef = run.agentSnapshot.nodes.find((node) => node.id === nodeRun.nodeId);
     if (!nodeDef) throw new AgentOrchestratorError(`DAG node ${nodeRun.nodeId} was not found in snapshot.`, 500);
-    if (nodeDef.kind === "wait") {
-      const nodeInput = buildNodeInput(run, nodeRun, request);
-      const updated = await this.updateAgentRun(project.id, runId, (current, now) => {
-        const currentNode = current.nodeRuns[nodeRunId];
-        current.status = "waiting";
-        currentNode.status = "waiting";
-        currentNode.input = nodeInput;
-        currentNode.updatedAt = now;
-        const trace = createTrace("node_run_waiting", {
-          nodeRunId,
-          nodeId: currentNode.nodeId,
-          prompt: nodeDef.description || nodeDef.name || currentNode.nodeId,
-        }, now);
-        current.trace.push(trace);
-        currentNode.trace.push(trace);
-        return current;
-      });
-      onEvent?.({ type: "dag_node_waiting", runId, nodeRunId, nodeId: nodeRun.nodeId, prompt: nodeDef.description || nodeDef.name || nodeRun.nodeId });
-      return updated;
-    }
     const nodeRuntimeId = nodeDef.runtimeId || run.agentSnapshot.runtimeId || request.runtimeId;
     const runtime = this.runtimeRegistry.getRuntime(nodeRuntimeId);
     const runtimeRunId = `${nodeRun.id}:${randomUUID()}`;
     const nodeAgent = buildNodeAgent(run.agentSnapshot, nodeDef, agent);
     const nodeInput = buildNodeInput(run, nodeRun, request);
     const prompt = buildDagNodePrompt(project, run, nodeDef, nodeInput);
+    const runtimeApprovalPolicy = resolveNodeRuntimeApprovalPolicy(
+      nodeDef.runtimeApprovalPolicy,
+      request.runtimeOptions?.runtimeApprovalPolicy
+    );
 
     await this.updateAgentRun(project.id, runId, (current, now) => {
       const currentNode = current.nodeRuns[nodeRunId];
@@ -1087,19 +1352,25 @@ export class AgentOrchestrator {
           strategy: "reset",
           summary: `DAG node ${nodeRun.nodeId} runs in an isolated runtime session under root run ${runId}.`,
         },
-        runtimeOptions: request.runtimeOptions,
+        runtimeOptions: {
+          ...request.runtimeOptions,
+          runtimeApprovalPolicy,
+        },
       });
+      const resultApprovalPolicy = normalizeResultApprovalPolicy(nodeDef.resultApprovalPolicy);
       const updated = await this.updateAgentRun(project.id, runId, (current, now) => {
         const currentNode = current.nodeRuns[nodeRunId];
-        currentNode.status = "completed";
+        currentNode.status = resultApprovalPolicy === "manual" ? "waiting_approval" : "completed";
         currentNode.output = result;
         currentNode.runtimeSession = result.runtimeSession;
         currentNode.updatedAt = now;
-        const trace = createTrace("node_run_completed", {
+        const trace = createTrace(resultApprovalPolicy === "manual" ? "node_run_approval_waiting" : "node_run_completed", {
           nodeRunId,
           nodeId: currentNode.nodeId,
           runtimeRunId,
           runtimeSession: result.runtimeSession,
+          resultApprovalPolicy,
+          runtimeApprovalPolicy,
         }, now);
         current.trace.push(trace);
         currentNode.trace.push(trace);
@@ -1108,9 +1379,17 @@ export class AgentOrchestrator {
           current.trace.push(eventTrace);
           currentNode.trace.push(eventTrace);
         }
+        current.status = graphRunStatusAfterNodeUpdate(current);
         return current;
       });
-      onEvent?.({ type: "dag_node_completed", runId, nodeRunId, nodeId: nodeRun.nodeId, result });
+      onEvent?.({
+        type: resultApprovalPolicy === "manual" ? "dag_node_waiting" : "dag_node_completed",
+        runId,
+        nodeRunId,
+        nodeId: nodeRun.nodeId,
+        result,
+        prompt: resultApprovalPolicy === "manual" ? `${nodeDef.name || nodeRun.nodeId} 等待结果审核` : undefined,
+      });
       return updated;
     } catch (error) {
       const status = error.status === 499 || error.details?.cancelled ? "cancelled" : "failed";
@@ -1119,6 +1398,7 @@ export class AgentOrchestrator {
         currentNode.status = status;
         currentNode.error = serializeError(error);
         currentNode.updatedAt = now;
+        current.status = graphRunStatusAfterNodeUpdate(current);
         current.trace.push(createTrace(`node_run_${status}`, {
           nodeRunId,
           nodeId: currentNode.nodeId,
@@ -1133,9 +1413,14 @@ export class AgentOrchestrator {
 
   async completeDagRun(projectId, runId, { status, output, error } = {}) {
     return this.updateAgentRun(projectId, runId, (run, now) => {
+      assertGraphRunMutable(run);
       run.status = status;
       run.output = output || run.output;
       run.error = error;
+      if (run.rootCoordinator) {
+        run.rootCoordinator.status = status;
+        run.rootCoordinator.updatedAt = now;
+      }
       run.trace.push(createTrace(`dag_run_${status}`, { runId, status, error }, now));
       return run;
     });
@@ -1582,19 +1867,37 @@ function normalizeAgent(agent) {
 
 function normalizeAgentNodes(nodes) {
   if (!Array.isArray(nodes)) return [];
-  return nodes.map((node) => ({
+  return nodes.map((node) => stripEmptyObject({
     id: String(node.id || "").trim(),
-    kind: node.kind === "wait" ? "wait" : "task",
+    kind: "task",
+    resultApprovalPolicy: normalizeResultApprovalPolicy(
+      node.resultApprovalPolicy || node.approvalPolicy || node.approval || (node.kind === "wait" ? "manual" : "")
+    ),
+    runtimeApprovalPolicy: normalizeRuntimeApprovalPolicy(node.runtimeApprovalPolicy),
+    transitionInstruction: node.transitionInstruction || node.routingInstruction || "",
     name: node.name || node.id || "",
     description: node.description || "",
     agentId: node.agentId || "",
     systemPrompt: node.systemPrompt || "",
-    runtimeId: node.runtimeId || "",
+    runtimeId: node.runtimeId || undefined,
     skills: Array.isArray(node.skills) ? node.skills : [],
     mcpServers: Array.isArray(node.mcpServers) ? node.mcpServers : [],
     input: node.input,
     metadata: node.metadata || {},
   })).filter((node) => node.id);
+}
+
+function normalizeResultApprovalPolicy(value) {
+  return ["manual", "auto", "none"].includes(value) ? value : "none";
+}
+
+function normalizeRuntimeApprovalPolicy(value) {
+  return ["untrusted", "on-request", "never"].includes(value) ? value : "inherit";
+}
+
+function resolveNodeRuntimeApprovalPolicy(nodePolicy, inheritedPolicy) {
+  const normalized = normalizeRuntimeApprovalPolicy(nodePolicy);
+  return normalized === "inherit" ? normalizeRuntimeApprovalPolicy(inheritedPolicy) : normalized;
 }
 
 function normalizeAgentEdges(edges) {
@@ -1603,8 +1906,6 @@ function normalizeAgentEdges(edges) {
     id: edge.id || `${edge.from}->${edge.to}`,
     from: String(edge.from || "").trim(),
     to: String(edge.to || "").trim(),
-    type: edge.type === "parallel" ? "parallel" : "serial",
-    required: edge.required !== false,
     metadata: edge.metadata || {},
   })).filter((edge) => edge.from && edge.to);
 }
@@ -1632,6 +1933,14 @@ function validateAgentPrototype(agent) {
     if (edge.from === edge.to) {
       throw new AgentOrchestratorError(`DAG edge ${edge.id} cannot point to the same node.`, 400);
     }
+  }
+  const edgeKeys = new Set();
+  for (const edge of normalized.edges) {
+    const key = `${edge.from}->${edge.to}`;
+    if (edgeKeys.has(key)) {
+      throw new AgentOrchestratorError(`DAG has duplicate edge: ${key}.`, 400);
+    }
+    edgeKeys.add(key);
   }
   assertAcyclic(normalized.nodes, normalized.edges);
   return normalized;
@@ -1696,33 +2005,31 @@ function createNodeRuns({ runId, request, agentSnapshot, input, now }) {
     });
     return { [nodeRun.id]: nodeRun };
   }
-  const nodeRuns = {};
-  for (const node of agentSnapshot.nodes || []) {
-    const upstream = upstreamNodeIds(node.id, agentSnapshot.edges);
-    const nodeRun = createNodeRun({
-      runId,
-      request,
-      agentSnapshot,
-      nodeId: node.id,
-      kind: node.kind || "task",
-      input: node.id === agentSnapshot.rootNodeId ? input : undefined,
-      upstreamNodeIds: upstream,
-      downstreamNodeIds: downstreamNodeIds(node.id, agentSnapshot.edges),
-      now,
-    });
-    nodeRun.status = upstream.length ? "pending" : "ready";
-    nodeRuns[nodeRun.id] = nodeRun;
-  }
-  return nodeRuns;
+  return {};
 }
 
-function createNodeRun({ runId, request, agentSnapshot, nodeId, kind = "task", input, upstreamNodeIds, downstreamNodeIds, now }) {
+function createNodeRun({
+  runId,
+  request,
+  agentSnapshot,
+  nodeId,
+  kind = "task",
+  input,
+  upstreamNodeIds,
+  downstreamNodeIds,
+  attempt = 1,
+  parentNodeRunId = "",
+  now,
+}) {
   return {
-    id: `${runId}:${nodeId || "root"}`,
+    id: `${runId}:${nodeId || "root"}${agentSnapshot.type === "dag" ? `:${attempt}` : ""}`,
     type: "node",
     runId,
     nodeId: nodeId || "root",
     kind,
+    prototypeNodeId: nodeId || "root",
+    attempt,
+    parentNodeRunId,
     agentId: agentSnapshot.id || "",
     status: upstreamNodeIds.length ? "pending" : "ready",
     runtimeRunId: request.runId,
@@ -1738,95 +2045,21 @@ function createNodeRun({ runId, request, agentSnapshot, nodeId, kind = "task", i
   };
 }
 
-function upstreamNodeIds(nodeId, edges = []) {
-  return edges.filter((edge) => edge.to === nodeId).map((edge) => edge.from);
-}
-
 function downstreamNodeIds(nodeId, edges = []) {
   return edges.filter((edge) => edge.from === nodeId).map((edge) => edge.to);
 }
 
-function markReadyNodes(run, now) {
-  for (const nodeRun of Object.values(run.nodeRuns || {})) {
-    if (nodeRun.status !== "pending") continue;
-    if (upstreamSatisfied(run, nodeRun)) {
-      nodeRun.status = "ready";
-      nodeRun.updatedAt = now;
-      nodeRun.trace.push(createTrace("node_run_ready", { nodeId: nodeRun.nodeId }, now));
-    }
-  }
+function graphRunStatusAfterNodeUpdate(run) {
+  const statuses = Object.values(run.nodeRuns || {}).map((nodeRun) => nodeRun.status);
+  if (statuses.some((status) => ["pending", "ready", "running"].includes(status))) return "running";
+  if (statuses.some((status) => ["waiting", "waiting_approval"].includes(status))) return "waiting_approval";
+  return "coordinating";
 }
 
-function readyNodeRuns(run) {
+function findLatestNodeRunByPrototype(run, nodeId) {
   return Object.values(run.nodeRuns || {})
-    .filter((nodeRun) => nodeRun.status === "ready")
-    .sort((a, b) => topologicalIndex(run.agentSnapshot, a.nodeId) - topologicalIndex(run.agentSnapshot, b.nodeId));
-}
-
-function allNodesCompleted(run) {
-  return Object.values(run.nodeRuns || {}).every((nodeRun) => nodeRun.status === "completed");
-}
-
-function hasFailedRequiredNode(run) {
-  return Object.values(run.nodeRuns || {}).some((nodeRun) => {
-    if (!["failed", "cancelled"].includes(nodeRun.status)) return false;
-    const outgoing = (run.agentSnapshot.edges || []).filter((edge) => edge.from === nodeRun.nodeId);
-    if (!outgoing.length) return true;
-    return outgoing.some((edge) => edge.required !== false);
-  });
-}
-
-function upstreamCompleted(run, nodeRun) {
-  return upstreamSatisfied(run, nodeRun);
-}
-
-function upstreamSatisfied(run, nodeRun) {
-  return (nodeRun.upstreamNodeIds || []).every((nodeId) => {
-    const upstreamRun = findNodeRunByNodeId(run, nodeId);
-    const edge = (run.agentSnapshot.edges || []).find((item) => item.from === nodeId && item.to === nodeRun.nodeId);
-    if (edge?.required === false) return ["completed", "failed", "cancelled"].includes(upstreamRun?.status);
-    return upstreamRun?.status === "completed";
-  });
-}
-
-function dagConcurrency(agentSnapshot) {
-  const value = Number(agentSnapshot.executionPolicy?.concurrency || agentSnapshot.executionPolicy?.maxConcurrency || 4);
-  return Number.isFinite(value) && value > 0 ? Math.min(Math.floor(value), 8) : 4;
-}
-
-function topologicalNodeIds(agentSnapshot) {
-  if (agentSnapshot.type !== "dag") return ["root"];
-  const nodes = agentSnapshot.nodes || [];
-  const incoming = new Map(nodes.map((node) => [node.id, 0]));
-  const outgoing = new Map(nodes.map((node) => [node.id, []]));
-  for (const edge of agentSnapshot.edges || []) {
-    incoming.set(edge.to, (incoming.get(edge.to) || 0) + 1);
-    outgoing.get(edge.from)?.push(edge.to);
-  }
-  const queue = nodes
-    .filter((node) => (incoming.get(node.id) || 0) === 0)
-    .map((node) => node.id)
-    .sort();
-  const result = [];
-  while (queue.length) {
-    const nodeId = queue.shift();
-    result.push(nodeId);
-    for (const next of (outgoing.get(nodeId) || []).sort()) {
-      incoming.set(next, (incoming.get(next) || 0) - 1);
-      if ((incoming.get(next) || 0) === 0) queue.push(next);
-    }
-    queue.sort();
-  }
-  return result;
-}
-
-function topologicalIndex(agentSnapshot, nodeId) {
-  const index = topologicalNodeIds(agentSnapshot).indexOf(nodeId);
-  return index === -1 ? Number.MAX_SAFE_INTEGER : index;
-}
-
-function findNodeRunByNodeId(run, nodeId) {
-  return Object.values(run.nodeRuns || {}).find((nodeRun) => nodeRun.nodeId === nodeId);
+    .filter((nodeRun) => (nodeRun.prototypeNodeId || nodeRun.nodeId) === nodeId)
+    .sort((a, b) => (Number(b.attempt) || 1) - (Number(a.attempt) || 1))[0];
 }
 
 function buildNodeAgent(agentSnapshot, nodeDef, fallbackAgent) {
@@ -1845,12 +2078,99 @@ function buildNodeAgent(agentSnapshot, nodeDef, fallbackAgent) {
   };
 }
 
-function buildNodeInput(run, nodeRun, request) {
-  const upstreamOutputs = {};
-  for (const upstreamNodeId of nodeRun.upstreamNodeIds || []) {
-    const upstreamRun = findNodeRunByNodeId(run, upstreamNodeId);
-    upstreamOutputs[upstreamNodeId] = summarizeNodeOutput(upstreamRun?.output);
+function buildRootCoordinatorAgent(agentSnapshot, rootNode) {
+  return {
+    id: agentSnapshot.id || "root-coordinator",
+    name: `${agentSnapshot.name || "Agent"} Root Coordinator`,
+    description: "Owns the Agent prototype view and coordinates the persisted runtime graph.",
+    systemPrompt: [
+      agentSnapshot.systemPrompt,
+      rootNode.systemPrompt,
+      "你是 RootAgent，唯一负责读取运行图、判断节点结果并决定下一步调度。不要执行普通工作节点的职责。",
+    ].filter(Boolean).join("\n\n"),
+    skills: rootNode.skills?.length ? rootNode.skills : agentSnapshot.skills || [],
+    mcpServers: rootNode.mcpServers?.length ? rootNode.mcpServers : agentSnapshot.mcpServers || [],
+    runtimeId: rootNode.runtimeId || agentSnapshot.runtimeId || config.defaultRuntimeId,
+  };
+}
+
+function buildRootCoordinatorPrompt(project, run, rootNode, { nativeGraphTools = false } = {}) {
+  const prototype = {
+    rootNodeId: run.agentSnapshot.rootNodeId,
+    nodes: run.agentSnapshot.nodes.map((node) => ({
+      id: node.id,
+      name: node.name,
+      interfaceDescription: node.description,
+      transitionInstruction: node.transitionInstruction || "",
+    })),
+    edges: run.agentSnapshot.edges.map((edge) => ({ from: edge.from, to: edge.to })),
+  };
+  const runtimeGraph = Object.values(run.nodeRuns || {}).map((nodeRun) => {
+    const node = run.agentSnapshot.nodes.find((item) => item.id === nodeRun.prototypeNodeId);
+    return {
+      nodeRunId: nodeRun.id,
+      nodeId: nodeRun.prototypeNodeId,
+      attempt: nodeRun.attempt,
+      parentNodeRunId: nodeRun.parentNodeRunId,
+      status: nodeRun.status,
+      input: nodeRun.input,
+      output: summarizeNodeOutput(nodeRun.output),
+      error: nodeRun.error,
+      transitionInstruction: node?.transitionInstruction || "",
+    };
+  });
+  return [
+    `你正在协调 Hippo 工作区「${project.name}」中的 Agent Run。`,
+    "你是 RootAgent，也是这个 Run 的唯一调度决策者。你只负责读取原型和运行图、判断节点结果并选择下一条 Graph Tool 命令，不要代替普通节点执行任务。",
+    run.agentSnapshot.systemPrompt ? `Agent 全局指令：\n${run.agentSnapshot.systemPrompt}` : "",
+    rootNode.systemPrompt ? `RootAgent 指令：\n${rootNode.systemPrompt}` : "",
+    `Run ID: ${run.id}`,
+    `原始任务：\n${run.input?.task || ""}`,
+    `Agent 图原型：\n${JSON.stringify(prototype, null, 2)}`,
+    `当前 Runtime Graph：\n${JSON.stringify(runtimeGraph, null, 2)}`,
+    run.userResponses?.length ? `用户后续回复：\n${JSON.stringify(run.userResponses, null, 2)}` : "当前没有用户后续回复。",
+    rootNode.transitionInstruction ? `Root 结果处置规则：\n${rootNode.transitionInstruction}` : "Root 未配置额外结果处置规则，按默认拓扑开始调度。",
+    `调用 Hippo MCP Graph Tool 推进运行：hippo_get_agent_run、hippo_dispatch_graph_node、hippo_request_graph_user、hippo_complete_graph_run、hippo_fail_graph_run。所有工具参数中的 workspaceId 使用 ${project.id}，runId 使用 ${run.id}。你可以连续调用节点，直到 Run 完成、失败、等待审批或等待用户。`,
+    nativeGraphTools
+      ? "当前 Codex runtime 已注入并验证 Hippo MCP。必须调用上述 Graph Tool，禁止声称工具不可用，禁止直接输出 JSON 降级命令。"
+      : `如果当前 runtime 无法调用 Hippo MCP，则根据节点输入、输出、状态和 transitionInstruction 只输出一个 JSON 对象作为降级命令，不要使用 Markdown。\n可用动作：\n` +
+      `{"action":"dispatch","nodeId":"节点ID","input":{},"parentNodeRunId":"可选","reason":"原因"}\n` +
+      `{"action":"dispatch_many","nodes":[{"nodeId":"节点ID","input":{}}],"reason":"原因"}\n` +
+      `{"action":"retry","nodeId":"节点ID","input":{},"parentNodeRunId":"失败的NodeRun ID","reason":"原因"}\n` +
+      `{"action":"request_user","question":"需要用户回答的问题","reason":"原因"}\n` +
+      `{"action":"complete","output":{},"reason":"完成原因"}\n` +
+      `{"action":"fail","reason":"失败原因"}`,
+  ].join("\n\n");
+}
+
+function parseRootCoordinatorDecision(text) {
+  const source = String(text || "").trim();
+  const fenced = source.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
+  const candidate = fenced || source.slice(source.indexOf("{"), source.lastIndexOf("}") + 1);
+  let decision;
+  try {
+    decision = JSON.parse(candidate);
+  } catch (error) {
+    throw new AgentOrchestratorError("Root coordinator did not return a valid JSON decision.", 502, {
+      response: source,
+      parseError: error.message,
+    });
   }
+  const actions = ["dispatch", "dispatch_many", "retry", "request_user", "complete", "fail"];
+  if (!decision || !actions.includes(decision.action)) {
+    throw new AgentOrchestratorError("Root coordinator returned an unsupported decision.", 502, decision);
+  }
+  if (["dispatch", "retry"].includes(decision.action) && !decision.nodeId) {
+    throw new AgentOrchestratorError(`${decision.action} requires nodeId.`, 502, decision);
+  }
+  if (decision.action === "request_user" && !decision.question) {
+    throw new AgentOrchestratorError("request_user requires question.", 502, decision);
+  }
+  return decision;
+}
+
+function buildNodeInput(run, nodeRun, request) {
+  const parent = nodeRun.parentNodeRunId ? run.nodeRuns?.[nodeRun.parentNodeRunId] : undefined;
   return {
     task: run.input?.task || "",
     request: {
@@ -1859,7 +2179,15 @@ function buildNodeInput(run, nodeRun, request) {
       sessionId: request.sessionId,
     },
     nodeId: nodeRun.nodeId,
-    upstreamOutputs,
+    attempt: nodeRun.attempt,
+    dispatchInput: nodeRun.input,
+    parent: parent ? {
+      nodeRunId: parent.id,
+      nodeId: parent.prototypeNodeId || parent.nodeId,
+      status: parent.status,
+      output: summarizeNodeOutput(parent.output),
+      error: parent.error,
+    } : undefined,
     originalInput: run.input,
   };
 }
@@ -1869,12 +2197,12 @@ function buildDagNodePrompt(project, run, nodeDef, nodeInput) {
     `你正在 Hippo 工作区「${project.name}」中执行 DAG Agent 节点。`,
     `Agent Run: ${run.id}`,
     `节点: ${nodeDef.name || nodeDef.id} (${nodeDef.id})`,
-    nodeDef.description ? `节点说明：\n${nodeDef.description}` : "",
-    nodeDef.systemPrompt ? `节点指令：\n${nodeDef.systemPrompt}` : "",
+    run.agentSnapshot.systemPrompt ? `Agent 全局指令：\n${run.agentSnapshot.systemPrompt}` : "",
+    nodeDef.description ? `节点接口描述：\n${nodeDef.description}` : "",
+    nodeDef.systemPrompt ? `节点系统提示词：\n${nodeDef.systemPrompt}` : "",
     `原始任务：\n${run.input?.task || ""}`,
-    Object.keys(nodeInput.upstreamOutputs || {}).length
-      ? `上游节点输出：\n${JSON.stringify(nodeInput.upstreamOutputs, null, 2)}`
-      : "当前节点没有上游输出。",
+    nodeInput.dispatchInput !== undefined ? `RootAgent 派发输入：\n${JSON.stringify(nodeInput.dispatchInput, null, 2)}` : "RootAgent 未提供额外派发输入。",
+    nodeInput.parent ? `触发本次执行的父 NodeRun：\n${JSON.stringify(nodeInput.parent, null, 2)}` : "当前执行没有指定父 NodeRun。",
     nodeDef.input !== undefined ? `节点静态输入：\n${JSON.stringify(nodeDef.input, null, 2)}` : "",
     `请只完成当前节点职责，并输出可供下游节点使用的结果。`,
   ];
@@ -1935,6 +2263,8 @@ function normalizeAgentRun(run) {
     error: run.error,
     request: run.request,
     nodeRuns,
+    rootCoordinator: normalizeRootCoordinator(run.rootCoordinator, run.agentSnapshot, now),
+    userResponses: Array.isArray(run.userResponses) ? run.userResponses : [],
     trace: Array.isArray(run.trace) ? run.trace : [],
     createdAt: run.createdAt || now,
     updatedAt: run.updatedAt || now,
@@ -1947,6 +2277,9 @@ function normalizeNodeRun(nodeRun, runId, now) {
     type: "node",
     runId: nodeRun.runId || runId,
     nodeId: nodeRun.nodeId || "root",
+    prototypeNodeId: nodeRun.prototypeNodeId || nodeRun.nodeId || "root",
+    attempt: Math.max(1, Number(nodeRun.attempt) || 1),
+    parentNodeRunId: nodeRun.parentNodeRunId || "",
     kind: nodeRun.kind === "wait" ? "wait" : "task",
     agentId: nodeRun.agentId || "",
     status: normalizeNodeStatus(nodeRun.status),
@@ -1955,6 +2288,7 @@ function normalizeNodeRun(nodeRun, runId, now) {
     input: nodeRun.input,
     output: nodeRun.output,
     error: nodeRun.error,
+    approval: nodeRun.approval,
     upstreamNodeIds: Array.isArray(nodeRun.upstreamNodeIds) ? nodeRun.upstreamNodeIds : [],
     downstreamNodeIds: Array.isArray(nodeRun.downstreamNodeIds) ? nodeRun.downstreamNodeIds : [],
     trace: Array.isArray(nodeRun.trace) ? nodeRun.trace : [],
@@ -1964,11 +2298,50 @@ function normalizeNodeRun(nodeRun, runId, now) {
 }
 
 function normalizeRunStatus(status) {
-  return ["pending", "running", "waiting", "completed", "failed", "cancelled"].includes(status) ? status : "pending";
+  return [
+    "pending",
+    "coordinating",
+    "running",
+    "waiting",
+    "waiting_approval",
+    "waiting_user",
+    "completed",
+    "failed",
+    "cancelled",
+  ].includes(status) ? status : "pending";
+}
+
+function assertGraphRunMutable(run) {
+  if (["completed", "failed", "cancelled"].includes(run.status)) {
+    throw new AgentOrchestratorError(`Run ${run.id} is already ${run.status}.`, 409);
+  }
+}
+
+function normalizeRootCoordinator(value, agentSnapshot, now) {
+  if (agentSnapshot?.type !== "dag") return undefined;
+  return {
+    prototypeNodeId: value?.prototypeNodeId || agentSnapshot.rootNodeId || "root",
+    status: value?.status || "pending",
+    decisionCount: Math.max(0, Number(value?.decisionCount) || 0),
+    runtimeSession: value?.runtimeSession,
+    runtimeRunId: value?.runtimeRunId || "",
+    lastDecision: value?.lastDecision,
+    updatedAt: value?.updatedAt || now,
+  };
+}
+
+function workspaceResult(workspace) {
+  return { workspace, project: workspace };
+}
+
+function workspaceResultList(workspaces) {
+  return { workspaces, projects: workspaces };
 }
 
 function normalizeNodeStatus(status) {
-  return ["pending", "ready", "running", "waiting", "completed", "failed", "cancelled"].includes(status) ? status : "pending";
+  return ["pending", "ready", "running", "waiting", "waiting_approval", "completed", "failed", "cancelled"].includes(status)
+    ? status
+    : "pending";
 }
 
 function getPrimaryNodeRun(run) {
