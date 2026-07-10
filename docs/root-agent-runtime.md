@@ -26,6 +26,10 @@ Default edges describe the normal path, not an automatic workflow engine. There 
 
 `description` is the node's external interface description shown to RootAgent. `systemPrompt` controls the worker session itself. `transitionInstruction` is the result handling rule shown to RootAgent together with the completed NodeRun output so it can choose the next graph action.
 
+## Node RAG Tool
+
+RAG is an optional node capability, not an eager execution mode. Each node owns `rag.enabled` and `rag.topN`. When enabled, Hippo injects a dedicated read-only MCP server into that node session with only `hippo_rag_scope` and `hippo_rag_search`. The model decides whether retrieval is needed, while the server enforces the current workspace authorization boundary and the node's configured Top N. Disabled nodes receive no RAG MCP server. AnythingLLM remains only the retrieval provider.
+
 ## Runtime Loop
 
 1. Create an AgentRun with a frozen prototype, Root coordinator state, and an empty runtime graph.

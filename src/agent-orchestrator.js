@@ -16,6 +16,11 @@ const optionalRuntimeIdSchema = z.preprocess(
   z.string().min(1).optional()
 );
 
+const nodeRagSchema = z.object({
+  enabled: z.boolean().default(false),
+  topN: z.number().int().positive().default(4),
+});
+
 const agentNodeSchema = z.object({
   id: z.string().min(1),
   kind: z.enum(["task", "wait"]).default("task"),
@@ -28,6 +33,7 @@ const agentNodeSchema = z.object({
   agentId: z.string().optional(),
   systemPrompt: z.string().optional(),
   runtimeId: optionalRuntimeIdSchema,
+  rag: nodeRagSchema.optional(),
   skills: z.array(skillSchema).default([]),
   mcpServers: z.array(z.string().min(1)).default([]),
   input: z.unknown().optional(),
@@ -90,9 +96,6 @@ const createAgentSchema = z.object({
   mcpServers: z.array(z.string().min(1)).default([]),
   runtimeId: z.string().min(1).default(config.defaultRuntimeId),
   ragDocumentNames: z.array(z.string().min(1)).default([]),
-  defaultMode: z.enum(["query", "chat", "automatic"]).default("query"),
-  topN: z.number().int().positive().default(4),
-  scoreThreshold: z.number().min(0).max(1).optional(),
   rag: z.record(z.string(), z.unknown()).optional(),
   rootNodeId: z.string().optional(),
   nodes: z.array(agentNodeSchema).default([]),
@@ -224,10 +227,7 @@ export class AgentOrchestrator {
       runtimeId: payload.runtimeId,
       explicitRagDocumentNames: dedupe(payload.ragDocumentNames),
       ragDocumentNames: dedupe(payload.ragDocumentNames),
-      defaultMode: payload.defaultMode,
-      topN: payload.topN,
-      scoreThreshold: payload.scoreThreshold,
-      rag: payload.rag || {},
+      rag: normalizeNodeRag(payload.rag),
       rootNodeId: payload.type === "dag" ? payload.rootNodeId || payload.nodes[0]?.id || "" : "",
       nodes: payload.type === "dag" ? normalizeAgentNodes(payload.nodes) : [],
       edges: payload.type === "dag" ? normalizeAgentEdges(payload.edges) : [],
@@ -258,9 +258,6 @@ export class AgentOrchestrator {
         skills: payload.skills,
         mcpServers: payload.mcpServers,
         runtimeId: payload.runtimeId,
-        defaultMode: payload.defaultMode,
-        topN: payload.topN,
-        scoreThreshold: payload.scoreThreshold,
         rag: payload.rag,
         rootNodeId: payload.rootNodeId,
         nodes: payload.nodes,
@@ -275,6 +272,7 @@ export class AgentOrchestrator {
     const updated = {
       ...candidate,
       version: Number(current.version || 1) + 1,
+      rag: normalizeNodeRag(candidate.rag),
       rootNodeId: candidate.type === "dag" ? candidate.rootNodeId || candidate.nodes?.[0]?.id || "" : "",
       nodes: candidate.type === "dag" ? normalizeAgentNodes(candidate.nodes) : [],
       edges: candidate.type === "dag" ? normalizeAgentEdges(candidate.edges) : [],
@@ -469,7 +467,7 @@ export class AgentOrchestrator {
       runtimeId: run.agentSnapshot.runtimeId || config.defaultRuntimeId,
       runId: run.id,
       projectId,
-      mode: run.agentSnapshot.defaultMode || "chat",
+      mode: "chat",
       message: run.input?.task || "",
       sessionId: run.rootSessionId,
       reset: true,
@@ -527,7 +525,7 @@ export class AgentOrchestrator {
       runtimeId: run.agentSnapshot.runtimeId || config.defaultRuntimeId,
       runId: run.id,
       projectId,
-      mode: run.agentSnapshot.defaultMode || "chat",
+      mode: "chat",
       sessionId: run.rootSessionId,
       runtimeOptions: {},
     };
@@ -919,29 +917,18 @@ export class AgentOrchestrator {
       );
     }
 
-    const searchTopicRefs = dedupe([
-      ...(payload.knowledgeTopicRefs || []),
-      ...(payload.knowledgeTags || []).map((tag) => resolveTopicTag(project, tag)).filter(Boolean),
-    ]);
-    const mode = payload.mode || agent?.defaultMode || "chat";
-    const knowledgeScope = resolveWorkspaceKnowledgeScope(project, { topicRefs: searchTopicRefs });
-    const knowledgeIndex = this.resourceManager
-      ? await this.resourceManager.getProjectKnowledgeIndex(knowledgeScope)
-      : { domains: [], topics: [] };
-    const retrieval = await this.searchProjectKnowledge(project, {
-      query: payload.task,
-      topN: agent?.topN || 4,
-      scoreThreshold: agent?.scoreThreshold,
-      topicRefs: searchTopicRefs,
-      knowledgeIndex,
-    });
+    const rag = normalizeNodeRag(agent?.rag);
+    const retrieval = {
+      skipped: true,
+      reason: rag.enabled ? "model-tool-controlled" : "rag-disabled",
+    };
     const contextPolicy = buildContextPolicy(payload, rootSession);
-    const runtimeOptions = buildRuntimeOptions(payload);
+    const runtimeOptions = agent?.type === "dag"
+      ? buildRuntimeOptions(payload)
+      : withRagToolRuntimeOptions(buildRuntimeOptions(payload), project.id, rag);
     const message = buildAgentMessage(project, agent, payload.task, payload.context, {
       runtimeId: agent?.runtimeId || this.settings.defaultRuntimeId || config.defaultRuntimeId,
-      knowledgeIndex,
-      retrieval,
-      knowledgeTags: payload.knowledgeTags,
+      rag,
       contextPolicy,
       runtimeOptions,
     });
@@ -950,7 +937,7 @@ export class AgentOrchestrator {
       runId: payload.runId || randomUUID(),
       projectId: project.id,
       workspaceSlug: "",
-      mode,
+      mode: "chat",
       message,
       sessionId: payload.sessionId,
       reset: payload.reset || contextPolicy.strategy === "reset" || contextPolicy.strategy === "manual-summary",
@@ -1177,6 +1164,10 @@ export class AgentOrchestrator {
         rootNode.runtimeApprovalPolicy,
         request.runtimeOptions?.runtimeApprovalPolicy
       );
+      const coordinatorRuntimeOptions = withRagToolRuntimeOptions({
+        ...request.runtimeOptions,
+        runtimeApprovalPolicy,
+      }, project.id, rootNode.rag);
       const prompt = buildRootCoordinatorPrompt(project, run, rootNode, { nativeGraphTools: runtimeId === "codex" });
       const rootAgent = buildRootCoordinatorAgent(run.agentSnapshot, rootNode);
 
@@ -1206,10 +1197,9 @@ export class AgentOrchestrator {
             previousRuntimeSessionId: rootSession?.runtimeSessions?.codex?.sessionId || "",
           },
           runtimeOptions: {
-            ...request.runtimeOptions,
-            runtimeApprovalPolicy,
+            ...coordinatorRuntimeOptions,
             mcpServerUrls: {
-              ...(request.runtimeOptions?.mcpServerUrls || {}),
+              ...(coordinatorRuntimeOptions.mcpServerUrls || {}),
               hippo: `http://127.0.0.1:${config.wrapperPort}/mcp`,
             },
             ignoreUserConfig: true,
@@ -1325,6 +1315,10 @@ export class AgentOrchestrator {
       nodeDef.runtimeApprovalPolicy,
       request.runtimeOptions?.runtimeApprovalPolicy
     );
+    const nodeRuntimeOptions = withRagToolRuntimeOptions({
+      ...request.runtimeOptions,
+      runtimeApprovalPolicy,
+    }, project.id, nodeDef.rag);
 
     await this.updateAgentRun(project.id, runId, (current, now) => {
       const currentNode = current.nodeRuns[nodeRunId];
@@ -1353,8 +1347,7 @@ export class AgentOrchestrator {
           summary: `DAG node ${nodeRun.nodeId} runs in an isolated runtime session under root run ${runId}.`,
         },
         runtimeOptions: {
-          ...request.runtimeOptions,
-          runtimeApprovalPolicy,
+          ...nodeRuntimeOptions,
         },
       });
       const resultApprovalPolicy = normalizeResultApprovalPolicy(nodeDef.resultApprovalPolicy);
@@ -1615,19 +1608,9 @@ export function buildAgentMessage(project, agent, task, context = undefined, opt
     agent?.mcpServers?.length
       ? `Agent 可访问 MCP：\n${agent.mcpServers.map((name) => `- ${name}`).join("\n")}`
       : agent ? "Agent 可访问 MCP：未显式配置。" : "",
-    agent
-      ? `RAG 授权边界：只能使用当前工作区引用的一级知识库和已筛选主题。AnythingLLM 仅作为检索 provider，不作为对话 runtime。`
-      : "当前未加载 Agent；仍需遵守工作区的知识库引用边界。",
-    project.knowledgeDrawerRefs?.length
-      ? `工作区可访问的一级知识库：\n${project.knowledgeDrawerRefs.map((name) => `- ${name}`).join("\n")}`
-      : "工作区未引用任何一级知识库。",
-    options.knowledgeTags?.length
-      ? `本次二级 tag 过滤：\n${options.knowledgeTags.map((name) => `- ${name}`).join("\n")}`
-      : "",
-    options.knowledgeIndex?.topics?.length
-      ? `本次可检索主题索引：\n${options.knowledgeIndex.topics.map(formatKnowledgeTopic).join("\n")}`
-      : "本次没有可检索主题。",
-    options.retrieval ? `RAG 检索结果：\n${JSON.stringify(options.retrieval, null, 2)}` : "",
+    options.rag?.enabled
+      ? `当前节点已启用 RAG 工具。仅在任务需要工作区知识时调用 hippo_rag_scope 和 hippo_rag_search；检索上限为 Top ${options.rag.topN}。不要在执行前默认检索。`
+      : "当前节点未配置 RAG 工具，不要执行知识库检索。",
     options.contextPolicy?.strategy
       ? `会话上下文策略：${formatContextPolicy(options.contextPolicy)}`
       : "",
@@ -1685,12 +1668,6 @@ function formatSkill(skill) {
   return details ? `- ${skill.name}: ${details}` : `- ${skill.name}`;
 }
 
-function formatKnowledgeTopic(topic) {
-  const description = topic.description ? `：${topic.description}` : "";
-  const docs = Number.isFinite(topic.documentCount) ? `，${topic.documentCount} 个文档` : "";
-  return `- ${topic.domainName || topic.domainPath || ""}/${topic.name || topic.path}${description}${docs}`;
-}
-
 function formatContextPolicy(policy) {
   if (policy.strategy === "reset") return "重置 runtime 会话，不继承之前的 Codex session。";
   if (policy.strategy === "manual-summary") {
@@ -1727,6 +1704,19 @@ function buildRuntimeOptions(payload) {
       ? payload.sandboxMode
       : "",
   });
+}
+
+function withRagToolRuntimeOptions(runtimeOptions, workspaceId, ragValue) {
+  const rag = normalizeNodeRag(ragValue);
+  if (!rag.enabled) return runtimeOptions;
+  const query = new URLSearchParams({ workspaceId, topN: String(rag.topN) });
+  return {
+    ...runtimeOptions,
+    mcpServerUrls: {
+      ...(runtimeOptions?.mcpServerUrls || {}),
+      hippo_rag: `http://127.0.0.1:${config.wrapperPort}/mcp/rag?${query}`,
+    },
+  };
 }
 
 function stripEmptyObject(value) {
@@ -1786,14 +1776,6 @@ function topicPath(value) {
   return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : "";
 }
 
-function resolveTopicTag(project, tag) {
-  const text = String(tag || "").replaceAll("\\", "/").trim();
-  if (!text) return "";
-  if (text.includes("/")) return topicPath(text);
-  const domains = project.knowledgeDrawerRefs || [];
-  return domains.length === 1 ? `${domains[0]}/${text}` : "";
-}
-
 function mergeRagResults(searches = []) {
   const rows = [];
   for (const search of searches) {
@@ -1843,7 +1825,7 @@ function normalizeAgents(agents) {
 }
 
 function normalizeAgent(agent) {
-  const { knowledgeRefs, ...current } = agent || {};
+  const { knowledgeRefs, defaultMode, topN, scoreThreshold, ...current } = agent || {};
   const type = current.type === "dag" ? "dag" : "single";
   const nodes = type === "dag" ? normalizeAgentNodes(current.nodes) : [];
   return {
@@ -1854,7 +1836,7 @@ function normalizeAgent(agent) {
     runtimeId: current.runtimeId || config.defaultRuntimeId,
     explicitRagDocumentNames: current.explicitRagDocumentNames || current.ragDocumentNames || [],
     ragDocumentNames: current.ragDocumentNames || current.explicitRagDocumentNames || [],
-    rag: current.rag && typeof current.rag === "object" && !Array.isArray(current.rag) ? current.rag : {},
+    rag: normalizeNodeRag(current.rag),
     rootNodeId: type === "dag" ? current.rootNodeId || nodes[0]?.id || "" : "",
     nodes,
     edges: type === "dag" ? normalizeAgentEdges(current.edges) : [],
@@ -1880,6 +1862,7 @@ function normalizeAgentNodes(nodes) {
     agentId: node.agentId || "",
     systemPrompt: node.systemPrompt || "",
     runtimeId: node.runtimeId || undefined,
+    rag: normalizeNodeRag(node.rag),
     skills: Array.isArray(node.skills) ? node.skills : [],
     mcpServers: Array.isArray(node.mcpServers) ? node.mcpServers : [],
     input: node.input,
@@ -1893,6 +1876,14 @@ function normalizeResultApprovalPolicy(value) {
 
 function normalizeRuntimeApprovalPolicy(value) {
   return ["untrusted", "on-request", "never"].includes(value) ? value : "inherit";
+}
+
+function normalizeNodeRag(value) {
+  const rag = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  return {
+    enabled: rag.enabled === true,
+    topN: Math.max(1, Number(rag.topN) || 4),
+  };
 }
 
 function resolveNodeRuntimeApprovalPolicy(nodePolicy, inheritedPolicy) {
@@ -1980,9 +1971,6 @@ function snapshotAgentDefinition(agent) {
     mcpServers: normalized.mcpServers || [],
     runtimeId: normalized.runtimeId || config.defaultRuntimeId,
     rag: normalized.rag || {},
-    defaultMode: normalized.defaultMode || "chat",
-    topN: normalized.topN || 4,
-    scoreThreshold: normalized.scoreThreshold,
     rootNodeId: normalized.rootNodeId || "",
     nodes: normalized.nodes || [],
     edges: normalized.edges || [],
@@ -2072,9 +2060,7 @@ function buildNodeAgent(agentSnapshot, nodeDef, fallbackAgent) {
     skills: nodeDef.skills?.length ? nodeDef.skills : agentSnapshot.skills || [],
     mcpServers: nodeDef.mcpServers?.length ? nodeDef.mcpServers : agentSnapshot.mcpServers || [],
     runtimeId: nodeDef.runtimeId || agentSnapshot.runtimeId || fallbackAgent?.runtimeId || config.defaultRuntimeId,
-    defaultMode: agentSnapshot.defaultMode || "chat",
-    topN: agentSnapshot.topN || 4,
-    scoreThreshold: agentSnapshot.scoreThreshold,
+    rag: normalizeNodeRag(nodeDef.rag),
   };
 }
 
@@ -2101,6 +2087,7 @@ function buildRootCoordinatorPrompt(project, run, rootNode, { nativeGraphTools =
       id: node.id,
       name: node.name,
       interfaceDescription: node.description,
+      rag: normalizeNodeRag(node.rag),
       transitionInstruction: node.transitionInstruction || "",
     })),
     edges: run.agentSnapshot.edges.map((edge) => ({ from: edge.from, to: edge.to })),
@@ -2130,6 +2117,9 @@ function buildRootCoordinatorPrompt(project, run, rootNode, { nativeGraphTools =
     `当前 Runtime Graph：\n${JSON.stringify(runtimeGraph, null, 2)}`,
     run.userResponses?.length ? `用户后续回复：\n${JSON.stringify(run.userResponses, null, 2)}` : "当前没有用户后续回复。",
     rootNode.transitionInstruction ? `Root 结果处置规则：\n${rootNode.transitionInstruction}` : "Root 未配置额外结果处置规则，按默认拓扑开始调度。",
+    normalizeNodeRag(rootNode.rag).enabled
+      ? `Root 节点已启用独立 RAG 工具。仅在需要工作区知识时调用 hippo_rag_scope 或 hippo_rag_search，Top N 固定为 ${normalizeNodeRag(rootNode.rag).topN}；不要默认检索。`
+      : "Root 节点未配置 RAG 工具。",
     `调用 Hippo MCP Graph Tool 推进运行：hippo_get_agent_run、hippo_dispatch_graph_node、hippo_request_graph_user、hippo_complete_graph_run、hippo_fail_graph_run。所有工具参数中的 workspaceId 使用 ${project.id}，runId 使用 ${run.id}。你可以连续调用节点，直到 Run 完成、失败、等待审批或等待用户。`,
     nativeGraphTools
       ? "当前 Codex runtime 已注入并验证 Hippo MCP。必须调用上述 Graph Tool，禁止声称工具不可用，禁止直接输出 JSON 降级命令。"
@@ -2200,6 +2190,9 @@ function buildDagNodePrompt(project, run, nodeDef, nodeInput) {
     run.agentSnapshot.systemPrompt ? `Agent 全局指令：\n${run.agentSnapshot.systemPrompt}` : "",
     nodeDef.description ? `节点接口描述：\n${nodeDef.description}` : "",
     nodeDef.systemPrompt ? `节点系统提示词：\n${nodeDef.systemPrompt}` : "",
+    normalizeNodeRag(nodeDef.rag).enabled
+      ? `当前节点已启用 RAG 工具。仅在任务需要工作区知识时调用 hippo_rag_scope 或 hippo_rag_search，Top N 固定为 ${normalizeNodeRag(nodeDef.rag).topN}；不要默认检索。`
+      : "当前节点未配置 RAG 工具。",
     `原始任务：\n${run.input?.task || ""}`,
     nodeInput.dispatchInput !== undefined ? `RootAgent 派发输入：\n${JSON.stringify(nodeInput.dispatchInput, null, 2)}` : "RootAgent 未提供额外派发输入。",
     nodeInput.parent ? `触发本次执行的父 NodeRun：\n${JSON.stringify(nodeInput.parent, null, 2)}` : "当前执行没有指定父 NodeRun。",

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { AnythingLlmError, parseMetadata } from "./anythingllm-client.js";
 import { config } from "./config.js";
-import { createMcpServer } from "./mcp.js";
+import { createMcpServer, createRagMcpServer } from "./mcp.js";
 import { createAnythingLlmClient } from "./shared.js";
 import { AgentOrchestrator } from "./agent-orchestrator.js";
 import { ResourceManager } from "./resource-manager.js";
@@ -44,6 +44,12 @@ app.get("/api/health", (_req, res) => {
 app.post("/mcp", asyncHandler(handleMcpPost));
 app.get("/mcp", asyncHandler(handleMcpSessionRequest));
 app.delete("/mcp", asyncHandler(handleMcpSessionRequest));
+app.post("/mcp/rag", asyncHandler((req, res) => handleMcpPost(req, res, () => createRagMcpServer({
+  workspaceId: String(req.query.workspaceId || ""),
+  topN: Number(req.query.topN) || 4,
+}))));
+app.get("/mcp/rag", asyncHandler(handleMcpSessionRequest));
+app.delete("/mcp/rag", asyncHandler(handleMcpSessionRequest));
 
 app.get("/api/status", asyncHandler(async (_req, res) => {
   res.json({
@@ -438,7 +444,7 @@ async function safeRagStatus() {
   }
 }
 
-async function handleMcpPost(req, res) {
+async function handleMcpPost(req, res, serverFactory = createMcpServer) {
   const sessionId = getMcpSessionId(req);
   const existing = sessionId ? mcpSessions.get(sessionId) : undefined;
   if (existing) {
@@ -455,7 +461,7 @@ async function handleMcpPost(req, res) {
     return;
   }
 
-  const mcpServer = createMcpServer();
+  const mcpServer = serverFactory();
   let transport;
   transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => randomUUID(),

@@ -1351,8 +1351,8 @@ dd {
 .dagCanvasNode {
   position: absolute;
   width: 210px;
-  height: 172px;
-  min-height: 172px;
+  height: 188px;
+  min-height: 188px;
   display: grid;
   gap: 7px;
   border: 1px solid rgba(255, 255, 255, 0.13);
@@ -1859,7 +1859,7 @@ dd {
 .agentEditorMeta {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(180px, 1.2fr) minmax(220px, 2fr) 140px 140px 92px;
+  grid-template-columns: minmax(180px, 1.2fr) minmax(220px, 2fr) 140px;
   gap: 8px;
   align-items: end;
   padding: 10px;
@@ -1875,6 +1875,18 @@ dd {
   gap: 5px;
   color: #d8d8d8;
   font-size: 12px;
+}
+
+.dagInspector .dagNodeRagToggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dagNodeRagToggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
 }
 
 .agentCanvasLayout {

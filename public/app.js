@@ -20,7 +20,7 @@ const state = {
 };
 
 const DAG_NODE_WIDTH = 210;
-const DAG_NODE_HEIGHT = 172;
+const DAG_NODE_HEIGHT = 188;
 const DAG_COLUMN_GAP = 60;
 const DAG_ROW_GAP = 36;
 
@@ -1126,8 +1126,7 @@ async function saveAgent(event) {
     mcpServers: splitLinesOrComma(form.get("mcpServers")),
     runtimeId: form.get("runtimeId") || "codex",
     ragDocumentNames: splitLinesOrComma(form.get("ragDocumentNames")),
-    defaultMode: form.get("defaultMode"),
-    topN: Number(form.get("topN") || 4),
+    rag: normalizeNodeRag(rootNode.rag),
   };
   if (type === "dag") {
     body.rootNodeId = "root";
@@ -1167,7 +1166,6 @@ async function sendMessage(event) {
   const payload = {
     task,
     agentId: form.get("agentId") || undefined,
-    mode: form.get("mode") || undefined,
     sessionId: conversation.id,
     runId,
     dryRun: Boolean(form.get("dryRun")),
@@ -1289,7 +1287,6 @@ function buildTurnMetadata(project, conversation, payload) {
     agentId: payload.agentId || "",
     agentName: agent?.name || "",
     runtimeId: agent?.runtimeId || state.status?.wrapper?.settings?.defaultRuntimeId || "codex",
-    mode: payload.mode || agent?.defaultMode || "automatic",
     contextStrategy: payload.contextStrategy || "runtime",
     contextSummary: payload.contextSummary || "",
     contextSummaryProvided: Boolean(payload.contextSummary),
@@ -1450,8 +1447,7 @@ function createAgentDraft(agent = undefined) {
     mcpServers: (agent?.mcpServers || []).join("\n"),
     runtimeId: agent?.runtimeId || "codex",
     ragDocumentNames: (agent?.explicitRagDocumentNames || agent?.ragDocumentNames || []).join("\n"),
-    defaultMode: agent?.defaultMode || "query",
-    topN: agent?.topN || 4,
+    rag: normalizeNodeRag(agent?.rag),
     maxDecisions: agent?.executionPolicy?.maxDecisions || 50,
     nodes,
     edges,
@@ -1466,6 +1462,7 @@ function ensureRootDraft(draft) {
     runtimeApprovalPolicy: "inherit",
     resultApprovalPolicy: "none",
     transitionInstruction: "",
+    rag: normalizeNodeRag(draft.rag),
     name: "Root",
     description: "智能体入口节点，负责接收用户任务并调度后续节点。",
     systemPrompt: draft.systemPrompt || "",
@@ -1507,14 +1504,6 @@ function renderAgentEditor(draft) {
             <option value="codex" ${draft.runtimeId === "codex" ? "selected" : ""}>Codex</option>
           </select>
         </label>
-        <label>默认模式
-          <select name="defaultMode">
-            ${["query", "chat", "automatic"].map((mode) =>
-              `<option value="${mode}" ${draft.defaultMode === mode ? "selected" : ""}>${mode === "query" ? "检索问答" : mode === "chat" ? "对话" : "自动"}</option>`
-            ).join("")}
-          </select>
-        </label>
-        <label>Top N <input name="topN" type="number" min="1" value="${escapeHtml(draft.topN)}" /></label>
       </div>
 
       <div class="agentCanvasLayout">
@@ -1543,6 +1532,8 @@ function renderAgentEditor(draft) {
               <option value="auto">自动审批</option>
             </select>
           </label>
+          <label class="dagNodeRagToggle"><input id="dagNodeRagEnabledInput" type="checkbox" /> 启用 RAG 工具</label>
+          <label id="dagNodeRagTopNField">RAG Top N <input id="dagNodeRagTopNInput" type="number" min="1" value="4" /></label>
           <div class="dagEdgeEditor">
             <div class="dagEdgeEditorHeader">
               <strong>节点连接</strong>
@@ -1576,7 +1567,7 @@ function bindAgentEditorEvents() {
   document.getElementById("alignDagCanvasBtn")?.addEventListener("click", alignDagCanvas);
   document.getElementById("importAgentGraphBtn")?.addEventListener("click", () => document.getElementById("agentGraphImportInput")?.click());
   document.getElementById("agentGraphImportInput")?.addEventListener("change", importAgentGraphFile);
-  ["dagNodeNameInput", "dagNodeRuntimeApprovalInput", "dagNodeResultApprovalInput", "dagNodeDescriptionInput", "dagNodePromptInput", "dagNodeTransitionInput"].forEach((id) => {
+  ["dagNodeNameInput", "dagNodeRuntimeApprovalInput", "dagNodeResultApprovalInput", "dagNodeRagEnabledInput", "dagNodeRagTopNInput", "dagNodeDescriptionInput", "dagNodePromptInput", "dagNodeTransitionInput"].forEach((id) => {
     document.getElementById(id)?.addEventListener("change", updateSelectedDagNodeFromInspector);
   });
 }
@@ -1624,6 +1615,7 @@ function renderDagBuilder(nodes = [], edges = []) {
           ${node.description ? `<p>${escapeHtml(node.description)}</p>` : ""}
           <div class="dagNodeIO">
             <span>结果处置: ${node.transitionInstruction || node.routingInstruction ? "已配置" : "默认处理"}</span>
+            <span>RAG: ${normalizeNodeRag(node.rag).enabled ? `启用 · Top ${normalizeNodeRag(node.rag).topN}` : "未启用"}</span>
             <span>入: ${edgeByTarget.get(node.id)?.map((edge) => edge.from).join(", ") || (node.id === rootId ? "任务输入" : "未连接")}</span>
             <span>出: ${edgeBySource.get(node.id)?.map((edge) => edge.to).join(", ") || "终端输出"}</span>
           </div>
@@ -1691,6 +1683,7 @@ function addDagNodeFromBuilder() {
     runtimeApprovalPolicy: "inherit",
     resultApprovalPolicy: "none",
     transitionInstruction: "",
+    rag: { enabled: false, topN: 4 },
     name: "新节点",
     description: "",
     systemPrompt: "",
@@ -1710,12 +1703,21 @@ function loadDagNodeIntoInspector(node) {
   document.getElementById("dagNodeNameInput").value = node.name || "";
   document.getElementById("dagNodeRuntimeApprovalInput").value = normalizeNodeRuntimeApproval(node);
   document.getElementById("dagNodeResultApprovalInput").value = normalizeNodeResultApproval(node);
+  const rag = normalizeNodeRag(node.rag);
+  document.getElementById("dagNodeRagEnabledInput").checked = rag.enabled;
+  document.getElementById("dagNodeRagTopNInput").value = String(rag.topN);
   document.getElementById("dagNodeResultApprovalField").classList.toggle("hidden", node.id === "root");
   document.getElementById("dagNodeDescriptionInput").value = node.description || "";
   document.getElementById("dagNodePromptInput").value = node.systemPrompt || "";
   document.getElementById("dagNodeTransitionInput").value = node.transitionInstruction || node.routingInstruction || "";
   document.getElementById("removeDagNodeBtn").disabled = node.id === "root";
+  syncDagNodeRagFieldState();
   renderDagConnectionSummary(node.id || "root");
+}
+
+function syncDagNodeRagFieldState() {
+  const enabled = document.getElementById("dagNodeRagEnabledInput")?.checked === true;
+  document.getElementById("dagNodeRagTopNField")?.classList.toggle("hidden", !enabled);
 }
 
 function renderDagConnectionSummary(selectedNodeId) {
@@ -1914,6 +1916,10 @@ function updateSelectedDagNodeFromInspector() {
       kind: "task",
       runtimeApprovalPolicy: document.getElementById("dagNodeRuntimeApprovalInput").value || "inherit",
       resultApprovalPolicy: document.getElementById("dagNodeResultApprovalInput").value || "none",
+      rag: {
+        enabled: document.getElementById("dagNodeRagEnabledInput").checked,
+        topN: Math.max(1, Number(document.getElementById("dagNodeRagTopNInput").value) || 4),
+      },
       transitionInstruction: document.getElementById("dagNodeTransitionInput").value.trim(),
       name: document.getElementById("dagNodeNameInput").value.trim() || (node.id === "root" ? "Root" : node.id),
       description: document.getElementById("dagNodeDescriptionInput").value.trim(),
@@ -1943,6 +1949,13 @@ function normalizeNodeRuntimeApproval(node = {}) {
   return ["untrusted", "on-request", "never"].includes(node.runtimeApprovalPolicy)
     ? node.runtimeApprovalPolicy
     : "inherit";
+}
+
+function normalizeNodeRag(value = {}) {
+  return {
+    enabled: value?.enabled === true,
+    topN: Math.max(1, Number(value?.topN) || 4),
+  };
 }
 
 
