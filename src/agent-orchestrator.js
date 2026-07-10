@@ -62,6 +62,7 @@ const messageSchema = z.object({
 });
 
 const createConversationSchema = z.object({
+  id: z.string().optional(),
   title: z.string().optional(),
   messages: z.array(messageSchema).default([]),
   metadata: z.record(z.string(), z.unknown()).optional(),
@@ -305,7 +306,7 @@ export class AgentOrchestrator {
     this.findProject(store, projectId);
     const now = new Date().toISOString();
     const conversation = {
-      id: randomUUID(),
+      id: payload.id || randomUUID(),
       type: "root",
       projectId,
       title: payload.title || deriveConversationTitle(payload.messages) || "新对话",
@@ -594,12 +595,12 @@ export class AgentOrchestrator {
     });
 
     if (payload.dryRun) {
-      await this.completeAgentRun(project.id, agentRun.id, {
+      const completedRun = await this.completeAgentRun(project.id, agentRun.id, {
         status: "completed",
         output: { dryRun: true, request },
         nodeOutput: { dryRun: true, request },
       });
-      return { project, agent, request, retrieval, dryRun: true, agentRun };
+      return { project, agent, request, retrieval, dryRun: true, agentRun: completedRun.run };
     }
 
     const runtime = this.runtimeRegistry.getRuntime(request.runtimeId);
@@ -756,7 +757,7 @@ export class AgentOrchestrator {
     const payload = executeAgentTaskSchema.parse(input);
     const { project } = await this.getProject(id);
     const rootSession = payload.sessionId
-      ? (await this.getConversation(id, payload.sessionId)).conversation
+      ? await this.ensureExecutionConversation(id, payload.sessionId, payload)
       : undefined;
     const agent = payload.agentId ? (await this.getAgent(payload.agentId)).agent : undefined;
     if (agent && !project.agentIds?.includes(agent.id)) {
@@ -805,6 +806,22 @@ export class AgentOrchestrator {
       runtimeOptions,
     };
     return { payload, project, agent, request, retrieval, rootSession };
+  }
+
+  async ensureExecutionConversation(projectId, sessionId, payload = {}) {
+    try {
+      return (await this.getConversation(projectId, sessionId)).conversation;
+    } catch (error) {
+      if (error.status !== 404) throw error;
+      return (await this.createConversation(projectId, {
+        id: sessionId,
+        title: deriveConversationTitle([{ role: "user", text: payload.task || "" }]) || "新对话",
+        metadata: {
+          createdBy: "execute",
+          activeAgentId: payload.agentId || "",
+        },
+      })).conversation;
+    }
   }
 
   cancelRuntimeRun(runId) {
