@@ -85,19 +85,6 @@ export class AnythingLlmClient {
     });
   }
 
-  async workspaceChat(slug, { message, mode = "query", sessionId, attachments, reset }) {
-    return this.request(`/workspace/${encodeURIComponent(slug)}/chat`, {
-      method: "POST",
-      body: prune({
-        message,
-        mode,
-        sessionId,
-        attachments,
-        reset,
-      }),
-    });
-  }
-
   async vectorSearch(slug, { query, topN = 4, scoreThreshold }) {
     return this.request(`/workspace/${encodeURIComponent(slug)}/vector-search`, {
       method: "POST",

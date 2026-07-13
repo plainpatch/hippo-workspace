@@ -15,7 +15,7 @@ Hippo must evolve from a single `codex exec` wrapper into a workspace-scoped age
 - A root session has `type: "root"` and is the only session type allowed to own graph run state.
 - A root session may contain multiple agent runs.
 - A root session may map to runtime sessions, including a Codex root session.
-- A root session records context strategy per runtime turn: runtime resume, reset, or manual-summary compression.
+- A root session always resumes its mapped runtime session after the first turn.
 - A root session can switch active agent inside the same conversation; the user owns the semantic risk of inherited context.
 - Every message must record the agent/runtime context used for that turn when available.
 
@@ -54,7 +54,7 @@ Hippo must evolve from a single `codex exec` wrapper into a workspace-scoped age
 - Codex session id is runtime metadata.
 - First turn should create a Codex session with workspace path.
 - Later turns should resume the Codex session when possible.
-- Reset and manual-summary turns should start a fresh Codex session instead of resuming the previous one.
+- DAG worker nodes start isolated Codex sessions; the Root conversation always resumes its mapped session.
 - The adapter should prefer `codex exec --json` so Hippo can consume structured runtime events.
 - The adapter must support cancellation by run id / process id.
 
@@ -88,11 +88,6 @@ type RuntimeSessionRef = {
   workspacePath: string;
   hippoSessionId: string;
   status: "active" | "ephemeral" | "archived" | "unknown";
-  contextPolicy?: {
-    strategy: "runtime" | "reset" | "manual-summary";
-    summary?: string;
-    summaryUpdatedAt?: string;
-  };
   runtimeOptions?: {
     sandboxMode?: "read-only" | "workspace-write" | "danger-full-access";
   };
@@ -132,7 +127,7 @@ type AgentRun = {
   agentId: string;
   agentVersion: number;
   agentSnapshot: AgentDefinition;
-  status: "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled";
+  status: "pending" | "running" | "waiting_user" | "waiting_approval" | "completed" | "failed" | "cancelled";
   input: unknown;
   output?: unknown;
   error?: unknown;
@@ -152,7 +147,7 @@ type NodeRun = {
   runId: string;
   nodeId: string;
   agentId?: string;
-  status: "pending" | "ready" | "running" | "waiting" | "completed" | "failed" | "cancelled";
+  status: "pending" | "ready" | "running" | "waiting_approval" | "completed" | "failed" | "cancelled";
   runtimeSession?: RuntimeSessionRef;
   input?: unknown;
   output?: unknown;
@@ -177,14 +172,14 @@ Status as of the current implementation:
 - Phase 6: implemented as a first stateful API/MCP surface. Tools can validate graph prototypes, create/read/advance/cancel/retry runs, inspect node runs, and append/list trace events.
 - Workspace RAG scope planning is implemented as API/MCP. A model can first read the authorized knowledge domains/topics, then call scoped search against topic-level RAG workspaces. Search requests are intersected with the workspace's configured knowledge authorization.
 - Topic-level RAG synchronization is implemented as API/UI/MCP. Hippo scans second-level topic folders, uploads new or changed files to the mapped AnythingLLM workspace, stores returned document names, and refreshes embeddings before retrieval.
-- Codex session mapping records the previous resumed Codex session and context policy. Normal turns resume Codex context; `reset` and `manual-summary` start fresh runtime context, with manual summaries injected into the prompt.
-- Main app conversations now persist message-level run metadata, including workspace id, agent/runtime selection, context strategy, run id, and assistant runtime context policy/status.
+- Codex session mapping records the runtime session for each Hippo conversation. Later turns always resume that Codex session.
+- Main app conversations persist message-level run metadata, including workspace id, agent/runtime selection, run id, and status.
 - Single-turn Codex sandbox overrides are supported from UI/API/MCP and are recorded in request/message/runtime metadata.
 - Codex JSONL streaming is normalized so structured runtime events remain trace data while extracted text deltas are streamed to the chat surface.
 
 Remaining product hardening:
 
-- Basic human approval/wait nodes are modeled with `kind: "wait"` and can be resumed through API/MCP. The UI includes a workspace-level pending inbox for waiting nodes.
+- Task nodes can require result approval and resume from `waiting_approval`; requesting user guidance is represented by the graph run's `waiting_user` state.
 - Optional edge semantics are basic: failed optional upstream nodes do not block downstream readiness, while required failed branches fail the run.
 - UI graph editing has a lightweight node/edge builder backed by JSON. It is not yet a full canvas-style visual graph editor.
 - Trace querying is stored in the JSON run store; larger deployments should move this to an indexed run store.
@@ -198,13 +193,13 @@ Implementation:
 - Update Codex adapter to support JSONL events via `codex exec --json`.
 - Extract and persist Codex session id when emitted by Codex.
 - Resume Codex session on later turns when a session id exists.
-- Preserve compatibility with current plain `exec` behavior when session id extraction fails.
+- Mark a runtime session as ephemeral when Codex does not emit a session id.
 
 Checkpoints:
 - New conversations have `type: "root"` and `runtimeSessions`.
 - Runtime results include `runtimeSession`.
 - Stored conversation metadata receives `runtimeSessions.codex.sessionId` when available.
-- Existing conversations are normalized without data loss.
+- New conversations persist the canonical runtime session shape.
 
 Gate:
 - `npm run check` passes.
@@ -231,16 +226,16 @@ Gate:
 
 Implementation:
 - Add `type`, `version`, `rag`, `nodes`, and `edges` fields to agent definitions.
-- Existing agents normalize as `type: "single"`, `version: 1`.
+- Agent definitions use an explicit `single` or `dag` type and version.
 - Validate DAG shape and acyclicity.
 
 Checkpoints:
-- Single-node agents remain compatible.
+- Single-node agents execute through the same versioned prototype contract.
 - DAG prototype can be created, read, updated, and validated.
 
 Gate:
 - Invalid DAG with cycle is rejected.
-- Existing UI/API agents continue to load.
+- UI and API use the canonical agent prototype fields.
 
 ### Phase 4: AgentRun and NodeRun Runtime Graph
 
@@ -298,6 +293,6 @@ Gate:
 ## Near-Term Development Order
 
 1. Implement Phase 1 in current codebase.
-2. Keep API compatibility with existing `/api/workspaces` and `/api/projects`.
+2. Use `/api/workspaces` as the only workspace API.
 3. Add internal metadata first; defer UI visualization until runtime state is reliable.
 4. Add cancellation only after runtime run ids and process registry exist.

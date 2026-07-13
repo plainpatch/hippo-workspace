@@ -1,3 +1,11 @@
+import { marked } from "/vendor/marked/marked.esm.js";
+import DOMPurify from "/vendor/dompurify/purify.es.mjs";
+
+marked.setOptions({
+  gfm: true,
+  breaks: true,
+});
+
 const state = {
   projects: [],
   agents: [],
@@ -16,6 +24,10 @@ const state = {
   selectedDagEdgeKey: "",
   currentView: "chat",
   activeRun: null,
+  reconnectingRunId: "",
+  executionStream: null,
+  conversationSaveTimers: new Map(),
+  conversationSaveChains: new Map(),
   messages: [],
 };
 
@@ -59,15 +71,12 @@ function bindEvents() {
     else openProjectForm(getActiveProject());
   });
   document.getElementById("closeDrawerBtn").addEventListener("click", closeDrawer);
-  document.getElementById("attachTextBtn").addEventListener("click", openDrawer);
-
   document.getElementById("projectForm").addEventListener("submit", saveProject);
   document.getElementById("projectKnowledgeFilter")?.addEventListener("input", () => {
     const active = getActiveProject();
     renderProjectKnowledgeTreeFromForm(active);
   });
   document.getElementById("composerForm").addEventListener("submit", sendMessage);
-  document.getElementById("contextStrategySelect")?.addEventListener("change", syncContextStrategyFields);
   document.getElementById("stopExecutionBtn")?.addEventListener("click", cancelActiveRun);
   document.getElementById("quickTextForm").addEventListener("submit", uploadTextToProject);
   messageInput.addEventListener("input", () => resizeComposer(messageInput));
@@ -79,6 +88,7 @@ function bindEvents() {
 }
 
 async function refreshAll() {
+  if (state.executionStream) disconnectExecutionStream();
   await checkStatus();
   await Promise.allSettled([loadProjects(), loadAgents(), loadKnowledge()]);
 }
@@ -102,7 +112,7 @@ async function checkStatus() {
 
 async function loadProjects() {
   const data = await request("/api/workspaces");
-  state.projects = data.workspaces || data.projects || [];
+  state.projects = data.workspaces;
   if (!state.activeProjectId && state.projects.length) {
     state.activeProjectId = state.projects[0].id;
   }
@@ -136,15 +146,43 @@ async function loadConversations(projectId) {
 }
 
 async function refreshMessageRunSummaries(projectId) {
-  const runIds = [...new Set((state.messages || []).map((message) => message.runId).filter(Boolean))];
-  if (!runIds.length) return;
   try {
     const data = await request(`/api/workspaces/${encodeURIComponent(projectId)}/runs`);
     const runsById = new Map((data.runs || []).map((run) => [run.id, run]));
     state.messages = state.messages.map((message) => {
       const run = runsById.get(message.runId);
-      return run ? { ...message, agentRunSummary: summarizeAgentRun(run) } : message;
+      return run && message.role === "assistant" ? hydrateMessageFromRun(message, run) : message;
     });
+    const conversation = getActiveConversation();
+    let recoveredMessages = false;
+    const conversationRuns = (data.runs || [])
+      .filter((run) => run.rootSessionId === conversation?.id)
+      .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+    for (const run of conversationRuns) {
+      if (state.messages.some((message) => message.role === "assistant" && message.runId === run.id)) continue;
+      const recovered = hydrateMessageFromRun({
+        role: "assistant",
+        text: ["pending", "running", "coordinating", "waiting_approval"].includes(run.status)
+          ? "连接已断开，正在恢复..."
+          : "正在恢复运行结果...",
+        runId: run.id,
+        metadata: { status: run.status, recoveredFromRun: true },
+      }, run);
+      const matchingIndexes = state.messages
+        .map((message, index) => message.runId === run.id ? index : -1)
+        .filter((index) => index >= 0);
+      const insertAt = matchingIndexes.length ? matchingIndexes.at(-1) + 1 : state.messages.length;
+      state.messages.splice(insertAt, 0, recovered);
+      recoveredMessages = true;
+    }
+    if (recoveredMessages && conversation?.id) {
+      await queueConversationSave(projectId, conversation.id, state.messages, { immediate: true });
+    }
+    const activeRun = conversationRuns.find((run) =>
+      run.rootSessionId === conversation?.id && ["pending", "running", "coordinating", "waiting_approval"].includes(run.status)
+    );
+    if (activeRun) restoreActiveExecution(projectId, activeRun);
+    else if (state.activeRun?.projectId === projectId) clearActiveRun();
   } catch {
     // Run summaries are best-effort UI state; keep messages usable if the run list is unavailable.
   }
@@ -203,6 +241,8 @@ function renderProjectList() {
         renderProjectList();
         return;
       }
+      disconnectExecutionStream();
+      clearActiveRun();
       state.activeProjectId = projectId;
       state.collapsedProjectIds.delete(projectId);
       state.activeConversationId = null;
@@ -211,16 +251,21 @@ function renderProjectList() {
     });
   });
   target.querySelectorAll("[data-conversation-id]").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
+      disconnectExecutionStream();
+      clearActiveRun();
       state.activeConversationId = button.dataset.conversationId;
       const conversation = getActiveConversation();
       state.messages = conversation?.messages ? [...conversation.messages] : [];
+      await refreshMessageRunSummaries(state.activeProjectId);
       renderProjectList();
       renderActiveProject();
     });
   });
   target.querySelectorAll("[data-project-new-conversation-id]").forEach((button) => {
     button.addEventListener("click", async () => {
+      disconnectExecutionStream();
+      clearActiveRun();
       state.activeProjectId = button.dataset.projectNewConversationId;
       state.collapsedProjectIds.delete(state.activeProjectId);
       await createConversationForActiveProject();
@@ -229,6 +274,11 @@ function renderProjectList() {
   target.querySelectorAll("[data-project-options-id]").forEach((button) => {
     button.addEventListener("click", async (event) => {
       event.stopPropagation();
+      if (state.activeProjectId !== button.dataset.projectOptionsId) {
+        disconnectExecutionStream();
+        clearActiveRun();
+        state.activeConversationId = null;
+      }
       state.activeProjectId = button.dataset.projectOptionsId;
       await loadConversations(state.activeProjectId);
       openProjectForm(getActiveProject());
@@ -284,7 +334,7 @@ function renderActiveProject() {
   }
 
   name.textContent = project.name;
-  meta.textContent = `${project.localWorkspaceFolderName || project.id} · ${state.conversations.length} 个会话 · ${project.knowledgeDrawerRefs?.length || 0} 个知识库 · ${project.knowledgeTopicRefs?.length || 0} 个主题筛选 · ${project.agentIds?.length || 0} 个 Agent`;
+  meta.textContent = `${project.localWorkspaceFolderName || project.id} · ${state.conversations.length} 个会话 · ${project.knowledgeDomainRefs?.length || 0} 个知识库 · ${project.knowledgeTopicRefs?.length || 0} 个主题筛选 · ${project.agentIds?.length || 0} 个 Agent`;
   configButton.textContent = "工作区设置";
   input.disabled = false;
   input.placeholder = `向「${project.name}」提问；可选加载 Agent`;
@@ -305,12 +355,25 @@ function renderMessages() {
       <div class="messageBody">
         <div class="messageMeta">${message.role === "user" ? "你" : "Hippo Agent"}</div>
         <div class="messageText">${formatMessage(message.text)}</div>
+        ${message.role === "assistant" ? renderRuntimeRequests(message) : ""}
         ${message.agentRunSummary ? renderAgentRunSummary(message.agentRunSummary, message.runId) : ""}
       </div>
     </article>
   `).join("");
   stream.querySelectorAll("[data-run-detail-id]").forEach((button) => {
     button.addEventListener("click", () => showRunDetail(button.dataset.runDetailId));
+  });
+  stream.querySelectorAll("[data-runtime-request-decision]").forEach((button) => {
+    button.addEventListener("click", () => resolveRuntimeApproval(button));
+  });
+  stream.querySelectorAll("[data-runtime-input-form]").forEach((form) => {
+    form.addEventListener("submit", submitRuntimeUserInput);
+  });
+  stream.querySelectorAll("[data-runtime-mcp-form]").forEach((form) => {
+    form.addEventListener("submit", submitRuntimeMcpInput);
+  });
+  stream.querySelectorAll("[data-copy-code]").forEach((button) => {
+    button.addEventListener("click", () => copyRenderedCode(button));
   });
   stream.scrollTop = stream.scrollHeight;
 }
@@ -485,7 +548,7 @@ async function renderInboxManager() {
   const data = await request(`/api/workspaces/${encodeURIComponent(project.id)}/runs`);
   const waitingItems = (data.runs || []).flatMap((run) =>
     Object.values(run.nodeRuns || {})
-      .filter((node) => ["waiting", "waiting_approval"].includes(node.status))
+      .filter((node) => node.status === "waiting_approval")
       .map((node) => ({ run, node }))
   );
   stream.innerHTML = `
@@ -536,7 +599,6 @@ function renderRunDetail(run, trace = []) {
         <dt>Agent</dt><dd>${escapeHtml(run.agentId || "通用助手")} · v${escapeHtml(run.agentVersion || 1)}</dd>
         <dt>Runtime</dt><dd>${escapeHtml(run.request?.runtimeId || "codex")}</dd>
         <dt>Sandbox</dt><dd>${escapeHtml(run.request?.runtimeOptions?.sandboxMode || "默认")}</dd>
-        <dt>上下文</dt><dd>${escapeHtml(run.request?.contextPolicy?.strategy || "runtime")}</dd>
       </dl>
       <div class="runDetailSection">
         <h3>Root 协调器</h3>
@@ -893,11 +955,11 @@ async function saveKnowledgeMetadata(event) {
   event.preventDefault();
   const formNode = event.currentTarget;
   const form = new FormData(formNode);
-  await request("/api/knowledge/folders", {
+  await request("/api/knowledge/nodes", {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      drawerPath: formNode.dataset.knowledgeMetaPath,
+      nodePath: formNode.dataset.knowledgeMetaPath,
       name: form.get("name"),
       description: form.get("description"),
     }),
@@ -989,7 +1051,7 @@ function renderProjectKnowledgeTree(selectedRefs = [], selectedTopicRefs = []) {
   const selected = new Set(selectedRefs || []);
   const selectedTopics = new Set(selectedTopicRefs || []);
   target.innerHTML = children.map((item) => renderKnowledgeNode(item, selected, selectedTopics, 0)).join("");
-  target.querySelectorAll("[name='knowledgeDrawerRefs'], [name='knowledgeTopicRefs']").forEach((input) => {
+  target.querySelectorAll("[name='knowledgeDomainRefs'], [name='knowledgeTopicRefs']").forEach((input) => {
     input.addEventListener("change", () => {
       const collection = input.name === "knowledgeTopicRefs"
         ? state.workspaceKnowledgeSelection.topics
@@ -1006,8 +1068,8 @@ function renderProjectKnowledgeTree(selectedRefs = [], selectedTopicRefs = []) {
 
 function renderProjectKnowledgeTreeFromForm(project = undefined, options = {}) {
   if (options.preserveDomSelection !== false) captureWorkspaceKnowledgeSelection();
-  if (!state.workspaceKnowledgeSelection.drawers.size && project?.knowledgeDrawerRefs?.length) {
-    state.workspaceKnowledgeSelection.drawers = new Set(project.knowledgeDrawerRefs || []);
+  if (!state.workspaceKnowledgeSelection.drawers.size && project?.knowledgeDomainRefs?.length) {
+    state.workspaceKnowledgeSelection.drawers = new Set(project.knowledgeDomainRefs || []);
   }
   if (!state.workspaceKnowledgeSelection.topics.size && project?.knowledgeTopicRefs?.length) {
     state.workspaceKnowledgeSelection.topics = new Set(project.knowledgeTopicRefs || []);
@@ -1021,7 +1083,7 @@ function renderProjectKnowledgeTreeFromForm(project = undefined, options = {}) {
 function captureWorkspaceKnowledgeSelection() {
   const form = document.getElementById("projectForm");
   if (!form) return;
-  form.querySelectorAll("[name='knowledgeDrawerRefs'], [name='knowledgeTopicRefs']").forEach((input) => {
+  form.querySelectorAll("[name='knowledgeDomainRefs'], [name='knowledgeTopicRefs']").forEach((input) => {
     const collection = input.name === "knowledgeTopicRefs"
       ? state.workspaceKnowledgeSelection.topics
       : state.workspaceKnowledgeSelection.drawers;
@@ -1078,7 +1140,7 @@ async function saveProject(event) {
     name: form.get("name"),
     description: form.get("description"),
     agentIds: [...formNode.querySelectorAll("[name='agentIds']:checked")].map((item) => item.value),
-    knowledgeDrawerRefs: [...new Set([
+    knowledgeDomainRefs: [...new Set([
       ...selectedDrawerRefs,
       ...selectedTopicRefs.map((item) => item.split("/")[0]).filter(Boolean),
     ])],
@@ -1093,7 +1155,7 @@ async function saveProject(event) {
       })
     : await submitJson("/api/workspaces", body, false);
 
-  state.activeProjectId = (result.workspace || result.project).id;
+  state.activeProjectId = result.workspace.id;
   state.activeConversationId = null;
   state.conversations = [];
   state.messages = [];
@@ -1125,7 +1187,6 @@ async function saveAgent(event) {
     skills: parseSkills(form.get("skills")),
     mcpServers: splitLinesOrComma(form.get("mcpServers")),
     runtimeId: form.get("runtimeId") || "codex",
-    ragDocumentNames: splitLinesOrComma(form.get("ragDocumentNames")),
     rag: normalizeNodeRag(rootNode.rag),
   };
   if (type === "dag") {
@@ -1161,18 +1222,19 @@ async function sendMessage(event) {
   const task = String(form.get("message") || "").trim();
   if (!task) return;
 
+  if (state.activeRun?.projectId === project.id && state.activeRun.conversationId === state.activeConversationId) {
+    await steerActiveRun(task);
+    return;
+  }
+
   const conversation = await ensureActiveConversation(task);
+  renderActiveProject();
   const runId = crypto.randomUUID?.() || `run-${Date.now()}`;
   const payload = {
     task,
     agentId: form.get("agentId") || undefined,
     sessionId: conversation.id,
     runId,
-    dryRun: Boolean(form.get("dryRun")),
-    contextStrategy: form.get("contextStrategy") || "runtime",
-    contextSummary: form.get("contextStrategy") === "manual-summary"
-      ? String(form.get("contextSummary") || "").trim()
-      : "",
     sandboxMode: form.get("sandboxMode") || undefined,
   };
   const turnMetadata = buildTurnMetadata(project, conversation, payload);
@@ -1183,98 +1245,178 @@ async function sendMessage(event) {
   input.value = "";
   resizeComposer(input);
 
+  const assistantMessage = {
+    role: "assistant",
+    text: "正在准备执行...",
+    runId,
+    metadata: { ...turnMetadata, messageRole: "assistant", status: "preparing" },
+  };
+  state.messages.push(assistantMessage);
+  const conversationMessages = state.messages;
+  renderMessages();
+  setActiveRun(project.id, payload.runId, 0, conversation.id);
+  const handlers = createExecutionHandlers({
+    project,
+    conversationId: conversation.id,
+    messages: conversationMessages,
+    payload,
+    assistantMessage,
+    turnMetadata,
+  });
   try {
-    const assistantMessage = {
-      role: "assistant",
-      text: "正在准备执行...",
-      runId,
-      metadata: { ...turnMetadata, messageRole: "assistant", status: "preparing" },
-    };
-    state.messages.push(assistantMessage);
-    renderMessages();
-    setActiveRun(project.id, payload.runId);
-    await streamProjectExecution(project.id, payload, {
-      onPrepared(event) {
-        setActiveRun(project.id, event.request?.runId || payload.runId);
-        assistantMessage.runId = event.request?.runId || payload.runId;
-        assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
-          runId: assistantMessage.runId,
-          agentId: event.agent?.id || payload.agentId || "",
-          agentName: event.agent?.name || "",
-          runtimeId: event.request?.runtimeId || turnMetadata.runtimeId,
-          contextPolicy: event.request?.contextPolicy,
-          sandboxMode: event.request?.runtimeOptions?.sandboxMode || turnMetadata.sandboxMode || "",
-          status: payload.dryRun ? "dry-run" : "running",
-        });
-        if (event.agentRun) assistantMessage.agentRunSummary = summarizeAgentRun(event.agentRun);
-        assistantMessage.text = payload.dryRun ? "正在生成编排请求..." : "正在调用 Codex runtime...";
-        renderMessages();
-      },
-      onChunk(chunk) {
-        if (!chunk) return;
-        if (assistantMessage.text === "正在调用 Codex runtime...") assistantMessage.text = "";
-        assistantMessage.text += chunk;
-        renderMessages();
-        saveActiveConversation();
-      },
-      onDone(data) {
-        assistantMessage.text = payload.dryRun
-          ? data.result?.text || `已生成编排请求：\n\n${data.request?.message || ""}`
-          : extractAgentResponse(data);
-        assistantMessage.runId = data.agentRun?.id || assistantMessage.runId || payload.runId;
-        if (data.agentRun) assistantMessage.agentRunSummary = summarizeAgentRun(data.agentRun);
-        assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
-          runId: assistantMessage.runId,
-          status: data.agentRun?.status || "completed",
-          runtimeSession: data.result?.runtimeSession,
-          runtimeId: data.result?.runtimeId || data.request?.runtimeId || assistantMessage.metadata?.runtimeId,
-          sandboxMode: data.result?.runtimeSession?.runtimeOptions?.sandboxMode || data.request?.runtimeOptions?.sandboxMode || assistantMessage.metadata?.sandboxMode || "",
-          agentRunId: data.agentRun?.id || "",
-          agentRunStatus: data.agentRun?.status || "",
-        });
-        clearActiveRun();
-        renderMessages();
-        saveActiveConversation();
-      },
-      onDagNodeEvent(event) {
-        assistantMessage.agentRunSummary = updateRunSummaryNode(assistantMessage.agentRunSummary, event);
-        renderMessages();
-      },
-      onRuntimeEvent(event) {
-        if (event.eventType === "runtime_session_started") setActiveRun(project.id, event.runId || payload.runId);
-      },
-      onCancelled(event) {
-        assistantMessage.text = `${assistantMessage.text || ""}\n\n运行已停止。`.trim();
-        assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
-          status: "cancelled",
-          cancelledAt: new Date().toISOString(),
-          cancelEvent: event,
-        });
-        clearActiveRun();
-        renderMessages();
-        saveActiveConversation();
-      },
-    });
+    await streamProjectExecution(project.id, payload, handlers);
   } catch (error) {
-    clearActiveRun();
-    state.messages.push({
-      role: "assistant",
-      text: `执行失败：${error.message}`,
-      runId,
-      metadata: { ...turnMetadata, messageRole: "assistant", status: "failed", error: error.message },
-    });
-    await saveActiveConversation();
+    await recoverExecutionStream(project.id, payload.runId, handlers, assistantMessage, error);
   }
   renderMessages();
 }
 
-function syncContextStrategyFields() {
-  const strategy = document.getElementById("contextStrategySelect")?.value || "runtime";
-  const summary = document.getElementById("contextSummaryInput");
-  if (!summary) return;
-  summary.classList.toggle("hidden", strategy !== "manual-summary");
-  if (strategy === "manual-summary") summary.focus();
-  else summary.value = "";
+async function steerActiveRun(input) {
+  const project = getActiveProject();
+  const conversation = getActiveConversation();
+  const activeRun = state.activeRun;
+  if (!project || !conversation || !activeRun?.runId) return;
+  const steerMessage = {
+    role: "user",
+    text: input,
+    runId: activeRun.runId,
+    metadata: {
+      workspaceId: project.id,
+      conversationId: conversation.id,
+      runId: activeRun.runId,
+      messageRole: "user",
+      interactionType: "steer",
+      createdAt: new Date().toISOString(),
+    },
+  };
+  const assistantIndex = state.messages.findIndex((message) => message.role === "assistant" && message.runId === activeRun.runId);
+  if (assistantIndex === -1) state.messages.push(steerMessage);
+  else state.messages.splice(assistantIndex, 0, steerMessage);
+  const inputNode = document.getElementById("messageInput");
+  inputNode.value = "";
+  resizeComposer(inputNode);
+  renderMessages();
+  await queueConversationSave(project.id, conversation.id, state.messages, { immediate: true });
+  await request(`/api/workspaces/${encodeURIComponent(project.id)}/runs/${encodeURIComponent(activeRun.runId)}/steer`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ input }),
+  });
+}
+
+function createExecutionHandlers({ project, conversationId, messages, payload, assistantMessage, turnMetadata = {} }) {
+  const renderCurrentConversation = () => {
+    if (isConversationActive(project.id, conversationId)) renderMessages();
+  };
+  const saveConversation = (immediate = false) => queueConversationSave(project.id, conversationId, messages, { immediate });
+  return {
+    onEvent(event) {
+      if (event.sequence && isConversationActive(project.id, conversationId)) {
+        setActiveRun(project.id, payload.runId, event.sequence, conversationId);
+      }
+    },
+    onPrepared(event) {
+      assistantMessage.runId = event.request?.runId || payload.runId;
+      assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
+        runId: assistantMessage.runId,
+        agentId: event.agent?.id || payload.agentId || "",
+        agentName: event.agent?.name || "",
+        runtimeId: event.request?.runtimeId || turnMetadata.runtimeId,
+        sandboxMode: event.request?.runtimeOptions?.sandboxMode || turnMetadata.sandboxMode || "",
+        status: "running",
+      });
+      if (event.agentRun) {
+        assistantMessage.agentRunSummary = summarizeAgentRun(event.agentRun);
+        assistantMessage.agentRunSummary.status = "running";
+        assistantMessage.agentRunSummary.nodes = assistantMessage.agentRunSummary.nodes.map((node) => ({
+          ...node,
+          status: node.status === "ready" ? "running" : node.status,
+        }));
+      }
+      assistantMessage.text = "正在调用 Codex runtime...";
+      renderCurrentConversation();
+    },
+    onChunk(chunk) {
+      if (!chunk) return;
+      if (["正在调用 Codex runtime...", "连接已断开，正在恢复..."].includes(assistantMessage.text)) assistantMessage.text = "";
+      assistantMessage.text += chunk;
+      renderCurrentConversation();
+      saveConversation();
+    },
+    onDone(data) {
+      assistantMessage.text = extractAgentResponse(data);
+      assistantMessage.runId = data.agentRun?.id || assistantMessage.runId || payload.runId;
+      if (data.agentRun) assistantMessage.agentRunSummary = summarizeAgentRun(data.agentRun);
+      assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
+        runId: assistantMessage.runId,
+        status: data.agentRun?.status || "completed",
+        runtimeSession: data.result?.runtimeSession,
+        runtimeId: data.result?.runtimeId || data.request?.runtimeId || assistantMessage.metadata?.runtimeId,
+        sandboxMode: data.result?.runtimeSession?.runtimeOptions?.sandboxMode || data.request?.runtimeOptions?.sandboxMode || assistantMessage.metadata?.sandboxMode || "",
+        agentRunId: data.agentRun?.id || "",
+        agentRunStatus: data.agentRun?.status || "",
+        runtimeRequests: [],
+      });
+      if (isConversationActive(project.id, conversationId)) clearActiveRun();
+      renderCurrentConversation();
+      saveConversation(true);
+    },
+    onDagNodeEvent(event) {
+      assistantMessage.agentRunSummary = updateRunSummaryNode(assistantMessage.agentRunSummary, event);
+      renderCurrentConversation();
+    },
+    onRuntimeRequest(event) {
+      const requests = [...(assistantMessage.metadata?.runtimeRequests || [])]
+        .filter((request) => request.requestId !== event.requestId);
+      requests.push(event);
+      assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
+        status: "waiting_approval",
+        runtimeRequests: requests,
+      });
+      assistantMessage.agentRunSummary = updateRuntimeRequestSummary(assistantMessage.agentRunSummary, event, "waiting_approval");
+      renderCurrentConversation();
+      saveConversation(true);
+    },
+    onRuntimeRequestResolved(event) {
+      const requests = (assistantMessage.metadata?.runtimeRequests || [])
+        .filter((request) => request.requestId !== event.requestId);
+      assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
+        status: "running",
+        runtimeRequests: requests,
+      });
+      assistantMessage.agentRunSummary = updateRuntimeRequestSummary(assistantMessage.agentRunSummary, event, "running");
+      renderCurrentConversation();
+      saveConversation(true);
+    },
+    onCancelled(event) {
+      const currentText = assistantMessage.text && !assistantMessage.text.startsWith("正在") ? assistantMessage.text : "";
+      assistantMessage.text = `${currentText}\n\n运行已停止。`.trim();
+      assistantMessage.agentRunSummary = updateRunSummaryStatus(assistantMessage.agentRunSummary, "cancelled");
+      assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, { status: "cancelled", cancelledAt: new Date().toISOString(), runtimeRequests: [] });
+      if (isConversationActive(project.id, conversationId)) clearActiveRun();
+      renderCurrentConversation();
+      saveConversation(true);
+    },
+    onError(event) {
+      assistantMessage.text = `执行失败：${event.error || "运行中断"}`;
+      assistantMessage.agentRunSummary = updateRunSummaryStatus(assistantMessage.agentRunSummary, "failed");
+      assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
+        status: "failed",
+        error: event.error || "运行中断",
+        runtimeRequests: [],
+      });
+      if (isConversationActive(project.id, conversationId)) clearActiveRun();
+      renderCurrentConversation();
+      saveConversation(true);
+    },
+    onSnapshot(event) {
+      assistantMessage.agentRunSummary = summarizeAgentRun(event.run);
+      applyRunSnapshotToMessage(assistantMessage, event.run);
+      if (event.terminal && isConversationActive(project.id, conversationId)) clearActiveRun();
+      renderCurrentConversation();
+      saveConversation(event.terminal);
+    },
+  };
 }
 
 function buildTurnMetadata(project, conversation, payload) {
@@ -1287,11 +1429,7 @@ function buildTurnMetadata(project, conversation, payload) {
     agentId: payload.agentId || "",
     agentName: agent?.name || "",
     runtimeId: agent?.runtimeId || state.status?.wrapper?.settings?.defaultRuntimeId || "codex",
-    contextStrategy: payload.contextStrategy || "runtime",
-    contextSummary: payload.contextSummary || "",
-    contextSummaryProvided: Boolean(payload.contextSummary),
     sandboxMode: payload.sandboxMode || state.status?.wrapper?.settings?.runtimes?.codex?.sandboxMode || "",
-    dryRun: Boolean(payload.dryRun),
     createdAt: new Date().toISOString(),
   });
 }
@@ -1305,39 +1443,135 @@ function mergeMessageMetadata(current = {}, next = {}) {
 }
 
 async function streamProjectExecution(projectId, payload, handlers = {}) {
-  const response = await fetch(`/api/workspaces/${encodeURIComponent(projectId)}/execute/stream`, {
+  return openExecutionStream(`/api/workspaces/${encodeURIComponent(projectId)}/execute/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(stripEmpty(payload)),
-  });
-  if (!response.ok || !response.body) {
-    const text = await response.text();
-    const data = text ? JSON.parse(text) : {};
-    throw new Error(data.error || data.message || `请求失败：${response.status}`);
-  }
+  }, handlers, { runId: payload.runId, conversationId: payload.sessionId });
+}
 
-  const reader = response.body.getReader();
+async function streamRunEvents(projectId, runId, handlers, { after = 0, conversationId = "" } = {}) {
+  const query = after ? `?after=${encodeURIComponent(after)}` : "";
+  return openExecutionStream(
+    `/api/workspaces/${encodeURIComponent(projectId)}/runs/${encodeURIComponent(runId)}/events${query}`,
+    {},
+    handlers,
+    { runId, conversationId }
+  );
+}
+
+async function openExecutionStream(url, options, handlers, streamIdentity) {
+  disconnectExecutionStream();
+  const controller = new AbortController();
+  const stream = { ...streamIdentity, controller };
+  state.executionStream = stream;
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    if (!response.ok || !response.body) {
+      const text = await response.text();
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; } catch { data = { error: text }; }
+      const error = new Error(data.error || data.message || `请求失败：${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    return await consumeExecutionStream(response.body, handlers);
+  } finally {
+    if (state.executionStream === stream) state.executionStream = null;
+  }
+}
+
+async function consumeExecutionStream(body, handlers = {}) {
+  const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let terminal = false;
   while (true) {
     const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() || "";
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const parts = buffer.split(/\r?\n\r?\n/);
+    buffer = done ? "" : parts.pop() || "";
     for (const part of parts) {
       const event = parseSseEvent(part);
       if (!event) continue;
+      handlers.onEvent?.(event);
       if (event.type === "prepared") handlers.onPrepared?.(event);
       else if (event.type === "stdout") handlers.onChunk?.(event.text, event);
       else if (event.type === "stderr") handlers.onStatus?.(event.text, event);
       else if (event.type === "runtime_event") handlers.onRuntimeEvent?.(event);
-      else if (event.type === "dag_node_started" || event.type === "dag_node_completed" || event.type === "dag_node_waiting") handlers.onDagNodeEvent?.(event);
+      else if (event.type === "runtime_request") handlers.onRuntimeRequest?.(event);
+      else if (event.type === "runtime_request_resolved") handlers.onRuntimeRequestResolved?.(event);
+      else if (["dag_node_started", "dag_node_completed", "dag_node_waiting"].includes(event.type)) handlers.onDagNodeEvent?.(event);
+      else if (event.type === "run_snapshot") handlers.onSnapshot?.(event);
       else if (event.type === "cancelled") handlers.onCancelled?.(event);
       else if (event.type === "done") handlers.onDone?.(event);
-      else if (event.type === "error") throw new Error(event.error || "执行失败");
+      else if (event.type === "error") handlers.onError?.(event);
+      if (["done", "cancelled", "error"].includes(event.type) || (event.type === "run_snapshot" && event.terminal)) terminal = true;
     }
+    if (done) break;
   }
+  if (!terminal) throw new Error("运行事件连接已中断。");
+  return { terminal: true };
+}
+
+async function recoverExecutionStream(projectId, runId, handlers, assistantMessage, initialError) {
+  if (initialError?.name === "AbortError") return;
+  if (initialError?.status >= 400 && initialError.status < 500 && ![409, 429].includes(initialError.status)) {
+    handlers.onError?.({ error: initialError.message, status: initialError.status });
+    return;
+  }
+  if (state.reconnectingRunId === runId) return;
+  state.reconnectingRunId = runId;
+  assistantMessage.text = assistantMessage.text && assistantMessage.text !== "正在准备执行..."
+    ? assistantMessage.text
+    : "连接已断开，正在恢复...";
+  handlers.onStatus?.("连接已断开，正在恢复...", { error: initialError?.message || "" });
+  if (isExecutionVisible(projectId, runId)) renderMessages();
+  let attempts = 0;
+  let notFoundAttempts = 0;
+  try {
+    while (isExecutionVisible(projectId, runId)) {
+      try {
+        await streamRunEvents(projectId, runId, handlers, {
+          after: state.activeRun?.runId === runId ? state.activeRun.sequence || 0 : 0,
+          conversationId: state.activeRun?.conversationId || "",
+        });
+        return;
+      } catch (error) {
+        if (error.name === "AbortError" || !isExecutionVisible(projectId, runId)) return;
+        attempts += 1;
+        notFoundAttempts = error.status === 404 ? notFoundAttempts + 1 : 0;
+        if (notFoundAttempts >= 3) {
+          handlers.onError?.({ error: "运行未创建或已不可恢复。", status: 404 });
+          return;
+        }
+        await delay(Math.min(5000, 300 * (2 ** Math.min(attempts, 4))));
+      }
+    }
+  } finally {
+    if (state.reconnectingRunId === runId) state.reconnectingRunId = "";
+  }
+}
+
+function restoreActiveExecution(projectId, run) {
+  if (!run?.id || state.reconnectingRunId === run.id || state.executionStream?.runId === run.id) return;
+  let assistantMessage = state.messages.find((message) => message.role === "assistant" && message.runId === run.id);
+  if (!assistantMessage) {
+    assistantMessage = { role: "assistant", text: "连接已断开，正在恢复...", runId: run.id, metadata: { status: run.status } };
+    state.messages.push(assistantMessage);
+  }
+  assistantMessage.agentRunSummary = summarizeAgentRun(run);
+  applyRunSnapshotToMessage(assistantMessage, run);
+  const conversationId = run.rootSessionId || getActiveConversation()?.id || "";
+  setActiveRun(projectId, run.id, 0, conversationId);
+  const handlers = createExecutionHandlers({
+    project: getActiveProject(),
+    conversationId,
+    messages: state.messages,
+    payload: { runId: run.id, sessionId: conversationId, agentId: run.agentId || undefined },
+    assistantMessage,
+  });
+  void recoverExecutionStream(projectId, run.id, handlers, assistantMessage);
 }
 
 async function cancelActiveRun() {
@@ -1349,20 +1583,362 @@ async function cancelActiveRun() {
   toast("已请求停止当前运行。");
 }
 
-function setActiveRun(projectId, runId) {
-  state.activeRun = { projectId, runId };
+function setActiveRun(projectId, runId, sequence = 0, conversationId = "") {
+  const previousSequence = state.activeRun?.projectId === projectId && state.activeRun?.runId === runId
+    ? state.activeRun.sequence || 0
+    : 0;
+  state.activeRun = { projectId, runId, conversationId, sequence: Math.max(previousSequence, Number(sequence) || 0) };
   document.getElementById("stopExecutionBtn")?.classList.remove("hidden");
+  const input = document.getElementById("messageInput");
+  if (input) input.placeholder = "向当前运行补充指令";
 }
 
 function clearActiveRun() {
   state.activeRun = null;
   document.getElementById("stopExecutionBtn")?.classList.add("hidden");
+  const project = getActiveProject();
+  const input = document.getElementById("messageInput");
+  if (input && project) input.placeholder = `向「${project.name}」提问；可选加载 Agent`;
+}
+
+function disconnectExecutionStream() {
+  state.executionStream?.controller.abort();
+  state.executionStream = null;
+}
+
+function isExecutionVisible(projectId, runId) {
+  return state.activeRun?.projectId === projectId && state.activeRun?.runId === runId;
+}
+
+function isConversationActive(projectId, conversationId) {
+  return state.activeProjectId === projectId && state.activeConversationId === conversationId;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function hydrateMessageFromRun(message, run) {
+  const hydrated = { ...message, agentRunSummary: summarizeAgentRun(run) };
+  applyRunSnapshotToMessage(hydrated, run);
+  return hydrated;
+}
+
+function updateRunSummaryStatus(summary, status) {
+  if (!summary) return summary;
+  return {
+    ...summary,
+    status,
+    rootCoordinator: summary.rootCoordinator && ["running", "pending", "waiting_approval"].includes(summary.rootCoordinator.status)
+      ? { ...summary.rootCoordinator, status }
+      : summary.rootCoordinator,
+    nodes: (summary.nodes || []).map((node) =>
+      ["running", "ready", "pending", "waiting_approval"].includes(node.status) ? { ...node, status } : node
+    ),
+  };
+}
+
+function updateRuntimeRequestSummary(summary, event, status) {
+  if (!summary) return summary;
+  if (event.runtimeScope === "coordinator") {
+    return {
+      ...summary,
+      status,
+      rootCoordinator: summary.rootCoordinator ? { ...summary.rootCoordinator, status } : summary.rootCoordinator,
+    };
+  }
+  if (event.nodeRunId) {
+    return {
+      ...summary,
+      status,
+      nodes: (summary.nodes || []).map((node) => node.id === event.nodeRunId ? { ...node, status } : node),
+    };
+  }
+  return updateRunSummaryStatus(summary, status);
+}
+
+function applyRunSnapshotToMessage(message, run) {
+  if (!run) return message;
+  if (run.status === "completed") {
+    message.text = extractAgentResponse({ result: run.output });
+  } else if (run.status === "failed") {
+    message.text = `执行失败：${run.error?.message || "运行中断"}`;
+  } else if (run.status === "cancelled") {
+    const currentText = message.text && !message.text.startsWith("正在") ? message.text : "";
+    message.text = currentText.includes("运行已停止") ? currentText : `${currentText}\n\n运行已停止。`.trim();
+  } else if (run.status === "waiting_user" && run.output?.question) {
+    message.text = run.output.question;
+  }
+  message.metadata = mergeMessageMetadata(message.metadata, {
+    status: run.status,
+    error: run.error?.message || "",
+    agentRunId: run.id,
+    agentRunStatus: run.status,
+    runtimeRequests: ["completed", "failed", "cancelled"].includes(run.status)
+      ? []
+      : message.metadata?.runtimeRequests || [],
+  });
+  return message;
+}
+
+function queueConversationSave(projectId, conversationId, messages, { immediate = false } = {}) {
+  if (!projectId || !conversationId) return Promise.resolve();
+  const key = `${projectId}:${conversationId}`;
+  const existingTimer = state.conversationSaveTimers.get(key);
+  if (existingTimer) clearTimeout(existingTimer);
+  const save = () => {
+    state.conversationSaveTimers.delete(key);
+    return persistConversationMessages(projectId, conversationId, messages);
+  };
+  if (immediate) return save();
+  const timer = setTimeout(save, 180);
+  state.conversationSaveTimers.set(key, timer);
+  return Promise.resolve();
+}
+
+function persistConversationMessages(projectId, conversationId, messages) {
+  const key = `${projectId}:${conversationId}`;
+  const snapshot = JSON.parse(JSON.stringify(messages || []));
+  const title = deriveConversationTitleFromMessages(snapshot) || "新对话";
+  const previous = state.conversationSaveChains.get(key) || Promise.resolve();
+  const next = previous.catch(() => {}).then(async () => {
+    const { conversation } = await request(
+      `/api/workspaces/${encodeURIComponent(projectId)}/conversations/${encodeURIComponent(conversationId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, messages: snapshot }),
+      }
+    );
+    state.conversations = [conversation].concat(state.conversations.filter((item) => item.id !== conversation.id));
+    if (isConversationActive(projectId, conversationId)) renderProjectList();
+  });
+  state.conversationSaveChains.set(key, next);
+  void next.finally(() => {
+    if (state.conversationSaveChains.get(key) === next) state.conversationSaveChains.delete(key);
+  }).catch(() => {});
+  return next;
 }
 
 function parseSseEvent(part) {
   const line = part.split("\n").find((item) => item.startsWith("data: "));
   if (!line) return null;
   return JSON.parse(line.slice(6));
+}
+
+function renderRuntimeRequests(message) {
+  const requests = message.metadata?.runtimeRequests || [];
+  if (!requests.length) return "";
+  return `<div class="runtimeRequestList">${requests.map((request) => {
+    const params = request.params || {};
+    if (request.requestType === "item/tool/requestUserInput") return renderRuntimeUserInput(request);
+    if (request.requestType === "item/permissions/requestApproval") return renderRuntimePermissionRequest(request);
+    if (request.requestType === "mcpServer/elicitation/request") return renderRuntimeMcpRequest(request);
+    const isFileChange = request.requestType === "item/fileChange/requestApproval";
+    const title = isFileChange ? "Codex 请求修改文件" : "Codex 请求执行命令";
+    const detail = params.command || params.reason || params.grantRoot || request.requestType;
+    return `
+      <section class="runtimeRequest">
+        <strong>${escapeHtml(title)}</strong>
+        <code>${escapeHtml(detail || "等待确认")}</code>
+        ${params.cwd ? `<small>${escapeHtml(params.cwd)}</small>` : ""}
+        <div class="runtimeRequestActions">
+          <button type="button" data-runtime-request-decision="accept" data-runtime-run-id="${escapeHtml(request.runId)}" data-runtime-request-id="${escapeHtml(request.requestId)}">允许一次</button>
+          <button type="button" data-runtime-request-decision="acceptForSession" data-runtime-run-id="${escapeHtml(request.runId)}" data-runtime-request-id="${escapeHtml(request.requestId)}">本次会话允许</button>
+          <button class="danger" type="button" data-runtime-request-decision="decline" data-runtime-run-id="${escapeHtml(request.runId)}" data-runtime-request-id="${escapeHtml(request.requestId)}">拒绝</button>
+        </div>
+      </section>
+    `;
+  }).join("")}</div>`;
+}
+
+function renderRuntimeUserInput(request) {
+  const questions = request.params?.questions || [];
+  return `
+    <form class="runtimeRequest" data-runtime-input-form data-runtime-run-id="${escapeHtml(request.runId)}" data-runtime-request-id="${escapeHtml(request.requestId)}">
+      <strong>Codex 需要补充信息</strong>
+      ${questions.map((question) => {
+        const listId = `runtime-options-${request.requestId}-${question.id}`.replace(/[^\w-]/g, "-");
+        return `
+          <label>${escapeHtml(question.header || question.question)}
+            <span>${escapeHtml(question.question)}</span>
+            <input name="${escapeHtml(question.id)}" ${question.isSecret ? "type=\"password\"" : "type=\"text\""} required list="${escapeHtml(listId)}" />
+            ${question.options?.length ? `<datalist id="${escapeHtml(listId)}">${question.options.map((option) => `<option value="${escapeHtml(option.label)}">${escapeHtml(option.description || "")}</option>`).join("")}</datalist>` : ""}
+          </label>
+        `;
+      }).join("")}
+      <div class="runtimeRequestActions"><button type="submit">提交</button></div>
+    </form>
+  `;
+}
+
+function renderRuntimePermissionRequest(request) {
+  const params = request.params || {};
+  return `
+    <section class="runtimeRequest">
+      <strong>Codex 请求额外权限</strong>
+      <code>${escapeHtml(params.reason || JSON.stringify(params.permissions || {}))}</code>
+      <div class="runtimeRequestActions">
+        <button type="button" data-runtime-request-decision="turn" data-runtime-response-kind="permissions" data-runtime-run-id="${escapeHtml(request.runId)}" data-runtime-request-id="${escapeHtml(request.requestId)}">本轮允许</button>
+        <button type="button" data-runtime-request-decision="session" data-runtime-response-kind="permissions" data-runtime-permissions="${escapeHtml(JSON.stringify(params.permissions || {}))}" data-runtime-run-id="${escapeHtml(request.runId)}" data-runtime-request-id="${escapeHtml(request.requestId)}">本次会话允许</button>
+      </div>
+    </section>
+  `;
+}
+
+function renderRuntimeMcpRequest(request) {
+  const params = request.params || {};
+  const schema = params.requestedSchema || {};
+  const fields = params.mode === "form"
+    ? Object.entries(schema.properties || {}).map(([name, property]) =>
+        renderMcpSchemaField(name, property || {}, schema.required?.includes(name))
+      ).join("")
+    : params.mode === "openai/form"
+      ? `<label>表单结果 JSON<textarea name="__content" rows="4" required>{}</textarea></label>`
+      : "";
+  const url = safeExternalUrl(params.url);
+  return `
+    <form class="runtimeRequest" data-runtime-mcp-form data-runtime-mode="${escapeHtml(params.mode || "form")}" data-runtime-run-id="${escapeHtml(request.runId)}" data-runtime-request-id="${escapeHtml(request.requestId)}">
+      <strong>${escapeHtml(params.serverName || "MCP")} 请求用户确认</strong>
+      <code>${escapeHtml(params.message || params.url || request.requestType)}</code>
+      ${url ? `<a class="runtimeRequestLink" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">打开请求页面</a>` : ""}
+      ${fields}
+      <div class="runtimeRequestActions">
+        <button type="submit">${params.mode === "url" ? "已完成，继续" : "提交并继续"}</button>
+        <button class="danger" type="button" data-runtime-request-decision="decline" data-runtime-response-kind="mcp" data-runtime-run-id="${escapeHtml(request.runId)}" data-runtime-request-id="${escapeHtml(request.requestId)}">拒绝</button>
+        <button type="button" data-runtime-request-decision="cancel" data-runtime-response-kind="mcp" data-runtime-run-id="${escapeHtml(request.runId)}" data-runtime-request-id="${escapeHtml(request.requestId)}">取消</button>
+      </div>
+    </form>
+  `;
+}
+
+function renderMcpSchemaField(name, property, required) {
+  const label = escapeHtml(property.title || name);
+  const description = property.description ? `<span>${escapeHtml(property.description)}</span>` : "";
+  const requiredAttribute = required ? "required" : "";
+  const options = Array.isArray(property.oneOf)
+    ? property.oneOf.map((item) => ({ value: item.const, label: item.title || item.const }))
+    : Array.isArray(property.enum)
+      ? property.enum.map((value, index) => ({ value, label: property.enumNames?.[index] || value }))
+      : [];
+  if (property.type === "boolean") {
+    return `<label class="runtimeCheckbox"><input name="${escapeHtml(name)}" type="checkbox" ${property.default ? "checked" : ""} /><span>${label}${description}</span></label>`;
+  }
+  if (property.type === "array") {
+    const itemOptions = Array.isArray(property.items?.anyOf)
+      ? property.items.anyOf.map((item) => ({ value: item.const, label: item.title || item.const }))
+      : (property.items?.enum || []).map((value) => ({ value, label: value }));
+    return `<label>${label}${description}<select name="${escapeHtml(name)}" multiple ${requiredAttribute}>${itemOptions.map((option) => `<option value="${escapeHtml(option.value)}" ${(property.default || []).includes(option.value) ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></label>`;
+  }
+  if (options.length) {
+    return `<label>${label}${description}<select name="${escapeHtml(name)}" ${requiredAttribute}><option value="">请选择</option>${options.map((option) => `<option value="${escapeHtml(option.value)}" ${property.default === option.value ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></label>`;
+  }
+  const type = property.type === "number" || property.type === "integer"
+    ? "number"
+    : ["email", "date", "datetime-local"].includes(property.format) ? property.format : "text";
+  const step = property.type === "number" ? "any" : property.type === "integer" ? "1" : "";
+  return `<label>${label}${description}<input name="${escapeHtml(name)}" type="${type}" ${step ? `step="${step}"` : ""} ${property.minimum !== undefined ? `min="${escapeHtml(property.minimum)}"` : ""} ${property.maximum !== undefined ? `max="${escapeHtml(property.maximum)}"` : ""} ${property.minLength !== undefined ? `minlength="${escapeHtml(property.minLength)}"` : ""} ${property.maxLength !== undefined ? `maxlength="${escapeHtml(property.maxLength)}"` : ""} value="${escapeHtml(property.default ?? "")}" ${requiredAttribute} /></label>`;
+}
+
+async function resolveRuntimeApproval(button) {
+  button.disabled = true;
+  try {
+    let result = { decision: button.dataset.runtimeRequestDecision };
+    if (button.dataset.runtimeResponseKind === "permissions") {
+      const requestEntry = findRuntimeRequest(button.dataset.runtimeRunId, button.dataset.runtimeRequestId);
+      result = { permissions: requestEntry?.params?.permissions || {}, scope: button.dataset.runtimeRequestDecision };
+    } else if (button.dataset.runtimeResponseKind === "mcp") {
+      result = { action: button.dataset.runtimeRequestDecision, content: null, _meta: null };
+    }
+    const response = await request(
+      `/api/runtime-runs/${encodeURIComponent(button.dataset.runtimeRunId)}/requests/${encodeURIComponent(button.dataset.runtimeRequestId)}/resolve`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ result }),
+      }
+    );
+    if (!response.resolved) throw new Error("该审批请求已失效。");
+  } catch (error) {
+    button.disabled = false;
+    throw error;
+  }
+}
+
+async function submitRuntimeMcpInput(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const requestEntry = findRuntimeRequest(form.dataset.runtimeRunId, form.dataset.runtimeRequestId);
+  const schema = requestEntry?.params?.requestedSchema || {};
+  const values = new FormData(form);
+  let content = null;
+  if (form.dataset.runtimeMode === "openai/form") {
+    content = JSON.parse(String(values.get("__content") || "{}"));
+  } else if (form.dataset.runtimeMode === "form") {
+    content = {};
+    for (const [name, property] of Object.entries(schema.properties || {})) {
+      if (property.type === "boolean") content[name] = values.has(name);
+      else if (property.type === "array") content[name] = values.getAll(name).map(String);
+      else if (values.has(name)) {
+        const value = String(values.get(name));
+        content[name] = property.type === "number" || property.type === "integer" ? Number(value) : value;
+      }
+    }
+  }
+  const submit = form.querySelector("button[type='submit']");
+  submit.disabled = true;
+  try {
+    const result = await request(
+      `/api/runtime-runs/${encodeURIComponent(form.dataset.runtimeRunId)}/requests/${encodeURIComponent(form.dataset.runtimeRequestId)}/resolve`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ result: { action: "accept", content, _meta: null } }),
+      }
+    );
+    if (!result.resolved) throw new Error("该 MCP 请求已失效。");
+  } catch (error) {
+    submit.disabled = false;
+    throw error;
+  }
+}
+
+function findRuntimeRequest(runId, requestId) {
+  return state.messages
+    .flatMap((message) => message.metadata?.runtimeRequests || [])
+    .find((item) => item.runId === runId && item.requestId === requestId);
+}
+
+function safeExternalUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return ["http:", "https:"].includes(url.protocol) ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
+async function submitRuntimeUserInput(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const values = new FormData(form);
+  const answers = Object.fromEntries([...values.entries()].map(([id, value]) => [id, { answers: [String(value)] }]));
+  const submit = form.querySelector("button[type='submit']");
+  submit.disabled = true;
+  try {
+    const result = await request(
+      `/api/runtime-runs/${encodeURIComponent(form.dataset.runtimeRunId)}/requests/${encodeURIComponent(form.dataset.runtimeRequestId)}/resolve`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ result: { answers } }),
+      }
+    );
+    if (!result.resolved) throw new Error("该输入请求已失效。");
+  } catch (error) {
+    submit.disabled = false;
+    throw error;
+  }
 }
 
 function resizeComposer(input) {
@@ -1380,7 +1956,7 @@ async function uploadTextToProject(event) {
     relativeDir,
     title: form.get("title"),
     textContent: form.get("textContent"),
-    metadata: project ? { projectId: project.id } : {},
+    metadata: project ? { workspaceId: project.id } : {},
   });
   formNode.reset();
   await Promise.allSettled([loadProjects(), loadKnowledge()]);
@@ -1401,11 +1977,11 @@ function openProjectForm(project = undefined) {
   }
   renderProjectAgentPicker(active?.agentIds || []);
   state.workspaceKnowledgeSelection = {
-    drawers: new Set(active?.knowledgeDrawerRefs || []),
+    drawers: new Set(active?.knowledgeDomainRefs || []),
     topics: new Set(active?.knowledgeTopicRefs || []),
   };
   document.getElementById("projectKnowledgeFilter").value = "";
-  renderProjectKnowledgeTree(active?.knowledgeDrawerRefs || [], active?.knowledgeTopicRefs || []);
+  renderProjectKnowledgeTree(active?.knowledgeDomainRefs || [], active?.knowledgeTopicRefs || []);
   setDrawerOpen(true);
 }
 
@@ -1446,7 +2022,6 @@ function createAgentDraft(agent = undefined) {
     skills: (agent?.skills || []).map(formatSkillLine).join("\n"),
     mcpServers: (agent?.mcpServers || []).join("\n"),
     runtimeId: agent?.runtimeId || "codex",
-    ragDocumentNames: (agent?.explicitRagDocumentNames || agent?.ragDocumentNames || []).join("\n"),
     rag: normalizeNodeRag(agent?.rag),
     maxDecisions: agent?.executionPolicy?.maxDecisions || 50,
     nodes,
@@ -1494,7 +2069,6 @@ function renderAgentEditor(draft) {
       <textarea name="systemPrompt" class="hidden">${escapeHtml(draft.systemPrompt)}</textarea>
       <textarea name="skills" class="hidden">${escapeHtml(draft.skills)}</textarea>
       <textarea name="mcpServers" class="hidden">${escapeHtml(draft.mcpServers)}</textarea>
-      <textarea name="ragDocumentNames" class="hidden">${escapeHtml(draft.ragDocumentNames)}</textarea>
 
       <div class="agentEditorMeta">
         <label>名称 <input name="name" required placeholder="例如：文档审查 Agent" value="${escapeHtml(draft.name)}" /></label>
@@ -1614,7 +2188,7 @@ function renderDagBuilder(nodes = [], edges = []) {
           <small>${escapeHtml(node.id)}</small>
           ${node.description ? `<p>${escapeHtml(node.description)}</p>` : ""}
           <div class="dagNodeIO">
-            <span>结果处置: ${node.transitionInstruction || node.routingInstruction ? "已配置" : "默认处理"}</span>
+            <span>结果处置: ${node.transitionInstruction ? "已配置" : "默认处理"}</span>
             <span>RAG: ${normalizeNodeRag(node.rag).enabled ? `启用 · Top ${normalizeNodeRag(node.rag).topN}` : "未启用"}</span>
             <span>入: ${edgeByTarget.get(node.id)?.map((edge) => edge.from).join(", ") || (node.id === rootId ? "任务输入" : "未连接")}</span>
             <span>出: ${edgeBySource.get(node.id)?.map((edge) => edge.to).join(", ") || "终端输出"}</span>
@@ -1709,7 +2283,7 @@ function loadDagNodeIntoInspector(node) {
   document.getElementById("dagNodeResultApprovalField").classList.toggle("hidden", node.id === "root");
   document.getElementById("dagNodeDescriptionInput").value = node.description || "";
   document.getElementById("dagNodePromptInput").value = node.systemPrompt || "";
-  document.getElementById("dagNodeTransitionInput").value = node.transitionInstruction || node.routingInstruction || "";
+  document.getElementById("dagNodeTransitionInput").value = node.transitionInstruction || "";
   document.getElementById("removeDagNodeBtn").disabled = node.id === "root";
   syncDagNodeRagFieldState();
   renderDagConnectionSummary(node.id || "root");
@@ -1940,9 +2514,7 @@ function nextDagNodeId(nodes) {
 
 function normalizeNodeResultApproval(node = {}) {
   if (["manual", "auto", "none"].includes(node.resultApprovalPolicy)) return node.resultApprovalPolicy;
-  if (["manual", "auto", "none"].includes(node.approvalPolicy)) return node.approvalPolicy;
-  if (["manual", "auto", "none"].includes(node.approval)) return node.approval;
-  return node.kind === "wait" ? "manual" : "none";
+  return "none";
 }
 
 function normalizeNodeRuntimeApproval(node = {}) {
@@ -2425,7 +2997,7 @@ function updateRunSummaryNode(summary, event) {
   else nodes[index] = updated;
   return {
     ...summary,
-    status: nodes.some((node) => ["waiting", "waiting_approval"].includes(node.status))
+    status: nodes.some((node) => node.status === "waiting_approval")
       ? "waiting_approval"
       : event.type === "dag_node_completed" && nodes.every((node) => node.status === "completed")
         ? "completed"
@@ -2456,7 +3028,7 @@ function renderAgentRunSummary(summary, messageRunId = "") {
         ` : ""}
         ${nodes.map((node) => `
           <div class="runNode ${escapeHtml(node.status || "pending")}">
-            <span>${escapeHtml(node.nodeId || "node")}${["waiting", "waiting_approval"].includes(node.status) ? " · 待审批" : ""}</span>
+            <span>${escapeHtml(node.nodeId || "node")}${node.status === "waiting_approval" ? " · 待审批" : ""}</span>
             <small>${escapeHtml(node.status || "pending")}${node.runtimeSessionId ? ` · ${escapeHtml(node.runtimeSessionId.slice(0, 8))}` : ""}</small>
           </div>
         `).join("")}
@@ -2570,7 +3142,7 @@ function renderKnowledgeNode(item, selectedDomains, selectedTopics, depth) {
     ? `<div class="knowledgeChildren">${topicChildren.map((child) => renderKnowledgeNode(child, selectedDomains, selectedTopics, depth + 1)).join("")}</div>`
     : "";
   const isSelectable = isDomain || isTopic;
-  const inputName = isTopic ? "knowledgeTopicRefs" : "knowledgeDrawerRefs";
+  const inputName = isTopic ? "knowledgeTopicRefs" : "knowledgeDomainRefs";
   const label = isTopic ? "主题" : "知识库";
   return `
     <label class="knowledgeNode ${item.type}" style="--depth:${indent}px">
@@ -2624,7 +3196,85 @@ function kv(entries) {
 }
 
 function formatMessage(value) {
-  return escapeHtml(value).replace(/\n/g, "<br>");
+  const parsed = marked.parse(String(value ?? ""));
+  const sanitized = DOMPurify.sanitize(parsed, {
+    USE_PROFILES: { html: true },
+  });
+  const template = document.createElement("template");
+  template.innerHTML = sanitized;
+  template.content.querySelectorAll("a[href]").forEach((link) => {
+    const rawHref = link.getAttribute("href");
+    const externalHref = safeExternalUrl(rawHref);
+    const workspaceHref = externalHref ? "" : safeWorkspaceFileUrl(rawHref);
+    if (externalHref || workspaceHref) {
+      link.setAttribute("href", externalHref || workspaceHref);
+      link.setAttribute("target", "_blank");
+      link.setAttribute("rel", "noreferrer");
+      if (workspaceHref) {
+        link.classList.add("workspaceFileLink");
+        link.setAttribute("title", "打开工作区文件");
+      }
+    } else link.removeAttribute("href");
+  });
+  template.content.querySelectorAll("pre").forEach((pre) => {
+    const code = pre.querySelector("code");
+    const language = code?.className.match(/(?:^|\s)language-([^\s]+)/)?.[1] || "代码";
+    const wrapper = document.createElement("div");
+    wrapper.className = "messageCodeBlock";
+    const header = document.createElement("div");
+    header.className = "messageCodeHeader";
+    const label = document.createElement("span");
+    label.textContent = language;
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.dataset.copyCode = "";
+    copy.textContent = "复制";
+    header.append(label, copy);
+    pre.replaceWith(wrapper);
+    wrapper.append(header, pre);
+  });
+  return template.innerHTML;
+}
+
+function safeWorkspaceFileUrl(value) {
+  const project = getActiveProject();
+  const href = String(value || "").trim();
+  if (!project || !href || href.startsWith("#") || href.startsWith("//")) return "";
+  if (/^[a-z][a-z\d+.-]*:/i.test(href)) return "";
+  const fragmentIndex = href.indexOf("#");
+  const pathValue = fragmentIndex === -1 ? href : href.slice(0, fragmentIndex);
+  if (!pathValue) return "";
+  let decodedPath;
+  try {
+    decodedPath = decodeURIComponent(pathValue);
+  } catch {
+    return "";
+  }
+  const fragment = fragmentIndex === -1 ? "" : href.slice(fragmentIndex + 1);
+  const fileUrl = `/workspace-files/${encodeURIComponent(project.id)}?path=${encodeURIComponent(decodedPath)}`;
+  return fragment ? `${fileUrl}#${encodeURIComponent(fragment)}` : fileUrl;
+}
+
+async function copyRenderedCode(button) {
+  const code = button.closest(".messageCodeBlock")?.querySelector("code")?.textContent || "";
+  if (!code) return;
+  try {
+    await navigator.clipboard.writeText(code);
+  } catch {
+    const input = document.createElement("textarea");
+    input.value = code;
+    input.setAttribute("readonly", "");
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.append(input);
+    input.select();
+    document.execCommand("copy");
+    input.remove();
+  }
+  button.textContent = "已复制";
+  setTimeout(() => {
+    if (button.isConnected) button.textContent = "复制";
+  }, 1200);
 }
 
 function settingsRestartText(requiresRestart = {}) {

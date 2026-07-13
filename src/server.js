@@ -2,6 +2,7 @@ import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { randomUUID } from "node:crypto";
 import multer from "multer";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -14,9 +15,16 @@ import { ResourceManager } from "./resource-manager.js";
 import { AppSettingsService } from "./app-settings.js";
 import { createRagProvider } from "./rag-provider.js";
 import { RuntimeRegistry } from "./runtime-adapter.js";
+import { ExecutionManager } from "./execution-manager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "..", "public");
+const nodeModulesDir = path.join(__dirname, "..", "node_modules");
+const inlineTextExtensions = new Set([
+  ".c", ".cc", ".conf", ".cpp", ".css", ".csv", ".go", ".h", ".hpp", ".html",
+  ".ini", ".java", ".js", ".json", ".jsx", ".log", ".md", ".mjs", ".py", ".rb",
+  ".rs", ".sh", ".sql", ".toml", ".ts", ".tsx", ".txt", ".xml", ".yaml", ".yml",
+]);
 const upload = multer({ storage: multer.memoryStorage() });
 const app = express();
 const client = createAnythingLlmClient();
@@ -33,9 +41,14 @@ const agentOrchestrator = new AgentOrchestrator({
   settings,
 });
 const mcpSessions = new Map();
+const executionManager = new ExecutionManager();
+
+await agentOrchestrator.reconcileInterruptedRuns();
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
+app.use("/vendor/marked", express.static(path.join(nodeModulesDir, "marked", "lib")));
+app.use("/vendor/dompurify", express.static(path.join(nodeModulesDir, "dompurify", "dist")));
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
@@ -84,12 +97,8 @@ app.get("/api/knowledge", asyncHandler(async (_req, res) => {
   res.json(await resourceManager.listKnowledgeTree());
 }));
 
-app.post("/api/knowledge/folders", asyncHandler(async (req, res) => {
-  res.json(await resourceManager.createKnowledgeFolder(req.body.path || "", req.body.metadata || req.body));
-}));
-
-app.patch("/api/knowledge/folders", asyncHandler(async (req, res) => {
-  res.json(await resourceManager.updateKnowledgeDrawer(req.body));
+app.patch("/api/knowledge/nodes", asyncHandler(async (req, res) => {
+  res.json(await resourceManager.updateKnowledgeNode(req.body));
 }));
 
 app.post("/api/knowledge/domains", asyncHandler(async (req, res) => {
@@ -118,12 +127,8 @@ app.post("/api/knowledge/upload", upload.single("file"), asyncHandler(async (req
   }));
 }));
 
-app.get("/api/projects", asyncHandler(async (_req, res) => {
-  res.json(await agentOrchestrator.listProjects());
-}));
-
 app.get("/api/workspaces", asyncHandler(async (_req, res) => {
-  res.json(await agentOrchestrator.listProjects());
+  res.json(await agentOrchestrator.listWorkspaces());
 }));
 
 app.get("/api/agents", asyncHandler(async (_req, res) => {
@@ -150,114 +155,105 @@ app.delete("/api/agents/:id", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.deleteAgent(req.params.id));
 }));
 
-app.post("/api/projects", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.createProject(req.body));
-}));
-
 app.post("/api/workspaces", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.createProject(req.body));
-}));
-
-app.get("/api/projects/:id", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.getProject(req.params.id));
+  res.json(await agentOrchestrator.createWorkspace(req.body));
 }));
 
 app.get("/api/workspaces/:id", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.getProject(req.params.id));
+  res.json(await agentOrchestrator.getWorkspace(req.params.id));
 }));
 
-app.get("/api/projects/:id/knowledge-index", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.getProjectKnowledgeIndex(req.params.id));
+app.get("/workspace-files/:id", asyncHandler(async (req, res) => {
+  const { workspace } = await agentOrchestrator.getWorkspace(req.params.id);
+  const workspaceRoot = path.resolve(workspace.localWorkspacePath || "");
+  const requestedPath = String(req.query.path || "").trim();
+  if (!workspace.localWorkspacePath || !requestedPath) {
+    res.status(400).json({ error: "Workspace file path is required." });
+    return;
+  }
+
+  const filePath = path.resolve(workspaceRoot, requestedPath);
+  const relativePath = path.relative(workspaceRoot, filePath);
+  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    res.status(403).json({ error: "Workspace file path is outside the workspace." });
+    return;
+  }
+
+  let file;
+  let realWorkspaceRoot;
+  let realFilePath;
+  try {
+    [realWorkspaceRoot, realFilePath] = await Promise.all([
+      fs.realpath(workspaceRoot),
+      fs.realpath(filePath),
+    ]);
+    const realRelativePath = path.relative(realWorkspaceRoot, realFilePath);
+    if (realRelativePath.startsWith("..") || path.isAbsolute(realRelativePath)) {
+      res.status(403).json({ error: "Workspace file path is outside the workspace." });
+      return;
+    }
+    file = await fs.stat(realFilePath);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    res.status(404).json({ error: "Workspace file was not found." });
+    return;
+  }
+  if (!file.isFile()) {
+    res.status(400).json({ error: "Workspace path does not reference a file." });
+    return;
+  }
+  if (inlineTextExtensions.has(path.extname(realFilePath).toLowerCase())) {
+    const contents = await fs.readFile(realFilePath, "utf8");
+    res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'");
+    res.type("html").send(renderWorkspaceFile(contents, path.basename(realFilePath)));
+    return;
+  }
+  res.setHeader("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(path.basename(filePath))}`);
+  res.sendFile(realFilePath);
 }));
 
 app.get("/api/workspaces/:id/knowledge-index", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.getProjectKnowledgeIndex(req.params.id));
-}));
-
-app.post("/api/projects/:id/rag-plan", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.getProjectKnowledgePlan(req.params.id, req.body));
+  res.json(await agentOrchestrator.getWorkspaceKnowledgeIndex(req.params.id));
 }));
 
 app.post("/api/workspaces/:id/rag-plan", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.getProjectKnowledgePlan(req.params.id, req.body));
-}));
-
-app.post("/api/projects/:id/rag-search", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.searchProjectKnowledge(req.params.id, req.body));
+  res.json(await agentOrchestrator.getWorkspaceKnowledgePlan(req.params.id, req.body));
 }));
 
 app.post("/api/workspaces/:id/rag-search", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.searchProjectKnowledge(req.params.id, req.body));
-}));
-
-app.patch("/api/projects/:id", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.updateProject(req.params.id, req.body));
+  res.json(await agentOrchestrator.searchWorkspaceKnowledge(req.params.id, req.body));
 }));
 
 app.patch("/api/workspaces/:id", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.updateProject(req.params.id, req.body));
-}));
-
-app.delete("/api/projects/:id", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.deleteProject(req.params.id));
+  res.json(await agentOrchestrator.updateWorkspace(req.params.id, req.body));
 }));
 
 app.delete("/api/workspaces/:id", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.deleteProject(req.params.id));
-}));
-
-app.get("/api/projects/:id/conversations", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.listConversations(req.params.id));
+  res.json(await agentOrchestrator.deleteWorkspace(req.params.id));
 }));
 
 app.get("/api/workspaces/:id/conversations", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.listConversations(req.params.id));
 }));
 
-app.post("/api/projects/:id/conversations", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.createConversation(req.params.id, req.body));
-}));
-
 app.post("/api/workspaces/:id/conversations", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.createConversation(req.params.id, req.body));
-}));
-
-app.get("/api/projects/:id/conversations/:conversationId", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.getConversation(req.params.id, req.params.conversationId));
 }));
 
 app.get("/api/workspaces/:id/conversations/:conversationId", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.getConversation(req.params.id, req.params.conversationId));
 }));
 
-app.patch("/api/projects/:id/conversations/:conversationId", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.updateConversation(req.params.id, req.params.conversationId, req.body));
-}));
-
 app.patch("/api/workspaces/:id/conversations/:conversationId", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.updateConversation(req.params.id, req.params.conversationId, req.body));
-}));
-
-app.delete("/api/projects/:id/conversations/:conversationId", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.deleteConversation(req.params.id, req.params.conversationId));
 }));
 
 app.delete("/api/workspaces/:id/conversations/:conversationId", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.deleteConversation(req.params.id, req.params.conversationId));
 }));
 
-app.post("/api/projects/:id/runs", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.createGraphRun(req.params.id, req.body));
-}));
-
 app.post("/api/workspaces/:id/runs", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.createGraphRun(req.params.id, req.body));
-}));
-
-app.get("/api/projects/:id/runs", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.listAgentRuns(req.params.id, {
-    rootSessionId: req.query.rootSessionId || "",
-  }));
 }));
 
 app.get("/api/workspaces/:id/runs", asyncHandler(async (req, res) => {
@@ -266,27 +262,12 @@ app.get("/api/workspaces/:id/runs", asyncHandler(async (req, res) => {
   }));
 }));
 
-app.get("/api/projects/:id/runs/:runId", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.getAgentRun(req.params.id, req.params.runId));
-}));
-
 app.get("/api/workspaces/:id/runs/:runId", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.getAgentRun(req.params.id, req.params.runId));
 }));
 
-app.get("/api/projects/:id/runs/:runId/nodes/:nodeRunId", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.getNodeRun(req.params.id, req.params.runId, req.params.nodeRunId));
-}));
-
 app.get("/api/workspaces/:id/runs/:runId/nodes/:nodeRunId", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.getNodeRun(req.params.id, req.params.runId, req.params.nodeRunId));
-}));
-
-app.get("/api/projects/:id/runs/:runId/trace", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.listAgentRunTrace(req.params.id, req.params.runId, {
-    nodeRunId: req.query.nodeRunId || "",
-    nodeId: req.query.nodeId || "",
-  }));
 }));
 
 app.get("/api/workspaces/:id/runs/:runId/trace", asyncHandler(async (req, res) => {
@@ -296,16 +277,8 @@ app.get("/api/workspaces/:id/runs/:runId/trace", asyncHandler(async (req, res) =
   }));
 }));
 
-app.post("/api/projects/:id/runs/:runId/trace", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.appendAgentRunTraceEvent(req.params.id, req.params.runId, req.body));
-}));
-
 app.post("/api/workspaces/:id/runs/:runId/trace", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.appendAgentRunTraceEvent(req.params.id, req.params.runId, req.body));
-}));
-
-app.post("/api/projects/:id/runs/:runId/advance", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.advanceGraphRun(req.params.id, req.params.runId));
 }));
 
 app.post("/api/workspaces/:id/runs/:runId/advance", asyncHandler(async (req, res) => {
@@ -332,40 +305,24 @@ app.post("/api/workspaces/:id/runs/:runId/fail", asyncHandler(async (req, res) =
   res.json(await agentOrchestrator.failGraphRun(req.params.id, req.params.runId, req.body));
 }));
 
-app.post("/api/projects/:id/runs/:runId/retry", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.retryNodeRun(req.params.id, req.params.runId, req.body));
-}));
-
 app.post("/api/workspaces/:id/runs/:runId/retry", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.retryNodeRun(req.params.id, req.params.runId, req.body));
-}));
-
-app.post("/api/projects/:id/runs/:runId/resume", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.resumeNodeRun(req.params.id, req.params.runId, req.body));
 }));
 
 app.post("/api/workspaces/:id/runs/:runId/resume", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.resumeNodeRun(req.params.id, req.params.runId, req.body));
 }));
 
-app.post("/api/projects/:id/execute", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.executeAgentTask(req.params.id, req.body));
-}));
-
 app.post("/api/workspaces/:id/execute", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.executeAgentTask(req.params.id, req.body));
 }));
 
-app.post("/api/projects/:id/execute/stream", asyncHandler(async (req, res) => {
-  streamWorkspaceExecution(req, res);
-}));
-
 app.post("/api/workspaces/:id/execute/stream", asyncHandler(async (req, res) => {
-  streamWorkspaceExecution(req, res);
+  await streamWorkspaceExecution(req, res);
 }));
 
-app.post("/api/projects/:id/runs/:runId/cancel", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.cancelAgentRun(req.params.id, req.params.runId));
+app.get("/api/workspaces/:id/runs/:runId/events", asyncHandler(async (req, res) => {
+  await streamRunEvents(req, res);
 }));
 
 app.post("/api/workspaces/:id/runs/:runId/cancel", asyncHandler(async (req, res) => {
@@ -376,41 +333,88 @@ app.post("/api/runs/:runId/cancel", asyncHandler(async (req, res) => {
   res.json(agentOrchestrator.cancelRuntimeRun(req.params.runId));
 }));
 
+app.post("/api/runtime-runs/:runId/requests/:requestId/resolve", asyncHandler(async (req, res) => {
+  res.json(agentOrchestrator.resolveRuntimeRequest(req.params.runId, req.params.requestId, req.body?.result || {}));
+}));
+
+app.post("/api/workspaces/:id/runs/:runId/steer", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.steerAgentRun(req.params.id, req.params.runId, req.body?.input || ""));
+}));
+
 async function streamWorkspaceExecution(req, res) {
+  const payload = { ...(req.body || {}), runId: req.body?.runId || randomUUID() };
+  const key = executionKey(req.params.id, payload.runId);
+  executionManager.ensure(key, (publish) => agentOrchestrator.streamAgentTask(req.params.id, payload, publish));
+  await subscribeExecutionResponse(req, res, key, Number(req.query.after) || 0);
+}
+
+async function streamRunEvents(req, res) {
+  const key = executionKey(req.params.id, req.params.runId);
+  if (!executionManager.get(key)) {
+    const { run } = await agentOrchestrator.getAgentRun(req.params.id, req.params.runId);
+    openSse(res);
+    writeSse(res, { type: "run_snapshot", run, terminal: isTerminalRunStatus(run.status), sequence: 0 });
+    res.end();
+    return;
+  }
+  await subscribeExecutionResponse(req, res, key, Number(req.query.after) || 0);
+}
+
+function subscribeExecutionResponse(req, res, key, after) {
+  openSse(res);
+  return new Promise((resolve) => {
+    let settled = false;
+    let unsubscribe;
+    const close = () => {
+      if (settled) return;
+      settled = true;
+      clearInterval(heartbeat);
+      unsubscribe?.();
+      if (!res.writableEnded) res.end();
+      resolve();
+    };
+    const listener = (event) => {
+      if (res.writableEnded || res.destroyed) return close();
+      writeSse(res, event);
+      if (["done", "error", "cancelled"].includes(event.type)) close();
+    };
+    const heartbeat = setInterval(() => {
+      if (!res.writableEnded && !res.destroyed) res.write(": heartbeat\n\n");
+    }, 15000);
+    heartbeat.unref?.();
+    res.on("close", close);
+    unsubscribe = executionManager.subscribe(key, listener, { after });
+    const record = executionManager.get(key);
+    if (!record || (record.status !== "running" && !settled)) close();
+  });
+}
+
+function openSse(res) {
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders?.();
+}
 
-  const send = (event) => {
-    const eventName = String(event?.type || "message").replace(/[^\w-]/g, "-");
-    res.write(`event: ${eventName}\n`);
-    res.write(`data: ${JSON.stringify(event)}\n\n`);
-  };
+function writeSse(res, event) {
+  const eventName = String(event?.type || "message").replace(/[^\w-]/g, "-");
+  res.write(`event: ${eventName}\n`);
+  res.write(`id: ${event?.sequence || 0}\n`);
+  res.write(`data: ${JSON.stringify(event)}\n\n`);
+}
 
-  try {
-    await agentOrchestrator.streamAgentTask(req.params.id, req.body, send);
-  } catch (error) {
-    if (error.status === 499 || error.details?.cancelled) {
-      send({
-        type: "cancelled",
-        runId: error.details?.runId || req.body?.runId || "",
-        error: error.message || "Runtime run was cancelled.",
-        details: error.details,
-      });
-      return;
-    }
-    send({
-      type: "error",
-      error: error.message || "Unexpected stream error.",
-      details: error.details || error.issues,
-    });
-  } finally {
-    res.end();
-  }
+function executionKey(workspaceId, runId) {
+  return `${workspaceId}:${runId}`;
+}
+
+function isTerminalRunStatus(status) {
+  return ["completed", "failed", "cancelled"].includes(status);
 }
 
 app.use(express.static(publicDir));
+app.all("/api/{*splat}", (_req, res) => {
+  res.status(404).json({ error: "API endpoint was not found." });
+});
 app.get("/{*splat}", (_req, res) => {
   res.sendFile(path.join(publicDir, "index.html"));
 });
@@ -424,11 +428,34 @@ app.use((error, _req, res, _next) => {
 });
 
 app.listen(config.wrapperPort, () => {
-  console.log(`AnythingLLM wrapper console listening on http://localhost:${config.wrapperPort}`);
+  console.log(`Hippo listening on http://localhost:${config.wrapperPort}`);
 });
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
+function renderWorkspaceFile(contents, fileName) {
+  const escape = (value) => String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+  return `<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${escape(fileName)}</title>
+    <style>
+      :root { color-scheme: dark; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      body { margin: 0; color: #e7e7e7; background: #111; }
+      header { position: sticky; top: 0; padding: 12px 20px; border-bottom: 1px solid #333; background: #181818; font: 600 14px system-ui, sans-serif; }
+      pre { box-sizing: border-box; min-width: 100%; margin: 0; padding: 20px; overflow: auto; white-space: pre; line-height: 1.6; tab-size: 2; }
+    </style>
+  </head>
+  <body><header>${escape(fileName)}</header><pre>${escape(contents)}</pre></body>
+</html>`;
 }
 
 async function safeRagStatus() {

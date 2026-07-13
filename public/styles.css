@@ -388,7 +388,12 @@ dd {
 }
 
 .conversationItem.active {
+  background: rgba(255, 255, 255, 0.11);
   color: #e4e5e5;
+}
+
+.conversationItem.active:hover {
+  background: rgba(255, 255, 255, 0.15);
 }
 
 .conversationItem span {
@@ -696,6 +701,90 @@ dd {
   gap: 8px;
 }
 
+.runtimeRequestList {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.runtimeRequest {
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+  border: 1px solid rgba(245, 158, 11, 0.38);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.07);
+}
+
+.runtimeRequest code {
+  overflow-wrap: anywhere;
+  color: #f4f4f5;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.runtimeRequest small {
+  color: #a1a1aa;
+}
+
+.runtimeRequest label {
+  display: grid;
+  gap: 5px;
+  color: #f4f4f5;
+  font-size: 13px;
+}
+
+.runtimeRequest label span {
+  color: #a1a1aa;
+  line-height: 1.45;
+}
+
+.runtimeRequest input,
+.runtimeRequest select,
+.runtimeRequest textarea {
+  width: 100%;
+  min-height: 36px;
+}
+
+.runtimeRequest select[multiple] {
+  min-height: 84px;
+}
+
+.runtimeCheckbox {
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+}
+
+.runtimeCheckbox input {
+  width: 16px;
+  min-height: 16px;
+  margin-top: 2px;
+}
+
+.runtimeRequestLink {
+  color: #93c5fd;
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.runtimeRequestLink:hover {
+  text-decoration: underline;
+}
+
+.runtimeRequestActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.runtimeRequestActions button {
+  min-height: 32px;
+  padding: 0 10px;
+}
+
+.runtimeRequestActions .danger {
+  color: #fca5a5;
+}
+
 .messageMeta {
   color: var(--muted);
   font-size: 12px;
@@ -707,6 +796,153 @@ dd {
   font-size: 15px;
   line-height: 1.68;
   overflow-wrap: anywhere;
+}
+
+.messageText > :first-child {
+  margin-top: 0;
+}
+
+.messageText > :last-child {
+  margin-bottom: 0;
+}
+
+.messageText p {
+  margin: 0 0 11px;
+}
+
+.messageText h1,
+.messageText h2,
+.messageText h3,
+.messageText h4 {
+  margin: 22px 0 9px;
+  color: #fafafa;
+  line-height: 1.35;
+  letter-spacing: 0;
+}
+
+.messageText h1 {
+  font-size: 22px;
+}
+
+.messageText h2 {
+  font-size: 19px;
+}
+
+.messageText h3,
+.messageText h4 {
+  font-size: 16px;
+}
+
+.messageText ul,
+.messageText ol {
+  margin: 7px 0 12px;
+  padding-left: 24px;
+}
+
+.messageText li {
+  margin: 3px 0;
+}
+
+.messageText blockquote {
+  margin: 12px 0;
+  padding: 2px 0 2px 13px;
+  border-left: 3px solid #71717a;
+  color: #c7c7cc;
+}
+
+.messageText a {
+  color: #8ab4f8;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.messageText code {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 5px;
+  padding: 1px 5px;
+  color: #e8e8ea;
+  background: #27272a;
+  font: 0.9em/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.messageCodeBlock {
+  max-width: 100%;
+  margin: 12px 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 8px;
+  background: #151515;
+}
+
+.messageCodeHeader {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 10px 0 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  color: #a1a1aa;
+  background: #202020;
+  font: 12px/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.messageCodeHeader button {
+  min-height: 26px;
+  padding: 0 7px;
+  color: #d4d4d8;
+  font-size: 12px;
+}
+
+.messageCodeBlock pre {
+  max-width: 100%;
+  margin: 0;
+  overflow: auto;
+  padding: 14px;
+  tab-size: 2;
+}
+
+.messageCodeBlock pre code {
+  display: block;
+  min-width: max-content;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  color: #e4e4e7;
+  background: transparent;
+  font-size: 13px;
+  line-height: 1.62;
+  white-space: pre;
+}
+
+.messageText table {
+  display: block;
+  max-width: 100%;
+  margin: 12px 0;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.messageText th,
+.messageText td {
+  min-width: 110px;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  text-align: left;
+  vertical-align: top;
+}
+
+.messageText th {
+  color: #fafafa;
+  background: #232323;
+}
+
+.messageText hr {
+  height: 1px;
+  margin: 18px 0;
+  border: 0;
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .message.user .messageText {
@@ -1097,28 +1333,6 @@ dd {
   background: #1e1e1e;
 }
 
-.contextSummaryInput {
-  width: 100%;
-  min-height: 48px;
-  max-height: 96px;
-  margin-top: 10px;
-  padding: 9px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 10px;
-  background: #1e1e1e;
-  color: #f4f4f5;
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.dryRunToggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-}
-
-.dryRunToggle input,
 .checkRow input {
   width: 15px;
   height: 15px;

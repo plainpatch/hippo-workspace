@@ -56,17 +56,9 @@
           <textarea id="messageInput" name="message" rows="1" placeholder="描述任务；可选加载 Agent" required></textarea>
           <div class="composerBar">
             <div class="composerTools">
-              <button id="attachTextBtn" type="button" title="入库">+ 入库</button>
               <label class="modeSelect">Agent
                 <select name="agentId" id="agentSelect">
                   <option value="">通用助手</option>
-                </select>
-              </label>
-              <label class="modeSelect">上下文
-                <select name="contextStrategy" id="contextStrategySelect">
-                  <option value="runtime">续接</option>
-                  <option value="reset">重置</option>
-                  <option value="manual-summary">摘要</option>
                 </select>
               </label>
               <label class="modeSelect">权限
@@ -77,12 +69,10 @@
                   <option value="danger-full-access">完全访问</option>
                 </select>
               </label>
-              <label class="dryRunToggle"><input name="dryRun" type="checkbox" /> 仅生成请求</label>
               <button id="stopExecutionBtn" class="stopExecutionButton hidden" type="button" title="停止当前运行">停止</button>
             </div>
             <button class="sendButton" type="submit" aria-label="发送">↑</button>
           </div>
-          <textarea id="contextSummaryInput" class="contextSummaryInput hidden" name="contextSummary" rows="2" placeholder="填入压缩后的上文摘要；本轮会开启新的 runtime session"></textarea>
         </form>
       </main>
 

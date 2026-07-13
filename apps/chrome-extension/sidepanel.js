@@ -40,7 +40,6 @@
       "chatStream",
       "chatForm",
       "messageInput",
-      "dryRunInput",
       "sendBtn",
       "knowledgeDirInput",
       "titleInput",
@@ -80,7 +79,7 @@
         request("/api/workspaces"),
         request("/api/agents"),
       ]);
-      projects = projectData.workspaces || projectData.projects || [];
+      projects = projectData.workspaces;
       agents = agentData.agents || [];
       if (activeProjectId && !projects.some((project) => project.id === activeProjectId)) {
         activeProjectId = "";
@@ -158,7 +157,7 @@
     elements.projectDetails.innerHTML = project ? kv({
       工作区: project.name,
       目录: project.localWorkspaceFolderName || project.id,
-      知识库: `${project.knowledgeDrawerRefs?.length || 0}`,
+      知识库: `${project.knowledgeDomainRefs?.length || 0}`,
       当前Agent: getActiveAgent()?.name || "通用助手",
     }) : kv({ 工作区: "未选择", 状态: "请在顶部选择工作区" });
   }
@@ -193,13 +192,12 @@
         body: {
           task,
           agentId: activeAgentId || undefined,
-          dryRun: elements.dryRunInput.checked,
           context: pageSnapshot ? { page: { title: pageSnapshot.title, url: pageSnapshot.url } } : undefined,
         },
       });
       pushMessage(project.id, {
         role: "assistant",
-        text: elements.dryRunInput.checked ? `已生成编排请求：\n\n${data.request.message}` : extractAgentResponse(data),
+        text: extractAgentResponse(data),
       });
     } catch (error) {
       pushMessage(project.id, { role: "assistant", text: `执行失败：${error.message}` });
@@ -253,7 +251,7 @@
             url: pageSnapshot?.url,
             pageTitle: pageSnapshot?.title,
             captureMode: elements.captureModeSelect.value,
-            projectId: project?.id,
+            workspaceId: project?.id,
           },
         },
       });

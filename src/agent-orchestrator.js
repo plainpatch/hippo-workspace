@@ -9,22 +9,16 @@ const skillSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
   instructions: z.string().optional(),
-});
-
-const optionalRuntimeIdSchema = z.preprocess(
-  (value) => typeof value === "string" && !value.trim() ? undefined : value,
-  z.string().min(1).optional()
-);
+}).strict();
 
 const nodeRagSchema = z.object({
   enabled: z.boolean().default(false),
   topN: z.number().int().positive().default(4),
-});
+}).strict();
 
 const agentNodeSchema = z.object({
   id: z.string().min(1),
-  kind: z.enum(["task", "wait"]).default("task"),
-  approvalPolicy: z.enum(["none", "auto", "manual"]).optional(),
+  kind: z.literal("task").default("task"),
   resultApprovalPolicy: z.enum(["none", "auto", "manual"]).optional(),
   runtimeApprovalPolicy: z.enum(["inherit", "untrusted", "on-request", "never"]).default("inherit"),
   transitionInstruction: z.string().optional(),
@@ -32,38 +26,38 @@ const agentNodeSchema = z.object({
   description: z.string().optional(),
   agentId: z.string().optional(),
   systemPrompt: z.string().optional(),
-  runtimeId: optionalRuntimeIdSchema,
+  runtimeId: z.string().min(1).optional(),
   rag: nodeRagSchema.optional(),
   skills: z.array(skillSchema).default([]),
   mcpServers: z.array(z.string().min(1)).default([]),
   input: z.unknown().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
-});
+}).strict();
 
 const agentEdgeSchema = z.object({
   id: z.string().min(1).optional(),
   from: z.string().min(1),
   to: z.string().min(1),
   metadata: z.record(z.string(), z.unknown()).optional(),
-});
+}).strict();
 
-const createProjectSchema = z.object({
+const createWorkspaceSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
   agentIds: z.array(z.string().min(1)).default([]),
-  knowledgeDrawerRefs: z.array(z.string().min(1)).default([]),
+  knowledgeDomainRefs: z.array(z.string().min(1)).default([]),
   knowledgeTopicRefs: z.array(z.string().min(1)).default([]),
   metadata: z.record(z.string(), z.unknown()).optional(),
-});
+}).strict();
 
-const updateProjectSchema = z.object({
+const updateWorkspaceSchema = z.object({
   name: z.string().min(1).optional(),
   description: z.string().optional(),
   agentIds: z.array(z.string().min(1)).optional(),
-  knowledgeDrawerRefs: z.array(z.string().min(1)).optional(),
+  knowledgeDomainRefs: z.array(z.string().min(1)).optional(),
   knowledgeTopicRefs: z.array(z.string().min(1)).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
-});
+}).strict();
 
 const messageSchema = z.object({
   role: z.enum(["user", "assistant", "system"]),
@@ -72,20 +66,20 @@ const messageSchema = z.object({
   agentRunSummary: z.record(z.string(), z.unknown()).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   createdAt: z.string().optional(),
-});
+}).strict();
 
 const createConversationSchema = z.object({
   id: z.string().optional(),
   title: z.string().optional(),
   messages: z.array(messageSchema).default([]),
   metadata: z.record(z.string(), z.unknown()).optional(),
-});
+}).strict();
 
 const updateConversationSchema = z.object({
   title: z.string().optional(),
   messages: z.array(messageSchema).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
-});
+}).strict();
 
 const createAgentSchema = z.object({
   type: z.enum(["single", "dag"]).default("single"),
@@ -95,74 +89,76 @@ const createAgentSchema = z.object({
   skills: z.array(skillSchema).default([]),
   mcpServers: z.array(z.string().min(1)).default([]),
   runtimeId: z.string().min(1).default(config.defaultRuntimeId),
-  ragDocumentNames: z.array(z.string().min(1)).default([]),
   rag: z.record(z.string(), z.unknown()).optional(),
   rootNodeId: z.string().optional(),
   nodes: z.array(agentNodeSchema).default([]),
   edges: z.array(agentEdgeSchema).default([]),
   executionPolicy: z.record(z.string(), z.unknown()).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
-});
+}).strict();
 
 const updateAgentSchema = createAgentSchema.partial().extend({
   skills: z.array(skillSchema).optional(),
   mcpServers: z.array(z.string().min(1)).optional(),
   runtimeId: z.string().min(1).optional(),
-  ragDocumentNames: z.array(z.string().min(1)).optional(),
   nodes: z.array(agentNodeSchema).optional(),
   edges: z.array(agentEdgeSchema).optional(),
-});
+}).strict();
 
 const executeAgentTaskSchema = z.object({
   task: z.string().min(1),
   agentId: z.string().optional(),
-  mode: z.enum(["query", "chat", "automatic"]).optional(),
   sessionId: z.string().optional(),
   runId: z.string().optional(),
-  reset: z.boolean().optional(),
   dryRun: z.boolean().optional(),
   context: z.record(z.string(), z.unknown()).optional(),
-  contextStrategy: z.enum(["runtime", "reset", "manual-summary"]).optional(),
-  contextSummary: z.string().optional(),
   sandboxMode: z.enum(["workspace-write", "read-only", "danger-full-access"]).optional(),
-  knowledgeTags: z.array(z.string().min(1)).default([]),
-  knowledgeTopicRefs: z.array(z.string().min(1)).default([]),
-});
+}).strict();
+
+const workspaceRagPlanSchema = z.object({
+  domainRefs: z.array(z.string().min(1)).default([]),
+  topicRefs: z.array(z.string().min(1)).default([]),
+}).strict();
+
+const workspaceRagSearchSchema = workspaceRagPlanSchema.extend({
+  query: z.string().min(1),
+  topN: z.number().int().positive().default(4),
+}).strict();
 
 const retryNodeRunSchema = z.object({
   nodeRunId: z.string().min(1).optional(),
   nodeId: z.string().min(1).optional(),
-});
+}).strict();
 
 const resumeNodeRunSchema = z.object({
   nodeRunId: z.string().min(1).optional(),
   nodeId: z.string().min(1).optional(),
   output: z.unknown().optional(),
-});
+}).strict();
 
 const dispatchGraphNodeSchema = z.object({
   nodeId: z.string().min(1),
   input: z.unknown().optional(),
   parentNodeRunId: z.string().min(1).optional(),
   reason: z.string().optional(),
-});
+}).strict();
 
 const requestUserSchema = z.object({
   question: z.string().min(1),
   reason: z.string().optional(),
-});
+}).strict();
 
 const resolveGraphRunSchema = z.object({
   output: z.unknown().optional(),
   reason: z.string().optional(),
-});
+}).strict();
 
 const appendTraceSchema = z.object({
   type: z.string().min(1),
   payload: z.unknown().optional(),
   nodeRunId: z.string().min(1).optional(),
   nodeId: z.string().min(1).optional(),
-});
+}).strict();
 
 export class AgentOrchestrator {
   constructor({
@@ -182,9 +178,9 @@ export class AgentOrchestrator {
     this.storeLock = Promise.resolve();
   }
 
-  async listProjects() {
+  async listWorkspaces() {
     const store = await this.readStore();
-    return workspaceResultList(store.projects);
+    return { workspaces: store.workspaces };
   }
 
   async listAgents() {
@@ -213,108 +209,119 @@ export class AgentOrchestrator {
   async createAgent(input) {
     const payload = createAgentSchema.parse(input);
     validateAgentPrototype(payload);
-    const store = await this.readStore();
-    const now = new Date().toISOString();
-    const agent = {
-      id: randomUUID(),
-      type: payload.type,
-      version: 1,
-      name: payload.name,
-      description: payload.description || "",
-      systemPrompt: payload.systemPrompt || "",
-      skills: payload.skills,
-      mcpServers: dedupe(payload.mcpServers),
-      runtimeId: payload.runtimeId,
-      explicitRagDocumentNames: dedupe(payload.ragDocumentNames),
-      ragDocumentNames: dedupe(payload.ragDocumentNames),
-      rag: normalizeNodeRag(payload.rag),
-      rootNodeId: payload.type === "dag" ? payload.rootNodeId || payload.nodes[0]?.id || "" : "",
-      nodes: payload.type === "dag" ? normalizeAgentNodes(payload.nodes) : [],
-      edges: payload.type === "dag" ? normalizeAgentEdges(payload.edges) : [],
-      executionPolicy: payload.executionPolicy || {},
-      metadata: payload.metadata || {},
-      createdAt: now,
-      updatedAt: now,
-    };
-    store.agents.push(agent);
-    await this.writeStore(store);
-    return { agent };
+    return this.withStoreLock(async () => {
+      const store = await this.readStore();
+      const now = new Date().toISOString();
+      const agent = {
+        id: randomUUID(),
+        type: payload.type,
+        version: 1,
+        name: payload.name,
+        description: payload.description || "",
+        systemPrompt: payload.systemPrompt || "",
+        skills: payload.skills,
+        mcpServers: dedupe(payload.mcpServers),
+        runtimeId: payload.runtimeId,
+        rag: normalizeNodeRag(payload.rag),
+        rootNodeId: payload.type === "dag" ? payload.rootNodeId || payload.nodes[0]?.id || "" : "",
+        nodes: payload.type === "dag" ? normalizeAgentNodes(payload.nodes) : [],
+        edges: payload.type === "dag" ? normalizeAgentEdges(payload.edges) : [],
+        executionPolicy: payload.executionPolicy || {},
+        metadata: payload.metadata || {},
+        createdAt: now,
+        updatedAt: now,
+      };
+      store.agents.push(agent);
+      await this.writeStore(store);
+      return { agent };
+    });
   }
 
   async updateAgent(id, input) {
     const payload = updateAgentSchema.parse(input);
-    const store = await this.readStore();
-    const index = store.agents.findIndex((item) => item.id === id);
-    if (index === -1) throw new AgentOrchestratorError(`Agent ${id} was not found.`, 404);
-    const current = store.agents[index];
-    const explicitDocs = payload.ragDocumentNames || current.explicitRagDocumentNames || [];
-    const candidate = {
-      ...current,
-      ...definedOnly({
-        type: payload.type,
-        name: payload.name,
-        description: payload.description,
-        systemPrompt: payload.systemPrompt,
-        skills: payload.skills,
-        mcpServers: payload.mcpServers,
-        runtimeId: payload.runtimeId,
-        rag: payload.rag,
-        rootNodeId: payload.rootNodeId,
-        nodes: payload.nodes,
-        edges: payload.edges,
-        executionPolicy: payload.executionPolicy,
-        metadata: payload.metadata,
-      }),
-      explicitRagDocumentNames: dedupe(explicitDocs),
-      ragDocumentNames: dedupe(explicitDocs),
-    };
-    validateAgentPrototype(candidate);
-    const updated = {
-      ...candidate,
-      version: Number(current.version || 1) + 1,
-      rag: normalizeNodeRag(candidate.rag),
-      rootNodeId: candidate.type === "dag" ? candidate.rootNodeId || candidate.nodes?.[0]?.id || "" : "",
-      nodes: candidate.type === "dag" ? normalizeAgentNodes(candidate.nodes) : [],
-      edges: candidate.type === "dag" ? normalizeAgentEdges(candidate.edges) : [],
-      updatedAt: new Date().toISOString(),
-    };
-    store.agents[index] = updated;
-    await this.writeStore(store);
-    return { agent: updated };
+    return this.withStoreLock(async () => {
+      const store = await this.readStore();
+      const index = store.agents.findIndex((item) => item.id === id);
+      if (index === -1) throw new AgentOrchestratorError(`Agent ${id} was not found.`, 404);
+      const current = store.agents[index];
+      const candidate = {
+        ...current,
+        ...definedOnly({
+          type: payload.type,
+          name: payload.name,
+          description: payload.description,
+          systemPrompt: payload.systemPrompt,
+          skills: payload.skills,
+          mcpServers: payload.mcpServers,
+          runtimeId: payload.runtimeId,
+          rag: payload.rag,
+          rootNodeId: payload.rootNodeId,
+          nodes: payload.nodes,
+          edges: payload.edges,
+          executionPolicy: payload.executionPolicy,
+          metadata: payload.metadata,
+        }),
+      };
+      validateAgentPrototype(candidate);
+      const updated = {
+        ...candidate,
+        version: Number(current.version || 1) + 1,
+        rag: normalizeNodeRag(candidate.rag),
+        rootNodeId: candidate.type === "dag" ? candidate.rootNodeId || candidate.nodes?.[0]?.id || "" : "",
+        nodes: candidate.type === "dag" ? normalizeAgentNodes(candidate.nodes) : [],
+        edges: candidate.type === "dag" ? normalizeAgentEdges(candidate.edges) : [],
+        updatedAt: new Date().toISOString(),
+      };
+      store.agents[index] = updated;
+      await this.writeStore(store);
+      return { agent: updated };
+    });
   }
 
   async deleteAgent(id) {
-    const store = await this.readStore();
-    const next = store.agents.filter((item) => item.id !== id);
-    if (next.length === store.agents.length) {
-      throw new AgentOrchestratorError(`Agent ${id} was not found.`, 404);
-    }
-    store.agents = next;
-    await this.writeStore(store);
-    return { deleted: true, id };
+    return this.withStoreLock(async () => {
+      const store = await this.readStore();
+      const next = store.agents.filter((item) => item.id !== id);
+      if (next.length === store.agents.length) {
+        throw new AgentOrchestratorError(`Agent ${id} was not found.`, 404);
+      }
+      store.agents = next;
+      let detachedWorkspaces = 0;
+      store.workspaces = store.workspaces.map((workspace) => {
+        if (!workspace.agentIds?.includes(id)) return workspace;
+        detachedWorkspaces += 1;
+        return {
+          ...workspace,
+          agentIds: workspace.agentIds.filter((agentId) => agentId !== id),
+          updatedAt: new Date().toISOString(),
+        };
+      });
+      await this.writeStore(store);
+      return { deleted: true, id, detachedWorkspaces };
+    });
   }
 
-  async getProject(id) {
+  async getWorkspace(id) {
     const store = await this.readStore();
-    const project = store.projects.find((item) => item.id === id);
-    if (!project) throw new AgentOrchestratorError(`Workspace ${id} was not found.`, 404);
-    return workspaceResult(project);
+    const workspace = store.workspaces.find((item) => item.id === id);
+    if (!workspace) throw new AgentOrchestratorError(`Workspace ${id} was not found.`, 404);
+    return { workspace };
   }
 
-  async listConversations(projectId) {
+  async listConversations(workspaceId) {
     const store = await this.readStore();
-    this.findProject(store, projectId);
+    this.findWorkspace(store, workspaceId);
     const conversations = store.conversations
-      .filter((conversation) => conversation.projectId === projectId)
+      .filter((conversation) => conversation.workspaceId === workspaceId)
       .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
     return { conversations };
   }
 
-  async getConversation(projectId, conversationId) {
+  async getConversation(workspaceId, conversationId) {
     const store = await this.readStore();
-    this.findProject(store, projectId);
+    this.findWorkspace(store, workspaceId);
     const conversation = store.conversations.find((item) =>
-      item.projectId === projectId && item.id === conversationId
+      item.workspaceId === workspaceId && item.id === conversationId
     );
     if (!conversation) {
       throw new AgentOrchestratorError(`Conversation ${conversationId} was not found.`, 404);
@@ -322,101 +329,144 @@ export class AgentOrchestrator {
     return { conversation };
   }
 
-  async createConversation(projectId, input = {}) {
+  async createConversation(workspaceId, input = {}) {
     const payload = createConversationSchema.parse(input);
-    const store = await this.readStore();
-    this.findProject(store, projectId);
-    const now = new Date().toISOString();
-    const conversation = {
-      id: payload.id || randomUUID(),
-      type: "root",
-      projectId,
-      title: payload.title || deriveConversationTitle(payload.messages) || "新对话",
-      messages: normalizeMessages(payload.messages),
-      activeAgentId: payload.metadata?.activeAgentId || "",
-      runtimeSessions: normalizeRuntimeSessions(payload.metadata?.runtimeSessions),
-      runIds: [],
-      metadata: payload.metadata || {},
-      createdAt: now,
-      updatedAt: now,
-    };
-    store.conversations.push(conversation);
-    await this.writeStore(store);
-    return { conversation };
+    return this.withStoreLock(async () => {
+      const store = await this.readStore();
+      this.findWorkspace(store, workspaceId);
+      const now = new Date().toISOString();
+      const conversation = {
+        id: payload.id || randomUUID(),
+        type: "root",
+        workspaceId,
+        title: payload.title || deriveConversationTitle(payload.messages) || "新对话",
+        messages: normalizeMessages(payload.messages),
+        activeAgentId: payload.metadata?.activeAgentId || "",
+        runtimeSessions: normalizeRuntimeSessions(payload.metadata?.runtimeSessions),
+        runIds: [],
+        metadata: payload.metadata || {},
+        createdAt: now,
+        updatedAt: now,
+      };
+      store.conversations.push(conversation);
+      await this.writeStore(store);
+      return { conversation };
+    });
   }
 
-  async updateConversation(projectId, conversationId, input = {}) {
+  async updateConversation(workspaceId, conversationId, input = {}) {
     const payload = updateConversationSchema.parse(input);
-    const store = await this.readStore();
-    this.findProject(store, projectId);
-    const index = store.conversations.findIndex((item) =>
-      item.projectId === projectId && item.id === conversationId
-    );
-    if (index === -1) {
-      throw new AgentOrchestratorError(`Conversation ${conversationId} was not found.`, 404);
-    }
-    const current = store.conversations[index];
-    const messages = payload.messages ? normalizeMessages(payload.messages) : current.messages;
-    const metadata = payload.metadata ? { ...(current.metadata || {}), ...payload.metadata } : current.metadata;
-    const updated = {
-      ...current,
-      ...definedOnly({
-        title: payload.title || deriveConversationTitle(messages),
-        messages: payload.messages ? messages : undefined,
-        activeAgentId: payload.metadata?.activeAgentId,
-        runtimeSessions: payload.metadata?.runtimeSessions
-          ? normalizeRuntimeSessions(payload.metadata.runtimeSessions)
-          : undefined,
-        metadata,
-      }),
-      updatedAt: new Date().toISOString(),
-    };
-    store.conversations[index] = updated;
-    await this.writeStore(store);
-    return { conversation: updated };
+    return this.withStoreLock(async () => {
+      const store = await this.readStore();
+      this.findWorkspace(store, workspaceId);
+      const index = store.conversations.findIndex((item) =>
+        item.workspaceId === workspaceId && item.id === conversationId
+      );
+      if (index === -1) {
+        throw new AgentOrchestratorError(`Conversation ${conversationId} was not found.`, 404);
+      }
+      const current = store.conversations[index];
+      const messages = payload.messages ? normalizeMessages(payload.messages) : current.messages;
+      const metadata = payload.metadata ? { ...(current.metadata || {}), ...payload.metadata } : current.metadata;
+      const updated = {
+        ...current,
+        ...definedOnly({
+          title: payload.title || deriveConversationTitle(messages),
+          messages: payload.messages ? messages : undefined,
+          activeAgentId: payload.metadata?.activeAgentId,
+          runtimeSessions: payload.metadata?.runtimeSessions
+            ? normalizeRuntimeSessions(payload.metadata.runtimeSessions)
+            : undefined,
+          metadata,
+        }),
+        updatedAt: new Date().toISOString(),
+      };
+      store.conversations[index] = updated;
+      await this.writeStore(store);
+      return { conversation: updated };
+    });
   }
 
-  async deleteConversation(projectId, conversationId) {
-    const store = await this.readStore();
-    this.findProject(store, projectId);
-    const next = store.conversations.filter((item) =>
-      !(item.projectId === projectId && item.id === conversationId)
-    );
-    if (next.length === store.conversations.length) {
-      throw new AgentOrchestratorError(`Conversation ${conversationId} was not found.`, 404);
-    }
-    store.conversations = next;
-    await this.writeStore(store);
-    return { deleted: true, id: conversationId };
+  async deleteConversation(workspaceId, conversationId) {
+    return this.withStoreLock(async () => {
+      const store = await this.readStore();
+      this.findWorkspace(store, workspaceId);
+      const next = store.conversations.filter((item) =>
+        !(item.workspaceId === workspaceId && item.id === conversationId)
+      );
+      if (next.length === store.conversations.length) {
+        throw new AgentOrchestratorError(`Conversation ${conversationId} was not found.`, 404);
+      }
+      store.conversations = next;
+      await this.writeStore(store);
+      return { deleted: true, id: conversationId };
+    });
   }
 
-  async listAgentRuns(projectId, filters = {}) {
+  async listAgentRuns(workspaceId, filters = {}) {
     const store = await this.readStore();
-    this.findProject(store, projectId);
+    this.findWorkspace(store, workspaceId);
     const runs = store.agentRuns
-      .filter((run) => run.workspaceId === projectId)
+      .filter((run) => run.workspaceId === workspaceId)
       .filter((run) => !filters.rootSessionId || run.rootSessionId === filters.rootSessionId)
       .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
     return { runs };
   }
 
-  async getAgentRun(projectId, runId) {
+  async getAgentRun(workspaceId, runId) {
     const store = await this.readStore();
-    this.findProject(store, projectId);
-    const run = store.agentRuns.find((item) => item.workspaceId === projectId && item.id === runId);
+    this.findWorkspace(store, workspaceId);
+    const run = store.agentRuns.find((item) => item.workspaceId === workspaceId && item.id === runId);
     if (!run) throw new AgentOrchestratorError(`Agent run ${runId} was not found.`, 404);
     return { run };
   }
 
-  async getNodeRun(projectId, runId, nodeRunId) {
-    const { run } = await this.getAgentRun(projectId, runId);
+  async reconcileInterruptedRuns() {
+    return this.withStoreLock(async () => {
+      const store = await this.readStore();
+      const now = new Date().toISOString();
+      let interruptedRuns = 0;
+      store.agentRuns = store.agentRuns.map((storedRun) => {
+        const run = normalizeAgentRun(storedRun);
+        const interruptedManagedRun = run.managed && ["pending", "waiting_approval"].includes(run.status);
+        if (!["running", "coordinating"].includes(run.status) && !interruptedManagedRun) return run;
+        interruptedRuns += 1;
+        run.status = "failed";
+        run.error = {
+          code: "service_restarted",
+          message: "Hippo service restarted while this run was active.",
+        };
+        run.updatedAt = now;
+        if (run.rootCoordinator && ["pending", "ready", "running", "waiting_approval"].includes(run.rootCoordinator.status)) {
+          run.rootCoordinator.status = "failed";
+          run.rootCoordinator.runtimeRunId = "";
+          run.rootCoordinator.updatedAt = now;
+        }
+        for (const nodeRun of Object.values(run.nodeRuns || {})) {
+          if (!["pending", "ready", "running", "waiting_approval"].includes(nodeRun.status)) continue;
+          nodeRun.status = "failed";
+          nodeRun.error = run.error;
+          nodeRun.runtimeRunId = "";
+          nodeRun.updatedAt = now;
+          nodeRun.trace.push(createTrace("node_run_interrupted", { reason: "service_restarted" }, now));
+        }
+        run.trace.push(createTrace("agent_run_interrupted", { reason: "service_restarted" }, now));
+        return run;
+      });
+      if (interruptedRuns) await this.writeStore(store);
+      return { interruptedRuns };
+    });
+  }
+
+  async getNodeRun(workspaceId, runId, nodeRunId) {
+    const { run } = await this.getAgentRun(workspaceId, runId);
     const nodeRun = run.nodeRuns?.[nodeRunId] || Object.values(run.nodeRuns || {}).find((item) => item.nodeId === nodeRunId);
     if (!nodeRun) throw new AgentOrchestratorError(`Node run ${nodeRunId} was not found.`, 404);
     return { run, nodeRun };
   }
 
-  async listAgentRunTrace(projectId, runId, input = {}) {
-    const { run } = await this.getAgentRun(projectId, runId);
+  async listAgentRunTrace(workspaceId, runId, input = {}) {
+    const { run } = await this.getAgentRun(workspaceId, runId);
     if (input.nodeRunId || input.nodeId) {
       const nodeRun = input.nodeRunId
         ? run.nodeRuns?.[input.nodeRunId]
@@ -427,9 +477,9 @@ export class AgentOrchestrator {
     return { trace: run.trace || [], run };
   }
 
-  async appendAgentRunTraceEvent(projectId, runId, input = {}) {
+  async appendAgentRunTraceEvent(workspaceId, runId, input = {}) {
     const payload = appendTraceSchema.parse(input);
-    return this.updateAgentRun(projectId, runId, (run, now) => {
+    return this.updateAgentRun(workspaceId, runId, (run, now) => {
       const trace = createTrace(payload.type, payload.payload, now);
       run.trace.push(trace);
       if (payload.nodeRunId || payload.nodeId) {
@@ -453,33 +503,33 @@ export class AgentOrchestrator {
     const agentRun = await this.createAgentRun(project, rootSession, agent, request, {
       input: { task: payload.task, context: payload.context || {} },
       retrieval,
+      managed: false,
     });
-    return { project, agent, request, retrieval, agentRun };
+    return { workspace: project, agent, request, retrieval, agentRun };
   }
 
-  async advanceGraphRun(projectId, runId) {
-    const { project } = await this.getProject(projectId);
-    const { run } = await this.getAgentRun(projectId, runId);
+  async advanceGraphRun(workspaceId, runId) {
+    const { workspace: project } = await this.getWorkspace(workspaceId);
+    const { run } = await this.getAgentRun(workspaceId, runId);
     if (run.agentSnapshot?.type !== "dag") {
       throw new AgentOrchestratorError("Only DAG agent runs can be advanced.", 400);
     }
     const request = run.request || {
       runtimeId: run.agentSnapshot.runtimeId || config.defaultRuntimeId,
       runId: run.id,
-      projectId,
+      workspaceId,
       mode: "chat",
       message: run.input?.task || "",
       sessionId: run.rootSessionId,
-      reset: true,
     };
     const updated = await this.coordinateGraphRun(project, run.agentSnapshot, request, runId);
-    return { project, run: updated.run };
+    return { workspace: project, run: updated.run };
   }
 
-  async dispatchGraphNode(projectId, runId, input = {}, onEvent) {
+  async dispatchGraphNode(workspaceId, runId, input = {}, onEvent) {
     const payload = dispatchGraphNodeSchema.parse(input);
-    const { project } = await this.getProject(projectId);
-    const { run } = await this.getAgentRun(projectId, runId);
+    const { workspace: project } = await this.getWorkspace(workspaceId);
+    const { run } = await this.getAgentRun(workspaceId, runId);
     if (run.agentSnapshot?.type !== "dag") {
       throw new AgentOrchestratorError("Only graph runs can dispatch nodes.", 400);
     }
@@ -489,7 +539,7 @@ export class AgentOrchestrator {
     const nodeDef = run.agentSnapshot.nodes.find((node) => node.id === payload.nodeId);
     if (!nodeDef) throw new AgentOrchestratorError(`Graph node ${payload.nodeId} was not found.`, 404);
     let nodeRun;
-    await this.updateAgentRun(projectId, runId, (current, updatedAt) => {
+    await this.updateAgentRun(workspaceId, runId, (current, updatedAt) => {
       if (["completed", "failed", "cancelled"].includes(current.status)) {
         throw new AgentOrchestratorError(`Run ${runId} is already ${current.status}.`, 409);
       }
@@ -524,24 +574,24 @@ export class AgentOrchestrator {
     const request = run.request || {
       runtimeId: run.agentSnapshot.runtimeId || config.defaultRuntimeId,
       runId: run.id,
-      projectId,
+      workspaceId,
       mode: "chat",
       sessionId: run.rootSessionId,
       runtimeOptions: {},
     };
     const result = await this.executeDagNode(project, run.agentSnapshot, request, runId, nodeRun.id, onEvent)
       .catch(() => undefined);
-    return { project, ...(await this.getAgentRun(projectId, runId)), nodeRunId: nodeRun.id, result };
+    return { workspace: project, ...(await this.getAgentRun(workspaceId, runId)), nodeRunId: nodeRun.id, result };
   }
 
-  async retryNodeRun(projectId, runId, input = {}) {
+  async retryNodeRun(workspaceId, runId, input = {}) {
     const payload = retryNodeRunSchema.parse(input);
-    const { run } = await this.getAgentRun(projectId, runId);
+    const { run } = await this.getAgentRun(workspaceId, runId);
     const nodeRun = payload.nodeRunId
       ? run.nodeRuns?.[payload.nodeRunId]
       : findLatestNodeRunByPrototype(run, payload.nodeId);
     if (!nodeRun) throw new AgentOrchestratorError("Node run was not found.", 404);
-    return this.dispatchGraphNode(projectId, runId, {
+    return this.dispatchGraphNode(workspaceId, runId, {
       nodeId: nodeRun.prototypeNodeId || nodeRun.nodeId,
       input: nodeRun.input?.dispatchInput ?? nodeRun.input,
       parentNodeRunId: nodeRun.id,
@@ -549,17 +599,17 @@ export class AgentOrchestrator {
     });
   }
 
-  async resumeNodeRun(projectId, runId, input = {}) {
+  async resumeNodeRun(workspaceId, runId, input = {}) {
     const payload = resumeNodeRunSchema.parse(input);
-    const { run } = await this.getAgentRun(projectId, runId);
+    const { run } = await this.getAgentRun(workspaceId, runId);
     const nodeRun = payload.nodeRunId
       ? run.nodeRuns?.[payload.nodeRunId]
       : findLatestNodeRunByPrototype(run, payload.nodeId);
     if (!nodeRun) throw new AgentOrchestratorError("Node run was not found.", 404);
-    if (!["waiting", "waiting_approval"].includes(nodeRun.status)) {
+    if (nodeRun.status !== "waiting_approval") {
       throw new AgentOrchestratorError("Only node runs waiting for approval can be resumed.", 400);
     }
-    await this.updateAgentRun(projectId, runId, (current, now) => {
+    await this.updateAgentRun(workspaceId, runId, (current, now) => {
       const currentNode = current.nodeRuns[nodeRun.id];
       currentNode.status = "completed";
       currentNode.approval = { resumed: true, value: payload.output, updatedAt: now };
@@ -573,12 +623,12 @@ export class AgentOrchestrator {
       current.trace.push(createTrace("agent_run_resumed", { runId, nodeRunId: nodeRun.id }, now));
       return current;
     });
-    return this.advanceGraphRun(projectId, runId);
+    return this.advanceGraphRun(workspaceId, runId);
   }
 
-  async requestGraphRunUser(projectId, runId, input = {}) {
+  async requestGraphRunUser(workspaceId, runId, input = {}) {
     const payload = requestUserSchema.parse(input);
-    return this.updateAgentRun(projectId, runId, (run, now) => {
+    return this.updateAgentRun(workspaceId, runId, (run, now) => {
       assertGraphRunMutable(run);
       run.status = "waiting_user";
       run.output = { kind: "user_request", question: payload.question, reason: payload.reason || "" };
@@ -589,17 +639,17 @@ export class AgentOrchestrator {
     });
   }
 
-  async resumeGraphRunWithUserInput(projectId, runId, input = {}, onEvent) {
+  async resumeGraphRunWithUserInput(workspaceId, runId, input = {}, onEvent) {
     const userInput = input.input ?? input.message ?? input.text;
     if (userInput === undefined || userInput === "") {
       throw new AgentOrchestratorError("A user response is required to resume the graph run.", 400);
     }
-    const { project } = await this.getProject(projectId);
-    const { run } = await this.getAgentRun(projectId, runId);
+    const { workspace: project } = await this.getWorkspace(workspaceId);
+    const { run } = await this.getAgentRun(workspaceId, runId);
     if (run.status !== "waiting_user") {
       throw new AgentOrchestratorError("Only graph runs waiting for user input can be resumed.", 409);
     }
-    await this.updateAgentRun(projectId, runId, (current, now) => {
+    await this.updateAgentRun(workspaceId, runId, (current, now) => {
       current.status = "coordinating";
       current.output = undefined;
       current.userResponses = [...(current.userResponses || []), { input: userInput, createdAt: now }];
@@ -611,7 +661,7 @@ export class AgentOrchestrator {
     const request = run.request || {
       runtimeId: run.agentSnapshot.runtimeId || config.defaultRuntimeId,
       runId: run.id,
-      projectId,
+      workspaceId,
       sessionId: run.rootSessionId,
       runtimeOptions: {},
     };
@@ -624,104 +674,114 @@ export class AgentOrchestrator {
         : stringifyDagOutput(completedRun.run.output),
       output: completedRun.run.output,
     };
-    onEvent?.({ type: "done", project, agent: run.agentSnapshot, request, result, agentRun: completedRun.run });
-    return { project, agent: run.agentSnapshot, request, result, agentRun: completedRun.run, run: completedRun.run };
+    onEvent?.({ type: "done", workspace: project, agent: run.agentSnapshot, request, result, agentRun: completedRun.run });
+    return { workspace: project, agent: run.agentSnapshot, request, result, agentRun: completedRun.run, run: completedRun.run };
   }
 
-  async completeGraphRun(projectId, runId, input = {}) {
+  async completeGraphRun(workspaceId, runId, input = {}) {
     const payload = resolveGraphRunSchema.parse(input);
-    const { run } = await this.getAgentRun(projectId, runId);
+    const { run } = await this.getAgentRun(workspaceId, runId);
     assertGraphRunMutable(run);
-    return this.completeDagRun(projectId, runId, {
+    return this.completeDagRun(workspaceId, runId, {
       status: "completed",
       output: payload.output === undefined ? collectDagOutput(run) : payload.output,
     });
   }
 
-  async failGraphRun(projectId, runId, input = {}) {
+  async failGraphRun(workspaceId, runId, input = {}) {
     const payload = resolveGraphRunSchema.parse(input);
-    assertGraphRunMutable((await this.getAgentRun(projectId, runId)).run);
-    return this.completeDagRun(projectId, runId, {
+    assertGraphRunMutable((await this.getAgentRun(workspaceId, runId)).run);
+    return this.completeDagRun(workspaceId, runId, {
       status: "failed",
       output: payload.output,
       error: { message: payload.reason || "Root coordinator marked the run as failed." },
     });
   }
 
-  async createProject(input) {
-    const payload = createProjectSchema.parse(input);
-    const store = await this.readStore();
+  async createWorkspace(input) {
+    const payload = createWorkspaceSchema.parse(input);
     const now = new Date().toISOString();
-    const projectId = randomUUID();
-    const projectDirectory = this.resourceManager
-      ? await this.resourceManager.createProjectWorkspace({ projectId, projectName: payload.name })
+    const workspaceId = randomUUID();
+    const workspaceDirectory = this.resourceManager
+      ? await this.resourceManager.createWorkspace({ workspaceId, workspaceName: payload.name })
       : {};
-    const knowledgeTopicRefs = normalizeTopicRefs(payload.knowledgeTopicRefs, payload.knowledgeDrawerRefs);
-    const knowledgeDrawerRefs = normalizeDomainRefs(payload.knowledgeDrawerRefs, knowledgeTopicRefs);
-    const project = {
-      id: projectId,
+    const knowledgeTopicRefs = normalizeTopicRefs(payload.knowledgeTopicRefs, payload.knowledgeDomainRefs);
+    const knowledgeDomainRefs = normalizeDomainRefs(payload.knowledgeDomainRefs, knowledgeTopicRefs);
+    const workspace = {
+      id: workspaceId,
       name: payload.name,
       description: payload.description || "",
       agentIds: dedupe(payload.agentIds),
-      knowledgeDrawerRefs,
+      knowledgeDomainRefs,
       knowledgeTopicRefs,
-      anythingllmWorkspaceSlug: "",
-      localWorkspacePath: projectDirectory.workspacePath || "",
-      localWorkspaceFolderName: projectDirectory.workspaceFolderName || "",
+      localWorkspacePath: workspaceDirectory.workspacePath || "",
+      localWorkspaceFolderName: workspaceDirectory.workspaceFolderName || "",
       metadata: payload.metadata || {},
       createdAt: now,
       updatedAt: now,
     };
 
-    store.projects.push(project);
-    await this.writeStore(store);
-    return workspaceResult(project);
+    return this.withStoreLock(async () => {
+      const store = await this.readStore();
+      store.workspaces.push(workspace);
+      await this.writeStore(store);
+      return { workspace };
+    });
   }
 
-  async updateProject(id, input) {
-    const payload = updateProjectSchema.parse(input);
-    const store = await this.readStore();
-    const index = store.projects.findIndex((item) => item.id === id);
-    if (index === -1) throw new AgentOrchestratorError(`Workspace ${id} was not found.`, 404);
+  async updateWorkspace(id, input) {
+    const payload = updateWorkspaceSchema.parse(input);
+    return this.withStoreLock(async () => {
+      const store = await this.readStore();
+      const index = store.workspaces.findIndex((item) => item.id === id);
+      if (index === -1) throw new AgentOrchestratorError(`Workspace ${id} was not found.`, 404);
 
-    const current = store.projects[index];
-    const nextTopicRefs = payload.knowledgeTopicRefs
-      ? normalizeTopicRefs(payload.knowledgeTopicRefs, payload.knowledgeDrawerRefs || current.knowledgeDrawerRefs)
-      : current.knowledgeTopicRefs || [];
-    const nextDrawerRefs = payload.knowledgeDrawerRefs
-      ? normalizeDomainRefs(payload.knowledgeDrawerRefs, nextTopicRefs)
-      : normalizeDomainRefs(current.knowledgeDrawerRefs || [], nextTopicRefs);
-    const updated = {
-      ...current,
-      ...definedOnly({
-        name: payload.name,
-        description: payload.description,
-        agentIds: payload.agentIds ? dedupe(payload.agentIds) : undefined,
-        knowledgeDrawerRefs: payload.knowledgeDrawerRefs || payload.knowledgeTopicRefs ? nextDrawerRefs : undefined,
-        knowledgeTopicRefs: payload.knowledgeTopicRefs ? nextTopicRefs : undefined,
-        metadata: payload.metadata,
-      }),
-      updatedAt: new Date().toISOString(),
-    };
+      const current = store.workspaces[index];
+      const domainsChanged = payload.knowledgeDomainRefs !== undefined;
+      const topicsChanged = payload.knowledgeTopicRefs !== undefined;
+      const nextDomainRefs = domainsChanged
+        ? normalizeDomainRefs(payload.knowledgeDomainRefs)
+        : normalizeDomainRefs(current.knowledgeDomainRefs || []);
+      const nextTopicRefs = nextDomainRefs.length
+        ? normalizeTopicRefs(
+            topicsChanged ? payload.knowledgeTopicRefs : current.knowledgeTopicRefs || [],
+            nextDomainRefs
+          )
+        : [];
+      const updated = {
+        ...current,
+        ...definedOnly({
+          name: payload.name,
+          description: payload.description,
+          agentIds: payload.agentIds ? dedupe(payload.agentIds) : undefined,
+          knowledgeDomainRefs: domainsChanged ? nextDomainRefs : undefined,
+          knowledgeTopicRefs: domainsChanged || topicsChanged ? nextTopicRefs : undefined,
+          metadata: payload.metadata,
+        }),
+        updatedAt: new Date().toISOString(),
+      };
 
-    store.projects[index] = updated;
-    await this.writeStore(store);
-    return workspaceResult(updated);
+      store.workspaces[index] = updated;
+      await this.writeStore(store);
+      return { workspace: updated };
+    });
   }
 
-  async deleteProject(id) {
-    const store = await this.readStore();
-    const next = store.projects.filter((item) => item.id !== id);
-    if (next.length === store.projects.length) {
-      throw new AgentOrchestratorError(`Workspace ${id} was not found.`, 404);
-    }
-    store.projects = next;
-    const deletedConversations = store.conversations.filter((conversation) => conversation.projectId === id).length;
-    const deletedRuns = store.agentRuns.filter((run) => run.workspaceId === id || run.projectId === id).length;
-    store.conversations = store.conversations.filter((conversation) => conversation.projectId !== id);
-    store.agentRuns = store.agentRuns.filter((run) => run.workspaceId !== id && run.projectId !== id);
-    await this.writeStore(store);
-    return { deleted: true, id, workspaceId: id, projectId: id, deletedConversations, deletedRuns };
+  async deleteWorkspace(id) {
+    return this.withStoreLock(async () => {
+      const store = await this.readStore();
+      const next = store.workspaces.filter((item) => item.id !== id);
+      if (next.length === store.workspaces.length) {
+        throw new AgentOrchestratorError(`Workspace ${id} was not found.`, 404);
+      }
+      store.workspaces = next;
+      const deletedConversations = store.conversations.filter((conversation) => conversation.workspaceId === id).length;
+      const deletedRuns = store.agentRuns.filter((run) => run.workspaceId === id).length;
+      store.conversations = store.conversations.filter((conversation) => conversation.workspaceId !== id);
+      store.agentRuns = store.agentRuns.filter((run) => run.workspaceId !== id);
+      await this.writeStore(store);
+      return { deleted: true, workspaceId: id, deletedConversations, deletedRuns };
+    });
   }
 
   async executeAgentTask(id, input) {
@@ -741,7 +801,7 @@ export class AgentOrchestrator {
         output: { dryRun: true, request },
         nodeOutput: { dryRun: true, request },
       });
-      return { project, agent, request, retrieval, dryRun: true, agentRun: completedRun.run };
+      return { workspace: project, agent, request, retrieval, dryRun: true, agentRun: completedRun.run };
     }
 
     const runtime = this.runtimeRegistry.getRuntime(request.runtimeId);
@@ -752,9 +812,7 @@ export class AgentOrchestrator {
         agent,
         prompt: request.message,
         rootSession,
-        reset: request.reset,
         runId: request.runId,
-        contextPolicy: request.contextPolicy,
         runtimeOptions: request.runtimeOptions,
       });
       await this.persistRuntimeSession(project.id, payload.sessionId, result.runtimeSession, agent?.id, result.runId);
@@ -766,7 +824,7 @@ export class AgentOrchestrator {
         trace: result.events || [],
       });
 
-      return { project, agent, request, retrieval, result, agentRun: completedRun.run };
+      return { workspace: project, agent, request, retrieval, result, agentRun: completedRun.run };
     } catch (error) {
       await this.completeAgentRun(project.id, agentRun.id, {
         status: error.status === 499 || error.details?.cancelled ? "cancelled" : "failed",
@@ -787,7 +845,7 @@ export class AgentOrchestrator {
       retrieval,
     });
 
-    onEvent?.({ type: "prepared", project, agent, request, retrieval, agentRun });
+    onEvent?.({ type: "prepared", workspace: project, agent, request, retrieval, agentRun });
 
     if (payload.dryRun) {
       const result = { dryRun: true, text: `已生成编排请求：\n\n${request.message}` };
@@ -796,15 +854,53 @@ export class AgentOrchestrator {
         output: result,
         nodeOutput: result,
       });
-      onEvent?.({ type: "done", project, agent, request, retrieval, result, agentRun: completedRun.run });
-      return { project, agent, request, retrieval, result, agentRun: completedRun.run };
+      onEvent?.({ type: "done", workspace: project, agent, request, retrieval, result, agentRun: completedRun.run });
+      return { workspace: project, agent, request, retrieval, result, agentRun: completedRun.run };
     }
 
     const runtime = this.runtimeRegistry.getRuntime(request.runtimeId);
     await this.markAgentRunRunning(project.id, agentRun.id, request.runId);
     const tracedEvent = async (event) => {
+      if (event?.type === "runtime_request") {
+        await this.updateAgentRun(project.id, agentRun.id, (run, now) => {
+          run.status = "waiting_approval";
+          const nodeRun = getPrimaryNodeRun(run);
+          nodeRun.status = "waiting_approval";
+          nodeRun.updatedAt = now;
+          const trace = createTrace("runtime_request", event, now);
+          run.trace.push(trace);
+          nodeRun.trace.push(trace);
+          return run;
+        });
+        onEvent?.(event);
+        return;
+      } else if (event?.type === "runtime_request_resolved") {
+        await this.updateAgentRun(project.id, agentRun.id, (run, now) => {
+          run.status = "running";
+          const nodeRun = getPrimaryNodeRun(run);
+          nodeRun.status = "running";
+          nodeRun.updatedAt = now;
+          const trace = createTrace("runtime_request_resolved", event, now);
+          run.trace.push(trace);
+          nodeRun.trace.push(trace);
+          return run;
+        });
+        onEvent?.(event);
+        return;
+      }
       onEvent?.(event);
       if (event?.type === "runtime_event") {
+        if (event.eventType === "runtime_session_started" && event.sessionId) {
+          await this.persistRuntimeSession(project.id, payload.sessionId, {
+            provider: event.runtimeId || request.runtimeId,
+            sessionId: event.sessionId,
+            workspacePath: project.localWorkspacePath || "",
+            hippoSessionId: payload.sessionId || "",
+            status: "active",
+            runtimeOptions: request.runtimeOptions,
+            updatedAt: new Date().toISOString(),
+          }, agent?.id, request.runId);
+        }
         await this.appendAgentRunTrace(project.id, agentRun.id, {
           type: event.eventType || event.type,
           sourceType: event.sourceType,
@@ -820,9 +916,7 @@ export class AgentOrchestrator {
             agent,
             prompt: request.message,
             rootSession,
-            reset: request.reset,
             runId: request.runId,
-            contextPolicy: request.contextPolicy,
             runtimeOptions: request.runtimeOptions,
             onEvent: tracedEvent,
           })
@@ -831,9 +925,7 @@ export class AgentOrchestrator {
             agent,
             prompt: request.message,
             rootSession,
-            reset: request.reset,
             runId: request.runId,
-            contextPolicy: request.contextPolicy,
             runtimeOptions: request.runtimeOptions,
           });
 
@@ -845,8 +937,8 @@ export class AgentOrchestrator {
         runtimeSession: result.runtimeSession,
         trace: result.events || [],
       });
-      onEvent?.({ type: "done", project, agent, request, retrieval, result, agentRun: completedRun.run });
-      return { project, agent, request, retrieval, result, agentRun: completedRun.run };
+      onEvent?.({ type: "done", workspace: project, agent, request, retrieval, result, agentRun: completedRun.run });
+      return { workspace: project, agent, request, retrieval, result, agentRun: completedRun.run };
     } catch (error) {
       await this.completeAgentRun(project.id, agentRun.id, {
         status: error.status === 499 || error.details?.cancelled ? "cancelled" : "failed",
@@ -869,7 +961,7 @@ export class AgentOrchestrator {
       input: { task: payload.task, context: payload.context || {} },
       retrieval,
     });
-    onEvent?.({ type: "prepared", project, agent, request, retrieval, agentRun });
+    onEvent?.({ type: "prepared", workspace: project, agent, request, retrieval, agentRun });
 
     if (payload.dryRun) {
       const completedRun = await this.completeDagDryRun(project.id, agentRun.id, request);
@@ -877,8 +969,8 @@ export class AgentOrchestrator {
         dryRun: true,
         text: `已生成 DAG 运行图：${Object.keys(completedRun.run.nodeRuns || {}).length} 个节点。`,
       };
-      onEvent?.({ type: "done", project, agent, request, retrieval, result, agentRun: completedRun.run });
-      return { project, agent, request, retrieval, result, dryRun: true, agentRun: completedRun.run };
+      onEvent?.({ type: "done", workspace: project, agent, request, retrieval, result, agentRun: completedRun.run });
+      return { workspace: project, agent, request, retrieval, result, dryRun: true, agentRun: completedRun.run };
     }
 
     try {
@@ -891,8 +983,8 @@ export class AgentOrchestrator {
           : stringifyDagOutput(completedRun.run.output),
         output: completedRun.run.output,
       };
-      onEvent?.({ type: "done", project, agent, request, retrieval, result, agentRun: completedRun.run });
-      return { project, agent, request, retrieval, result, agentRun: completedRun.run };
+      onEvent?.({ type: "done", workspace: project, agent, request, retrieval, result, agentRun: completedRun.run });
+      return { workspace: project, agent, request, retrieval, result, agentRun: completedRun.run };
     } catch (error) {
       const status = error.status === 499 || error.details?.cancelled ? "cancelled" : "failed";
       await this.completeDagRun(project.id, agentRun.id, {
@@ -905,7 +997,7 @@ export class AgentOrchestrator {
 
   async prepareAgentTask(id, input) {
     const payload = executeAgentTaskSchema.parse(input);
-    const { project } = await this.getProject(id);
+    const { workspace: project } = await this.getWorkspace(id);
     const rootSession = payload.sessionId
       ? await this.ensureExecutionConversation(id, payload.sessionId, payload)
       : undefined;
@@ -922,37 +1014,32 @@ export class AgentOrchestrator {
       skipped: true,
       reason: rag.enabled ? "model-tool-controlled" : "rag-disabled",
     };
-    const contextPolicy = buildContextPolicy(payload, rootSession);
     const runtimeOptions = agent?.type === "dag"
       ? buildRuntimeOptions(payload)
       : withRagToolRuntimeOptions(buildRuntimeOptions(payload), project.id, rag);
     const message = buildAgentMessage(project, agent, payload.task, payload.context, {
       runtimeId: agent?.runtimeId || this.settings.defaultRuntimeId || config.defaultRuntimeId,
       rag,
-      contextPolicy,
       runtimeOptions,
     });
     const request = {
       runtimeId: agent?.runtimeId || this.settings.defaultRuntimeId || config.defaultRuntimeId,
       runId: payload.runId || randomUUID(),
-      projectId: project.id,
-      workspaceSlug: "",
+      workspaceId: project.id,
       mode: "chat",
       message,
       sessionId: payload.sessionId,
-      reset: payload.reset || contextPolicy.strategy === "reset" || contextPolicy.strategy === "manual-summary",
-      contextPolicy,
       runtimeOptions,
     };
     return { payload, project, agent, request, retrieval, rootSession };
   }
 
-  async ensureExecutionConversation(projectId, sessionId, payload = {}) {
+  async ensureExecutionConversation(workspaceId, sessionId, payload = {}) {
     try {
-      return (await this.getConversation(projectId, sessionId)).conversation;
+      return (await this.getConversation(workspaceId, sessionId)).conversation;
     } catch (error) {
       if (error.status !== 404) throw error;
-      return (await this.createConversation(projectId, {
+      return (await this.createConversation(workspaceId, {
         id: sessionId,
         title: deriveConversationTitle([{ role: "user", text: payload.task || "" }]) || "新对话",
         metadata: {
@@ -967,102 +1054,130 @@ export class AgentOrchestrator {
     return this.runtimeRegistry.cancelRun(runId);
   }
 
-  async cancelAgentRun(projectId, runId) {
-    const store = await this.readStore();
-    const index = store.agentRuns.findIndex((item) => item.workspaceId === projectId && item.id === runId);
-    if (index === -1) return this.cancelRuntimeRun(runId);
-    const now = new Date().toISOString();
-    const run = normalizeAgentRun(store.agentRuns[index]);
-    const cancellations = [];
-    if (run.rootCoordinator?.status === "running" && run.rootCoordinator.runtimeRunId) {
-      cancellations.push(this.cancelRuntimeRun(run.rootCoordinator.runtimeRunId));
-    }
-    for (const nodeRun of Object.values(run.nodeRuns || {})) {
-      if (nodeRun.status === "running" && nodeRun.runtimeRunId) {
-        cancellations.push(this.cancelRuntimeRun(nodeRun.runtimeRunId));
-      }
-      if (["pending", "ready", "running", "waiting", "waiting_approval"].includes(nodeRun.status)) {
-        nodeRun.status = "cancelled";
-        nodeRun.updatedAt = now;
-        nodeRun.trace.push(createTrace("node_run_cancelled", { nodeRunId: nodeRun.id }, now));
-      }
-    }
-    cancellations.push(this.cancelRuntimeRun(runId));
-    run.status = "cancelled";
-    run.error = { message: "Agent run was cancelled." };
-    if (run.rootCoordinator) {
-      run.rootCoordinator.status = "cancelled";
-      run.rootCoordinator.runtimeRunId = "";
-      run.rootCoordinator.updatedAt = now;
-    }
-    run.updatedAt = now;
-    run.trace.push(createTrace("agent_run_cancelled", { runId, cancellations }, now));
-    store.agentRuns[index] = run;
-    await this.writeStore(store);
-    return { cancelled: true, run, cancellations };
+  resolveRuntimeRequest(runId, requestId, result) {
+    return this.runtimeRegistry.resolveRequest(runId, requestId, result);
   }
 
-  async createAgentRun(project, rootSession, agent, request, { input, retrieval } = {}) {
-    const store = await this.readStore();
-    this.findProject(store, project.id);
-    const now = new Date().toISOString();
-    const agentSnapshot = snapshotAgentDefinition(agent);
-    const nodeRuns = createNodeRuns({
-      runId: request.runId,
-      request,
-      agentSnapshot,
-      input,
-      now,
-    });
-    const run = {
-      id: request.runId,
-      rootSessionId: rootSession?.id || request.sessionId || "",
-      workspaceId: project.id,
-      agentId: agent?.id || "",
-      agentVersion: agentSnapshot.version,
-      agentSnapshot,
-      status: "pending",
-      input,
-      output: undefined,
-      error: undefined,
-      request,
-      nodeRuns,
-      rootCoordinator: agentSnapshot.type === "dag" ? {
-        prototypeNodeId: agentSnapshot.rootNodeId,
-        status: "pending",
-        decisionCount: 0,
-        runtimeSession: undefined,
-        lastDecision: undefined,
-        updatedAt: now,
-      } : undefined,
-      trace: [{
-        id: randomUUID(),
-        type: "agent_run_created",
-        createdAt: now,
-        payload: { runId: request.runId, runtimeId: request.runtimeId, retrieval },
-      }],
-      createdAt: now,
-      updatedAt: now,
+  async steerAgentRun(workspaceId, runId, input) {
+    const { run } = await this.getAgentRun(workspaceId, runId);
+    const runtimeRunId = run.rootCoordinator?.status === "running"
+      ? run.rootCoordinator.runtimeRunId
+      : Object.values(run.nodeRuns || {}).find((nodeRun) =>
+          ["running", "waiting_approval"].includes(nodeRun.status) && nodeRun.runtimeRunId
+        )?.runtimeRunId;
+    if (!runtimeRunId) {
+      throw new AgentOrchestratorError("This run has no active Codex turn to steer.", 409);
+    }
+    return {
+      ...(await this.runtimeRegistry.steerRun(runtimeRunId, input)),
+      agentRunId: runId,
     };
-    store.agentRuns.push(run);
-    if (rootSession?.id) {
-      const conversationIndex = store.conversations.findIndex((item) =>
-        item.projectId === project.id && item.id === rootSession.id
-      );
-      if (conversationIndex !== -1) {
-        store.conversations[conversationIndex] = normalizeConversation({
-          ...store.conversations[conversationIndex],
-          runIds: dedupe([...(store.conversations[conversationIndex].runIds || []), run.id]),
-          updatedAt: now,
-        });
-      }
-    }
-    await this.writeStore(store);
-    return run;
   }
 
-  async markAgentRunRunning(projectId, runId, runtimeRunId) {
-    return this.updateAgentRun(projectId, runId, (run, now) => {
+  async cancelAgentRun(workspaceId, runId) {
+    return this.withStoreLock(async () => {
+      const store = await this.readStore();
+      const index = store.agentRuns.findIndex((item) => item.workspaceId === workspaceId && item.id === runId);
+      if (index === -1) return this.cancelRuntimeRun(runId);
+      const now = new Date().toISOString();
+      const run = normalizeAgentRun(store.agentRuns[index]);
+      const runtimeRunIds = new Set([runId]);
+      if (["running", "waiting_approval"].includes(run.rootCoordinator?.status) && run.rootCoordinator.runtimeRunId) {
+        runtimeRunIds.add(run.rootCoordinator.runtimeRunId);
+      }
+      for (const nodeRun of Object.values(run.nodeRuns || {})) {
+        if (["running", "waiting_approval"].includes(nodeRun.status) && nodeRun.runtimeRunId) {
+          runtimeRunIds.add(nodeRun.runtimeRunId);
+        }
+        if (["pending", "ready", "running", "waiting_approval"].includes(nodeRun.status)) {
+          nodeRun.status = "cancelled";
+          nodeRun.updatedAt = now;
+          nodeRun.trace.push(createTrace("node_run_cancelled", { nodeRunId: nodeRun.id }, now));
+        }
+      }
+      const cancellations = [...runtimeRunIds].map((runtimeRunId) => this.cancelRuntimeRun(runtimeRunId));
+      run.status = "cancelled";
+      run.error = { message: "Agent run was cancelled." };
+      if (run.rootCoordinator) {
+        run.rootCoordinator.status = "cancelled";
+        run.rootCoordinator.runtimeRunId = "";
+        run.rootCoordinator.updatedAt = now;
+      }
+      run.updatedAt = now;
+      run.trace.push(createTrace("agent_run_cancelled", { runId, runtimeRunIds: [...runtimeRunIds], cancellations }, now));
+      store.agentRuns[index] = run;
+      await this.writeStore(store);
+      return { cancelled: true, run, cancellations };
+    });
+  }
+
+  async createAgentRun(project, rootSession, agent, request, { input, retrieval, managed = true } = {}) {
+    return this.withStoreLock(async () => {
+      const store = await this.readStore();
+      this.findWorkspace(store, project.id);
+      if (store.agentRuns.some((run) => run.workspaceId === project.id && run.id === request.runId)) {
+        throw new AgentOrchestratorError(`Agent run ${request.runId} already exists.`, 409);
+      }
+      const now = new Date().toISOString();
+      const agentSnapshot = snapshotAgentDefinition(agent);
+      const nodeRuns = createNodeRuns({
+        runId: request.runId,
+        request,
+        agentSnapshot,
+        input,
+        now,
+      });
+      const run = {
+        id: request.runId,
+        rootSessionId: rootSession?.id || request.sessionId || "",
+        workspaceId: project.id,
+        agentId: agent?.id || "",
+        agentVersion: agentSnapshot.version,
+        agentSnapshot,
+        managed,
+        status: "pending",
+        input,
+        output: undefined,
+        error: undefined,
+        request,
+        nodeRuns,
+        rootCoordinator: agentSnapshot.type === "dag" ? {
+          prototypeNodeId: agentSnapshot.rootNodeId,
+          status: "pending",
+          decisionCount: 0,
+          runtimeSession: undefined,
+          lastDecision: undefined,
+          updatedAt: now,
+        } : undefined,
+        trace: [{
+          id: randomUUID(),
+          type: "agent_run_created",
+          createdAt: now,
+          payload: { runId: request.runId, runtimeId: request.runtimeId, retrieval },
+        }],
+        createdAt: now,
+        updatedAt: now,
+      };
+      store.agentRuns.push(run);
+      if (rootSession?.id) {
+        const conversationIndex = store.conversations.findIndex((item) =>
+          item.workspaceId === project.id && item.id === rootSession.id
+        );
+        if (conversationIndex !== -1) {
+          store.conversations[conversationIndex] = normalizeConversation({
+            ...store.conversations[conversationIndex],
+            runIds: dedupe([...(store.conversations[conversationIndex].runIds || []), run.id]),
+            updatedAt: now,
+          });
+        }
+      }
+      await this.writeStore(store);
+      return run;
+    });
+  }
+
+  async markAgentRunRunning(workspaceId, runId, runtimeRunId) {
+    return this.updateAgentRun(workspaceId, runId, (run, now) => {
       const nodeRun = getPrimaryNodeRun(run);
       nodeRun.status = "running";
       nodeRun.runtimeRunId = runtimeRunId;
@@ -1073,8 +1188,8 @@ export class AgentOrchestrator {
     });
   }
 
-  async appendAgentRunTrace(projectId, runId, event) {
-    return this.updateAgentRun(projectId, runId, (run, now) => {
+  async appendAgentRunTrace(workspaceId, runId, event) {
+    return this.updateAgentRun(workspaceId, runId, (run, now) => {
       const trace = createTrace(event.type || "runtime_event", event, now);
       run.trace.push(trace);
       const nodeRun = getPrimaryNodeRun(run);
@@ -1084,8 +1199,8 @@ export class AgentOrchestrator {
     });
   }
 
-  async completeAgentRun(projectId, runId, { status, output, nodeOutput, runtimeSession, trace = [], error } = {}) {
-    return this.updateAgentRun(projectId, runId, (run, now) => {
+  async completeAgentRun(workspaceId, runId, { status, output, nodeOutput, runtimeSession, trace = [], error } = {}) {
+    return this.updateAgentRun(workspaceId, runId, (run, now) => {
       const nodeRun = getPrimaryNodeRun(run);
       run.status = status;
       run.output = output;
@@ -1106,11 +1221,11 @@ export class AgentOrchestrator {
     });
   }
 
-  async updateAgentRun(projectId, runId, updater) {
+  async updateAgentRun(workspaceId, runId, updater) {
     return this.withStoreLock(async () => {
       const store = await this.readStore();
-      this.findProject(store, projectId);
-      const index = store.agentRuns.findIndex((item) => item.workspaceId === projectId && item.id === runId);
+      this.findWorkspace(store, workspaceId);
+      const index = store.agentRuns.findIndex((item) => item.workspaceId === workspaceId && item.id === runId);
       if (index === -1) throw new AgentOrchestratorError(`Agent run ${runId} was not found.`, 404);
       const now = new Date().toISOString();
       const updated = normalizeAgentRun(updater(deepClone(store.agentRuns[index]), now));
@@ -1121,8 +1236,8 @@ export class AgentOrchestrator {
     });
   }
 
-  async completeDagDryRun(projectId, runId, request) {
-    return this.updateAgentRun(projectId, runId, (run, now) => {
+  async completeDagDryRun(workspaceId, runId, request) {
+    return this.updateAgentRun(workspaceId, runId, (run, now) => {
       run.status = "completed";
       run.output = {
         dryRun: true,
@@ -1184,18 +1299,13 @@ export class AgentOrchestrator {
       let result;
       let decision;
       try {
-        result = await runtime.execute({
+        const executeRuntime = runtime.stream?.bind(runtime) || runtime.execute.bind(runtime);
+        result = await executeRuntime({
           project,
           agent: rootAgent,
           prompt,
           rootSession,
-          reset: false,
           runId: coordinatorRunId,
-          contextPolicy: {
-            strategy: "runtime",
-            rootSessionId: run.rootSessionId,
-            previousRuntimeSessionId: rootSession?.runtimeSessions?.codex?.sessionId || "",
-          },
           runtimeOptions: {
             ...coordinatorRuntimeOptions,
             mcpServerUrls: {
@@ -1204,6 +1314,14 @@ export class AgentOrchestrator {
             },
             ignoreUserConfig: true,
           },
+          onEvent: (event) => this.handleDagRuntimeEvent({
+            project,
+            runId,
+            runtimeRunId: coordinatorRunId,
+            coordinator: true,
+            event,
+            onEvent,
+          }),
         });
       } catch (error) {
         return this.completeDagRun(project.id, runId, {
@@ -1286,10 +1404,10 @@ export class AgentOrchestrator {
     }
   }
 
-  async getRootRuntimeSession(projectId, run) {
+  async getRootRuntimeSession(workspaceId, run) {
     if (run.rootSessionId) {
       try {
-        return (await this.getConversation(projectId, run.rootSessionId)).conversation;
+        return (await this.getConversation(workspaceId, run.rootSessionId)).conversation;
       } catch (error) {
         if (error.status !== 404) throw error;
       }
@@ -1299,6 +1417,42 @@ export class AgentOrchestrator {
       id: run.rootSessionId || `root:${run.id}`,
       runtimeSessions: { [runtimeSession.provider || "codex"]: runtimeSession },
     } : undefined;
+  }
+
+  async handleDagRuntimeEvent({ project, runId, runtimeRunId, nodeRunId = "", coordinator = false, event, onEvent }) {
+    const runtimeEvent = {
+      ...event,
+      runId: event.runId || runtimeRunId,
+      agentRunId: runId,
+      runtimeRunId,
+      runtimeScope: coordinator ? "coordinator" : "node",
+      nodeRunId: nodeRunId || undefined,
+    };
+    const publishedEvent = event.type === "stdout" || event.type === "stderr"
+      ? { ...runtimeEvent, type: "dag_runtime_output", stream: event.type }
+      : runtimeEvent;
+    if (["runtime_request", "runtime_request_resolved"].includes(event.type)) {
+      const waiting = event.type === "runtime_request";
+      await this.updateAgentRun(project.id, runId, (run, now) => {
+        if (coordinator) {
+          run.status = waiting ? "waiting_approval" : "coordinating";
+          run.rootCoordinator.status = waiting ? "waiting_approval" : "running";
+          run.rootCoordinator.updatedAt = now;
+        } else {
+          const nodeRun = run.nodeRuns[nodeRunId];
+          run.status = waiting ? "waiting_approval" : "running";
+          if (nodeRun) {
+            nodeRun.status = waiting ? "waiting_approval" : "running";
+            nodeRun.updatedAt = now;
+          }
+        }
+        const trace = createTrace(event.type, publishedEvent, now);
+        run.trace.push(trace);
+        if (nodeRunId && run.nodeRuns[nodeRunId]) run.nodeRuns[nodeRunId].trace.push(trace);
+        return run;
+      });
+    }
+    onEvent?.(publishedEvent);
   }
 
   async executeDagNode(project, agent, request, runId, nodeRunId, onEvent) {
@@ -1335,20 +1489,25 @@ export class AgentOrchestrator {
     onEvent?.({ type: "dag_node_started", runId, nodeRunId, nodeId: nodeRun.nodeId, runtimeRunId });
 
     try {
-      const result = await runtime.execute({
+      const executeRuntime = runtime.stream?.bind(runtime) || runtime.execute.bind(runtime);
+      const result = await executeRuntime({
         project,
         agent: nodeAgent,
         prompt,
         rootSession: undefined,
-        reset: true,
+        freshSession: true,
         runId: runtimeRunId,
-        contextPolicy: {
-          strategy: "reset",
-          summary: `DAG node ${nodeRun.nodeId} runs in an isolated runtime session under root run ${runId}.`,
-        },
         runtimeOptions: {
           ...nodeRuntimeOptions,
         },
+        onEvent: (event) => this.handleDagRuntimeEvent({
+          project,
+          runId,
+          runtimeRunId,
+          nodeRunId,
+          event,
+          onEvent,
+        }),
       });
       const resultApprovalPolicy = normalizeResultApprovalPolicy(nodeDef.resultApprovalPolicy);
       const updated = await this.updateAgentRun(project.id, runId, (current, now) => {
@@ -1404,8 +1563,8 @@ export class AgentOrchestrator {
     }
   }
 
-  async completeDagRun(projectId, runId, { status, output, error } = {}) {
-    return this.updateAgentRun(projectId, runId, (run, now) => {
+  async completeDagRun(workspaceId, runId, { status, output, error } = {}) {
+    return this.updateAgentRun(workspaceId, runId, (run, now) => {
       assertGraphRunMutable(run);
       run.status = status;
       run.output = output || run.output;
@@ -1419,41 +1578,43 @@ export class AgentOrchestrator {
     });
   }
 
-  async persistRuntimeSession(projectId, conversationId, runtimeSession, agentId = "", runId = "") {
+  async persistRuntimeSession(workspaceId, conversationId, runtimeSession, agentId = "", runId = "") {
     if (!conversationId || !runtimeSession?.provider) return;
-    const store = await this.readStore();
-    this.findProject(store, projectId);
-    const index = store.conversations.findIndex((item) =>
-      item.projectId === projectId && item.id === conversationId
-    );
-    if (index === -1) return;
-    const current = store.conversations[index];
-    const now = new Date().toISOString();
-    const runtimeSessions = {
-      ...normalizeRuntimeSessions(current.runtimeSessions || current.metadata?.runtimeSessions),
-      [runtimeSession.provider]: {
-        ...(current.runtimeSessions?.[runtimeSession.provider] || {}),
-        ...runtimeSession,
-        updatedAt: runtimeSession.updatedAt || now,
-        createdAt: current.runtimeSessions?.[runtimeSession.provider]?.createdAt || now,
-      },
-    };
-    const metadata = {
-      ...(current.metadata || {}),
-      runtimeSessions,
-      lastRuntimeProvider: runtimeSession.provider,
-      lastRuntimeSessionId: runtimeSession.sessionId || "",
-      lastRunId: runId || current.metadata?.lastRunId || "",
-    };
-    store.conversations[index] = normalizeConversation({
-      ...current,
-      activeAgentId: agentId || current.activeAgentId || "",
-      runtimeSessions,
-      runIds: dedupe([...(current.runIds || []), runId]),
-      metadata,
-      updatedAt: now,
+    return this.withStoreLock(async () => {
+      const store = await this.readStore();
+      this.findWorkspace(store, workspaceId);
+      const index = store.conversations.findIndex((item) =>
+        item.workspaceId === workspaceId && item.id === conversationId
+      );
+      if (index === -1) return;
+      const current = store.conversations[index];
+      const now = new Date().toISOString();
+      const runtimeSessions = {
+        ...normalizeRuntimeSessions(current.runtimeSessions || current.metadata?.runtimeSessions),
+        [runtimeSession.provider]: {
+          ...(current.runtimeSessions?.[runtimeSession.provider] || {}),
+          ...runtimeSession,
+          updatedAt: runtimeSession.updatedAt || now,
+          createdAt: current.runtimeSessions?.[runtimeSession.provider]?.createdAt || now,
+        },
+      };
+      const metadata = {
+        ...(current.metadata || {}),
+        runtimeSessions,
+        lastRuntimeProvider: runtimeSession.provider,
+        lastRuntimeSessionId: runtimeSession.sessionId || "",
+        lastRunId: runId || current.metadata?.lastRunId || "",
+      };
+      store.conversations[index] = normalizeConversation({
+        ...current,
+        activeAgentId: agentId || current.activeAgentId || "",
+        runtimeSessions,
+        runIds: dedupe([...(current.runIds || []), runId]),
+        metadata,
+        updatedAt: now,
+      });
+      await this.writeStore(store);
     });
-    await this.writeStore(store);
   }
 
   async retrieveRag(payload) {
@@ -1461,21 +1622,22 @@ export class AgentOrchestrator {
     return this.client.vectorSearch(payload.workspaceSlug, payload);
   }
 
-  async getProjectKnowledgeIndex(projectId) {
-    const { project } = await this.getProject(projectId);
-    return this.getProjectKnowledgePlan(project, {});
+  async getWorkspaceKnowledgeIndex(workspaceId) {
+    const { workspace } = await this.getWorkspace(workspaceId);
+    return this.getWorkspaceKnowledgePlan(workspace, {});
   }
 
-  async getProjectKnowledgePlan(projectOrId, input = {}) {
-    const project = typeof projectOrId === "string" ? (await this.getProject(projectOrId)).project : projectOrId;
-    const scope = resolveWorkspaceKnowledgeScope(project, input);
+  async getWorkspaceKnowledgePlan(workspaceOrId, input = {}) {
+    const payload = workspaceRagPlanSchema.parse(input);
+    const workspace = typeof workspaceOrId === "string" ? (await this.getWorkspace(workspaceOrId)).workspace : workspaceOrId;
+    const scope = resolveWorkspaceKnowledgeScope(workspace, payload);
     const knowledge = this.resourceManager
       ? scope.empty
         ? { domains: [], topics: [] }
-        : await this.resourceManager.getProjectKnowledgeIndex(scope)
+        : await this.resourceManager.getWorkspaceKnowledgeIndex(scope)
       : { domains: [], topics: [] };
     return {
-      project,
+      workspace,
       scope,
       knowledge,
       protocol: {
@@ -1489,18 +1651,15 @@ export class AgentOrchestrator {
     };
   }
 
-  async searchProjectKnowledge(projectOrId, input = {}) {
-    const project = typeof projectOrId === "string" ? (await this.getProject(projectOrId)).project : projectOrId;
-    const scope = resolveWorkspaceKnowledgeScope(project, input);
-    const knowledgeIndex = input.knowledgeIndex || (this.resourceManager
+  async searchWorkspaceKnowledge(workspaceOrId, input = {}) {
+    const payload = workspaceRagSearchSchema.parse(input);
+    const workspace = typeof workspaceOrId === "string" ? (await this.getWorkspace(workspaceOrId)).workspace : workspaceOrId;
+    const scope = resolveWorkspaceKnowledgeScope(workspace, payload);
+    const knowledgeIndex = this.resourceManager
       ? scope.empty
         ? { domains: [], topics: [] }
-        : await this.resourceManager.getProjectKnowledgeIndex({
-          drawerRefs: scope.drawerRefs,
-          topicRefs: scope.topicRefs,
-        })
-      : { domains: [], topics: [] });
-    if (!input.query) return { skipped: true, reason: "missing-query", results: [], topics: knowledgeIndex.topics };
+        : await this.resourceManager.getWorkspaceKnowledgeIndex(scope)
+      : { domains: [], topics: [] };
     if (!knowledgeIndex.topics.length) {
       return { skipped: true, reason: "workspace-has-no-authorized-topics", results: [], topics: [] };
     }
@@ -1513,9 +1672,8 @@ export class AgentOrchestrator {
       if (!sync.workspaceSlug) continue;
       const result = await this.retrieveRag({
         workspaceSlug: sync.workspaceSlug,
-        query: input.query,
-        topN: input.topN || 4,
-        scoreThreshold: input.scoreThreshold,
+        query: payload.query,
+        topN: payload.topN,
       });
       searches.push({ topic, workspaceSlug: sync.workspaceSlug, documentNames: sync.documentNames, result });
     }
@@ -1531,37 +1689,28 @@ export class AgentOrchestrator {
     };
   }
 
-  async resolveAnythingllmWorkspace(payload) {
-    const response = this.ragProvider.ensureWorkspace
-      ? await this.ragProvider.ensureWorkspace({ name: payload.name })
-      : await this.client.createWorkspace({ name: payload.name, chatMode: "chat" });
-    const slug = extractWorkspaceSlug(response);
-    if (!slug) {
-      throw new AgentOrchestratorError("AnythingLLM workspace was created but no slug was returned.", 502, response);
-    }
-    return slug;
-  }
-
   async readStore() {
     try {
       const content = await fs.readFile(this.storePath, "utf8");
       const store = JSON.parse(content);
       return {
-        version: 3,
-        projects: normalizeProjects(store.projects || store.agentWorkspaces),
+        version: 1,
+        workspaces: normalizeWorkspaces(store.workspaces),
         agents: normalizeAgents(store.agents),
         conversations: normalizeConversations(store.conversations),
         agentRuns: normalizeAgentRuns(store.agentRuns),
       };
     } catch (error) {
-      if (error.code === "ENOENT") return { version: 3, projects: [], agents: [], conversations: [], agentRuns: [] };
+      if (error.code === "ENOENT") return { version: 1, workspaces: [], agents: [], conversations: [], agentRuns: [] };
       throw error;
     }
   }
 
   async writeStore(store) {
     await fs.mkdir(path.dirname(this.storePath), { recursive: true });
-    await fs.writeFile(this.storePath, `${JSON.stringify(store, null, 2)}\n`);
+    const temporaryPath = `${this.storePath}.${process.pid}.${randomUUID()}.tmp`;
+    await fs.writeFile(temporaryPath, `${JSON.stringify(store, null, 2)}\n`);
+    await fs.rename(temporaryPath, this.storePath);
   }
 
   async withStoreLock(operation) {
@@ -1578,10 +1727,10 @@ export class AgentOrchestrator {
     }
   }
 
-  findProject(store, projectId) {
-    const project = store.projects.find((item) => item.id === projectId);
-    if (!project) throw new AgentOrchestratorError(`Workspace ${projectId} was not found.`, 404);
-    return project;
+  findWorkspace(store, workspaceId) {
+    const workspace = store.workspaces.find((item) => item.id === workspaceId);
+    if (!workspace) throw new AgentOrchestratorError(`Workspace ${workspaceId} was not found.`, 404);
+    return workspace;
   }
 }
 
@@ -1611,9 +1760,6 @@ export function buildAgentMessage(project, agent, task, context = undefined, opt
     options.rag?.enabled
       ? `当前节点已启用 RAG 工具。仅在任务需要工作区知识时调用 hippo_rag_scope 和 hippo_rag_search；检索上限为 Top ${options.rag.topN}。不要在执行前默认检索。`
       : "当前节点未配置 RAG 工具，不要执行知识库检索。",
-    options.contextPolicy?.strategy
-      ? `会话上下文策略：${formatContextPolicy(options.contextPolicy)}`
-      : "",
     options.runtimeOptions?.sandboxMode ? `本轮 Codex sandbox 权限：${options.runtimeOptions.sandboxMode}` : "",
     project.localWorkspacePath ? `本地工作区目录：\n${project.localWorkspacePath}` : "",
     context ? `运行时上下文：\n${JSON.stringify(context, null, 2)}` : "",
@@ -1624,8 +1770,8 @@ export function buildAgentMessage(project, agent, task, context = undefined, opt
 
 export function agentSchemas() {
   return {
-    createProjectSchema,
-    updateProjectSchema,
+    createWorkspaceSchema,
+    updateWorkspaceSchema,
     createConversationSchema,
     updateConversationSchema,
     createAgentSchema,
@@ -1659,43 +1805,9 @@ function normalizeMessages(messages) {
   }));
 }
 
-function extractWorkspaceSlug(response) {
-  return response?.workspace?.slug || response?.slug || response?.workspace?.[0]?.slug;
-}
-
 function formatSkill(skill) {
   const details = [skill.description, skill.instructions].filter(Boolean).join(" ");
   return details ? `- ${skill.name}: ${details}` : `- ${skill.name}`;
-}
-
-function formatContextPolicy(policy) {
-  if (policy.strategy === "reset") return "重置 runtime 会话，不继承之前的 Codex session。";
-  if (policy.strategy === "manual-summary") {
-    return [
-      "使用人工摘要作为新上下文，不直接继承之前的 Codex session。",
-      policy.summary ? `摘要：\n${policy.summary}` : "未提供摘要。",
-    ].join("\n");
-  }
-  return policy.previousRuntimeSessionId
-    ? `继承 runtime session：${policy.previousRuntimeSessionId}`
-    : "使用 runtime 默认上下文；当前没有可继承的 session。";
-}
-
-function buildContextPolicy(payload, rootSession) {
-  const strategy = ["runtime", "reset", "manual-summary"].includes(payload.contextStrategy)
-    ? payload.contextStrategy
-    : payload.reset
-      ? "reset"
-      : "runtime";
-  const previousRuntimeSession = rootSession?.runtimeSessions?.codex;
-  return {
-    strategy,
-    summary: payload.contextSummary ? String(payload.contextSummary).trim() : "",
-    summaryUpdatedAt: payload.contextSummary ? new Date().toISOString() : "",
-    rootSessionId: rootSession?.id || payload.sessionId || "",
-    runtimeProvider: "codex",
-    previousRuntimeSessionId: strategy === "runtime" ? previousRuntimeSession?.sessionId || "" : "",
-  };
 }
 
 function buildRuntimeOptions(payload) {
@@ -1735,40 +1847,40 @@ function deepClone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function primaryDrawer(value) {
+function primaryDomain(value) {
   return String(value || "").replaceAll("\\", "/").split("/").filter(Boolean)[0] || "";
 }
 
-function normalizeTopicRefs(topicRefs = [], drawerRefs = []) {
-  const domains = new Set((drawerRefs || []).map(primaryDrawer).filter(Boolean));
+function normalizeTopicRefs(topicRefs = [], domainRefs = []) {
+  const domains = new Set((domainRefs || []).map(primaryDomain).filter(Boolean));
   return dedupe((topicRefs || []).map(topicPath).filter((value) => {
     if (!value) return false;
-    return !domains.size || domains.has(primaryDrawer(value));
+    return !domains.size || domains.has(primaryDomain(value));
   }));
 }
 
-function normalizeDomainRefs(drawerRefs = [], topicRefs = []) {
+function normalizeDomainRefs(domainRefs = [], topicRefs = []) {
   return dedupe([
-    ...(drawerRefs || []).map(primaryDrawer),
-    ...(topicRefs || []).map(primaryDrawer),
+    ...(domainRefs || []).map(primaryDomain),
+    ...(topicRefs || []).map(primaryDomain),
   ]);
 }
 
-function resolveWorkspaceKnowledgeScope(project, input = {}) {
-  const workspaceDomains = normalizeDomainRefs(project.knowledgeDrawerRefs || [], project.knowledgeTopicRefs || []);
-  const requestedDomains = normalizeDomainRefs(input.drawerRefs || input.domainRefs || [], input.topicRefs || []);
-  const hasRequestedDomains = Boolean((input.drawerRefs || input.domainRefs || []).length);
-  const hasRequestedTopics = Boolean((input.topicRefs || input.knowledgeTopicRefs || []).length);
-  const drawerRefs = requestedDomains.length
+function resolveWorkspaceKnowledgeScope(workspace, input = {}) {
+  const workspaceDomains = normalizeDomainRefs(workspace.knowledgeDomainRefs || [], workspace.knowledgeTopicRefs || []);
+  const requestedDomains = normalizeDomainRefs(input.domainRefs || [], input.topicRefs || []);
+  const hasRequestedDomains = Boolean(input.domainRefs?.length);
+  const hasRequestedTopics = Boolean(input.topicRefs?.length);
+  const domainRefs = requestedDomains.length
     ? workspaceDomains.filter((domain) => requestedDomains.includes(domain))
     : workspaceDomains;
-  const workspaceTopics = normalizeTopicRefs(project.knowledgeTopicRefs || [], drawerRefs);
-  const requestedTopics = normalizeTopicRefs(input.topicRefs || input.knowledgeTopicRefs || [], drawerRefs);
+  const workspaceTopics = normalizeTopicRefs(workspace.knowledgeTopicRefs || [], domainRefs);
+  const requestedTopics = normalizeTopicRefs(input.topicRefs || [], domainRefs);
   const topicRefs = requestedTopics.length
     ? requestedTopics.filter((topic) => !workspaceTopics.length || workspaceTopics.includes(topic))
     : workspaceTopics;
-  const empty = !drawerRefs.length || (hasRequestedTopics && !topicRefs.length) || (hasRequestedDomains && !requestedDomains.length);
-  return { drawerRefs, topicRefs, empty };
+  const empty = !domainRefs.length || (hasRequestedTopics && !topicRefs.length) || (hasRequestedDomains && !requestedDomains.length);
+  return { domainRefs, topicRefs, empty };
 }
 
 function topicPath(value) {
@@ -1801,20 +1913,27 @@ function mergeRagResults(searches = []) {
     .slice(0, 12);
 }
 
-function normalizeProjects(projects) {
-  if (!Array.isArray(projects)) return [];
-  return projects.map((project) => {
-    const knowledgeTopicRefs = Array.isArray(project.knowledgeTopicRefs)
-      ? normalizeTopicRefs(project.knowledgeTopicRefs, project.knowledgeDrawerRefs)
+function normalizeWorkspaces(workspaces) {
+  if (!Array.isArray(workspaces)) return [];
+  return workspaces.map((workspace) => {
+    const knowledgeTopicRefs = Array.isArray(workspace.knowledgeTopicRefs)
+      ? normalizeTopicRefs(workspace.knowledgeTopicRefs, workspace.knowledgeDomainRefs)
       : [];
     return {
-      ...project,
-      agentIds: Array.isArray(project.agentIds) ? project.agentIds : [],
-      knowledgeDrawerRefs: normalizeDomainRefs(
-        Array.isArray(project.knowledgeDrawerRefs) ? project.knowledgeDrawerRefs : [],
+      id: workspace.id,
+      name: workspace.name,
+      description: workspace.description || "",
+      agentIds: Array.isArray(workspace.agentIds) ? workspace.agentIds : [],
+      knowledgeDomainRefs: normalizeDomainRefs(
+        Array.isArray(workspace.knowledgeDomainRefs) ? workspace.knowledgeDomainRefs : [],
         knowledgeTopicRefs
       ),
       knowledgeTopicRefs,
+      localWorkspacePath: workspace.localWorkspacePath || "",
+      localWorkspaceFolderName: workspace.localWorkspaceFolderName || "",
+      metadata: workspace.metadata || {},
+      createdAt: workspace.createdAt,
+      updatedAt: workspace.updatedAt,
     };
   });
 }
@@ -1825,17 +1944,19 @@ function normalizeAgents(agents) {
 }
 
 function normalizeAgent(agent) {
-  const { knowledgeRefs, defaultMode, topN, scoreThreshold, ...current } = agent || {};
+  const current = agent || {};
   const type = current.type === "dag" ? "dag" : "single";
   const nodes = type === "dag" ? normalizeAgentNodes(current.nodes) : [];
   return {
-    ...current,
+    id: current.id,
     type,
     version: Number(current.version || 1),
+    name: current.name,
+    description: current.description || "",
+    systemPrompt: current.systemPrompt || "",
+    skills: Array.isArray(current.skills) ? current.skills : [],
     mcpServers: Array.isArray(current.mcpServers) ? current.mcpServers : [],
     runtimeId: current.runtimeId || config.defaultRuntimeId,
-    explicitRagDocumentNames: current.explicitRagDocumentNames || current.ragDocumentNames || [],
-    ragDocumentNames: current.ragDocumentNames || current.explicitRagDocumentNames || [],
     rag: normalizeNodeRag(current.rag),
     rootNodeId: type === "dag" ? current.rootNodeId || nodes[0]?.id || "" : "",
     nodes,
@@ -1844,6 +1965,8 @@ function normalizeAgent(agent) {
       ? current.executionPolicy
       : {},
     metadata: current.metadata || {},
+    createdAt: current.createdAt,
+    updatedAt: current.updatedAt,
   };
 }
 
@@ -1852,11 +1975,9 @@ function normalizeAgentNodes(nodes) {
   return nodes.map((node) => stripEmptyObject({
     id: String(node.id || "").trim(),
     kind: "task",
-    resultApprovalPolicy: normalizeResultApprovalPolicy(
-      node.resultApprovalPolicy || node.approvalPolicy || node.approval || (node.kind === "wait" ? "manual" : "")
-    ),
+    resultApprovalPolicy: normalizeResultApprovalPolicy(node.resultApprovalPolicy),
     runtimeApprovalPolicy: normalizeRuntimeApprovalPolicy(node.runtimeApprovalPolicy),
-    transitionInstruction: node.transitionInstruction || node.routingInstruction || "",
+    transitionInstruction: node.transitionInstruction || "",
     name: node.name || node.id || "",
     description: node.description || "",
     agentId: node.agentId || "",
@@ -2040,7 +2161,7 @@ function downstreamNodeIds(nodeId, edges = []) {
 function graphRunStatusAfterNodeUpdate(run) {
   const statuses = Object.values(run.nodeRuns || {}).map((nodeRun) => nodeRun.status);
   if (statuses.some((status) => ["pending", "ready", "running"].includes(status))) return "running";
-  if (statuses.some((status) => ["waiting", "waiting_approval"].includes(status))) return "waiting_approval";
+  if (statuses.includes("waiting_approval")) return "waiting_approval";
   return "coordinating";
 }
 
@@ -2246,10 +2367,11 @@ function normalizeAgentRun(run) {
   return {
     id: run.id || randomUUID(),
     rootSessionId: run.rootSessionId || "",
-    workspaceId: run.workspaceId || run.projectId || "",
+    workspaceId: run.workspaceId,
     agentId: run.agentId || "",
     agentVersion: Number(run.agentVersion || run.agentSnapshot?.version || 1),
     agentSnapshot: snapshotAgentDefinition(run.agentSnapshot || {}),
+    managed: run.managed !== false,
     status: normalizeRunStatus(run.status),
     input: run.input,
     output: run.output,
@@ -2273,7 +2395,7 @@ function normalizeNodeRun(nodeRun, runId, now) {
     prototypeNodeId: nodeRun.prototypeNodeId || nodeRun.nodeId || "root",
     attempt: Math.max(1, Number(nodeRun.attempt) || 1),
     parentNodeRunId: nodeRun.parentNodeRunId || "",
-    kind: nodeRun.kind === "wait" ? "wait" : "task",
+    kind: "task",
     agentId: nodeRun.agentId || "",
     status: normalizeNodeStatus(nodeRun.status),
     runtimeRunId: nodeRun.runtimeRunId || "",
@@ -2295,7 +2417,6 @@ function normalizeRunStatus(status) {
     "pending",
     "coordinating",
     "running",
-    "waiting",
     "waiting_approval",
     "waiting_user",
     "completed",
@@ -2323,16 +2444,8 @@ function normalizeRootCoordinator(value, agentSnapshot, now) {
   };
 }
 
-function workspaceResult(workspace) {
-  return { workspace, project: workspace };
-}
-
-function workspaceResultList(workspaces) {
-  return { workspaces, projects: workspaces };
-}
-
 function normalizeNodeStatus(status) {
-  return ["pending", "ready", "running", "waiting", "waiting_approval", "completed", "failed", "cancelled"].includes(status)
+  return ["pending", "ready", "running", "waiting_approval", "completed", "failed", "cancelled"].includes(status)
     ? status
     : "pending";
 }
@@ -2368,13 +2481,13 @@ function normalizeConversations(conversations) {
 
 function normalizeConversation(conversation) {
   const metadata = conversation.metadata || {};
-  const runtimeSessions = normalizeRuntimeSessions(conversation.runtimeSessions || metadata.runtimeSessions);
+  const runtimeSessions = normalizeRuntimeSessions(conversation.runtimeSessions);
   return {
     ...conversation,
     type: conversation.type || "root",
     title: conversation.title || deriveConversationTitle(conversation.messages) || "新对话",
     messages: normalizeMessages(conversation.messages),
-    activeAgentId: conversation.activeAgentId || metadata.activeAgentId || "",
+    activeAgentId: conversation.activeAgentId || "",
     runtimeSessions,
     runIds: Array.isArray(conversation.runIds) ? conversation.runIds : [],
     metadata: {
@@ -2398,21 +2511,9 @@ function normalizeRuntimeSessions(value) {
           workspacePath: session.workspacePath || "",
           hippoSessionId: session.hippoSessionId || "",
           status: session.status || (session.sessionId ? "active" : "ephemeral"),
-          contextPolicy: normalizeStoredContextPolicy(session.contextPolicy),
           createdAt: session.createdAt || session.updatedAt || new Date().toISOString(),
           updatedAt: session.updatedAt || new Date().toISOString(),
         },
       ])
   );
-}
-
-function normalizeStoredContextPolicy(policy) {
-  if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
-    return { strategy: "runtime", summary: "", summaryUpdatedAt: "" };
-  }
-  return {
-    strategy: ["runtime", "reset", "manual-summary"].includes(policy.strategy) ? policy.strategy : "runtime",
-    summary: policy.summary || "",
-    summaryUpdatedAt: policy.summaryUpdatedAt || "",
-  };
 }

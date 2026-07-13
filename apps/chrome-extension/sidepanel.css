@@ -219,19 +219,8 @@ label {
   gap: 8px;
 }
 
-.inlineControl {
-  display: flex;
-  grid-auto-flow: column;
-  align-items: center;
-  gap: 6px;
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-.inlineControl input {
-  width: 14px;
-  height: 14px;
-  accent-color: var(--accent);
+.composerBar {
+  justify-content: flex-end;
 }
 
 .primary {

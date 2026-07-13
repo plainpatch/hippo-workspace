@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { config } from "./config.js";
+import { CodexAppServerRuntimeAdapter } from "./codex-app-server.js";
 
 const runningProcesses = new Map();
 
@@ -21,9 +22,9 @@ export class CodexRuntimeAdapter {
     this.serviceTier = serviceTier;
   }
 
-  async execute({ project, agent, prompt, rootSession, reset = false, runId = randomUUID(), contextPolicy, runtimeOptions } = {}) {
+  async execute({ project, agent, prompt, rootSession, freshSession = false, runId = randomUUID(), runtimeOptions } = {}) {
     const outputPath = path.join(os.tmpdir(), `hippo-codex-${Date.now()}-${process.pid}.txt`);
-    const existingSessionId = reset ? "" : getExistingCodexSessionId(rootSession);
+    const existingSessionId = freshSession ? "" : getExistingCodexSessionId(rootSession);
     const args = this.buildArgs(project, outputPath, { existingSessionId, runtimeOptions });
     args.push("-");
 
@@ -59,20 +60,24 @@ export class CodexRuntimeAdapter {
         sessionId: extractCodexSessionId(events, stdout) || getExistingCodexSessionId(rootSession),
         resumedFromSessionId: existingSessionId,
         status: events.length ? "active" : "ephemeral",
-        contextPolicy,
         runtimeOptions: normalizeRuntimeOptions(runtimeOptions, this),
       }),
     };
   }
 
-  async stream({ project, agent, prompt, rootSession, reset = false, runId = randomUUID(), contextPolicy, runtimeOptions, onEvent } = {}) {
+  async stream({ project, agent, prompt, rootSession, freshSession = false, runId = randomUUID(), runtimeOptions, onEvent } = {}) {
     const outputPath = path.join(os.tmpdir(), `hippo-codex-${Date.now()}-${process.pid}.txt`);
-    const existingSessionId = reset ? "" : getExistingCodexSessionId(rootSession);
+    const existingSessionId = freshSession ? "" : getExistingCodexSessionId(rootSession);
     const args = this.buildArgs(project, outputPath, { existingSessionId, runtimeOptions });
     args.push("-");
 
     const events = [];
     const collectStreamEvents = createJsonLineCollector();
+    let eventChain = Promise.resolve();
+    const emit = (event) => {
+      eventChain = eventChain.then(() => onEvent?.(event));
+      eventChain.catch(() => {});
+    };
     const { stdout, stderr } = await runCommand(this.command, args, {
       runId,
       runtimeId: this.id,
@@ -80,16 +85,17 @@ export class CodexRuntimeAdapter {
       timeoutMs: Number(process.env.CODEX_EXEC_TIMEOUT_MS || 300000),
       onStdout: (chunk) => {
         const parsed = collectStreamEvents(chunk);
-        if (parsed.passthrough) onEvent?.({ type: "stdout", text: parsed.passthrough });
+        if (parsed.passthrough) emit({ type: "stdout", text: parsed.passthrough });
         for (const event of parsed.events) {
           events.push(event);
           const normalized = normalizeCodexEvent(event, { runId, runtimeId: this.id });
-          onEvent?.(normalized);
-          if (normalized.text) onEvent?.({ type: "stdout", text: normalized.text });
+          emit(normalized);
+          if (normalized.text) emit({ type: "stdout", text: normalized.text });
         }
       },
-      onStderr: (chunk) => onEvent?.({ type: "stderr", text: chunk }),
+      onStderr: (chunk) => emit({ type: "stderr", text: chunk }),
     });
+    await eventChain;
 
     let text = "";
     try {
@@ -114,7 +120,6 @@ export class CodexRuntimeAdapter {
         sessionId: extractCodexSessionId(events, stdout) || getExistingCodexSessionId(rootSession),
         resumedFromSessionId: existingSessionId,
         status: events.length ? "active" : "ephemeral",
-        contextPolicy,
         runtimeOptions: normalizeRuntimeOptions(runtimeOptions, this),
       }),
     };
@@ -236,7 +241,7 @@ function extractCodexSessionId(events, stdout) {
   return match?.[1] || "";
 }
 
-function buildRuntimeSession({ project, rootSession, sessionId, resumedFromSessionId, status, contextPolicy, runtimeOptions }) {
+function buildRuntimeSession({ project, rootSession, sessionId, resumedFromSessionId, status, runtimeOptions }) {
   return {
     provider: "codex",
     sessionId: sessionId || "",
@@ -244,7 +249,6 @@ function buildRuntimeSession({ project, rootSession, sessionId, resumedFromSessi
     workspacePath: project.localWorkspacePath || process.cwd(),
     hippoSessionId: rootSession?.id || "",
     status: sessionId ? status : "ephemeral",
-    contextPolicy: normalizeContextPolicy(contextPolicy),
     runtimeOptions: runtimeOptions || {},
     updatedAt: new Date().toISOString(),
   };
@@ -261,17 +265,6 @@ function normalizeRuntimeOptions(options, adapter) {
 
 function normalizeRuntimeApprovalPolicy(value) {
   return ["untrusted", "on-request", "never"].includes(value) ? value : "inherit";
-}
-
-function normalizeContextPolicy(policy) {
-  const strategy = ["runtime", "reset", "manual-summary"].includes(policy?.strategy)
-    ? policy.strategy
-    : "runtime";
-  return {
-    strategy,
-    summary: policy?.summary || "",
-    summaryUpdatedAt: policy?.summaryUpdatedAt || "",
-  };
 }
 
 function normalizeCodexEvent(event, { runId, runtimeId }) {
@@ -291,6 +284,7 @@ function normalizeCodexEvent(event, { runId, runtimeId }) {
     runId,
     eventType: mappedType,
     sourceType: type,
+    sessionId: mappedType === "runtime_session_started" ? extractCodexSessionId([event], "") : "",
     text,
     payload: event,
   };
@@ -430,6 +424,7 @@ export class RuntimeRegistry {
       runtimes: {
         codex: {
           command: config.codexCommand,
+          transport: config.codexTransport,
           model: config.codexModel || undefined,
           sandboxMode: config.codexSandboxMode,
           serviceTier: config.codexServiceTier,
@@ -441,12 +436,18 @@ export class RuntimeRegistry {
 
   getRuntime(id = this.settings.defaultRuntimeId) {
     if (id === "codex") {
-      return new CodexRuntimeAdapter(this.settings.runtimes.codex);
+      const runtimeSettings = this.settings.runtimes.codex || {};
+      const Adapter = runtimeSettings.transport === "exec" ? CodexRuntimeAdapter : CodexAppServerRuntimeAdapter;
+      if (!this.codexRuntime || !(this.codexRuntime instanceof Adapter)) {
+        this.codexRuntime = new Adapter(runtimeSettings);
+      }
+      return this.codexRuntime;
     }
     throw new RuntimeAdapterError(`Unsupported runtime: ${id}`, 400);
   }
 
   updateSettings(settings = {}) {
+    this.codexRuntime?.close?.();
     this.settings = {
       ...this.settings,
       ...settings,
@@ -455,11 +456,28 @@ export class RuntimeRegistry {
         ...(settings.runtimes || {}),
       },
     };
+    this.codexRuntime = null;
     return this.settings;
   }
 
   cancelRun(runId) {
-    return cancelRuntimeRun(runId);
+    return this.codexRuntime?.cancel(runId) || cancelRuntimeRun(runId);
+  }
+
+  resolveRequest(runId, requestId, result) {
+    return this.codexRuntime?.resolveRequest?.(runId, requestId, result) || {
+      resolved: false,
+      reason: "runtime-request-not-active",
+      runId,
+      requestId,
+    };
+  }
+
+  steerRun(runId, input) {
+    if (!this.codexRuntime?.steer) {
+      throw new RuntimeAdapterError("The active runtime transport does not support turn steering.", 409);
+    }
+    return this.codexRuntime.steer(runId, input);
   }
 }
 

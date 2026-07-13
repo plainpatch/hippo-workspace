@@ -10,7 +10,6 @@ export class ResourceManager {
     this.rootPath = rootPath;
     this.client = client;
     this.workspacesDir = path.join(rootPath, "workspaces");
-    this.projectsDir = this.workspacesDir;
     this.knowledgeDir = path.join(rootPath, "knowledge");
     this.indexPath = path.join(rootPath, KNOWLEDGE_INDEX_FILE);
   }
@@ -25,20 +24,19 @@ export class ResourceManager {
     return {
       rootPath: this.rootPath,
       workspacesDir: this.workspacesDir,
-      projectsDir: this.workspacesDir,
       knowledgeDir: this.knowledgeDir,
       indexPath: this.indexPath,
     };
   }
 
-  async createProjectWorkspace({ projectId, projectName }) {
+  async createWorkspace({ workspaceId, workspaceName }) {
     await this.ensureBaseDirectories();
-    const folderName = `${slugify(projectName)}-${projectId.slice(0, 8)}`;
+    const folderName = `${slugify(workspaceName)}-${workspaceId.slice(0, 8)}`;
     const workspacePath = path.join(this.workspacesDir, folderName);
     await fs.mkdir(workspacePath, { recursive: true });
     await fs.writeFile(
       path.join(workspacePath, "workspace.json"),
-      `${JSON.stringify({ projectId, projectName, createdAt: new Date().toISOString() }, null, 2)}\n`,
+      `${JSON.stringify({ workspaceId, workspaceName, createdAt: new Date().toISOString() }, null, 2)}\n`,
       { flag: "wx" }
     ).catch((error) => {
       if (error.code !== "EEXIST") throw error;
@@ -93,8 +91,8 @@ export class ResourceManager {
     return { ...result, drawer };
   }
 
-  async updateKnowledgeDrawer({ drawerPath, name, description, metadata = {} } = {}) {
-    const safePath = assertDrawerPath(drawerPath);
+  async updateKnowledgeNode({ nodePath, name, description, metadata = {} } = {}) {
+    const safePath = assertDrawerPath(nodePath);
     if (!safePath) throw new ResourceManagerError("Knowledge drawer path is required.", 400);
     await this.ensureDrawerExists(safePath);
     const drawer = await this.upsertDrawerMetadata(safePath, {
@@ -274,37 +272,9 @@ export class ResourceManager {
     return index.documents[relativePath];
   }
 
-  async resolveKnowledgeRefs(refs = []) {
-    return this.resolveKnowledgeForProject({ drawerRefs: refs });
-  }
-
-  async resolveKnowledgeForProject({ drawerRefs = [], tags = [] } = {}) {
+  async getWorkspaceKnowledgeIndex({ domainRefs = [], topicRefs = [] } = {}) {
     const index = await this.readKnowledgeIndex();
-    const selected = new Set((drawerRefs || []).map(assertPrimaryDrawerPath).filter(Boolean));
-    const selectedTags = new Set((tags || []).filter(Boolean));
-    const documentNames = [];
-    for (const [relativePath, item] of Object.entries(index.documents)) {
-      if (isSelectedProjectKnowledgePath(relativePath, selected, selectedTags)) {
-        documentNames.push(...(item.documentNames || []));
-      }
-    }
-    return dedupe(documentNames);
-  }
-
-  async listProjectKnowledge({ drawerRefs = [] } = {}) {
-    const index = await this.readKnowledgeIndex();
-    const selected = new Set((drawerRefs || []).map(assertPrimaryDrawerPath).filter(Boolean));
-    return {
-      drawers: buildDrawerList(index).filter((drawer) => selected.has(drawer.path)),
-      documents: Object.values(index.documents).filter((item) =>
-        isSelectedProjectKnowledgePath(item.relativePath, selected, new Set())
-      ),
-    };
-  }
-
-  async getProjectKnowledgeIndex({ drawerRefs = [], topicRefs = [] } = {}) {
-    const index = await this.readKnowledgeIndex();
-    const selectedDomains = new Set((drawerRefs || []).map(assertPrimaryDrawerPath).filter(Boolean));
+    const selectedDomains = new Set((domainRefs || []).map(assertPrimaryDrawerPath).filter(Boolean));
     const selectedTopics = new Set((topicRefs || []).map(assertTopicPath).filter(Boolean));
     const drawers = buildDrawerList(index);
     const domains = drawers
@@ -314,7 +284,7 @@ export class ResourceManager {
         name: domain.name || domain.path,
         description: domain.description || "",
         topics: drawers
-          .filter((topic) => isTopicInProjectScope(topic.path, selectedDomains, selectedTopics))
+          .filter((topic) => isTopicInWorkspaceScope(topic.path, selectedDomains, selectedTopics))
           .filter((topic) => getPrimaryDrawer(topic.path) === domain.path)
           .map((topic) => enrichTopicIndex(topic, index.documents)),
       }));
@@ -623,14 +593,6 @@ function requireNonEmpty(value, message) {
   return text;
 }
 
-function isSelectedProjectKnowledgePath(relativePath, selected, selectedTags) {
-  if (!selected.size) return false;
-  const drawer = getPrimaryDrawer(relativePath);
-  if (!selected.has(drawer)) return false;
-  if (!selectedTags.size) return true;
-  return getSecondaryTags(relativePath).some((tag) => selectedTags.has(tag));
-}
-
 function extractDocumentNames(response) {
   const candidates = [
     response?.document?.name,
@@ -727,7 +689,7 @@ function getTopicPath(relativePath) {
   return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : "";
 }
 
-function isTopicInProjectScope(topicPath, selectedDomains, selectedTopics) {
+function isTopicInWorkspaceScope(topicPath, selectedDomains, selectedTopics) {
   if (!topicPath || topicPath.split("/").length !== 2) return false;
   if (!selectedDomains.has(getPrimaryDrawer(topicPath))) return false;
   return !selectedTopics.size || selectedTopics.has(topicPath);

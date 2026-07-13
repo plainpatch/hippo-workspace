@@ -21,10 +21,6 @@ export class AnythingLlmRagProvider {
     return this.client.vectorSearch(workspaceSlug, { query, topN, scoreThreshold });
   }
 
-  async chat({ workspaceSlug, message, mode = "query", sessionId, reset }) {
-    return this.client.workspaceChat(workspaceSlug, { message, mode, sessionId, reset });
-  }
-
   async ensureWorkspace({ name, description, metadata }) {
     return this.client.createWorkspace({
       name,
