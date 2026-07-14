@@ -2,6 +2,8 @@
 
 Hippo 是一个运行在本地的 Agent 工作台。它以 Codex 等本地 Agent Runtime 为执行基础，补充工作区、知识库、RAG 和多 Agent 编排能力，让通用编码 Agent 更适合长期、结构化的实际工作。
 
+> Hippo 目前处于 Beta 前开发阶段，数据结构和接口仍可能调整。当前推荐用于本地体验、产品验证和协作流程实验。
+
 Hippo 不替代 Codex，也不使用 AnythingLLM 执行对话：
 
 - **Codex** 是当前接入的 Agent Runtime，负责推理、对话、工具调用和任务执行。
@@ -9,6 +11,23 @@ Hippo 不替代 Codex，也不使用 AnythingLLM 执行对话：
 - **Hippo** 管理工作区、会话、知识授权、Agent 蓝图和运行图，并把所需能力按配置提供给 Runtime。
 
 项目预留了 Runtime 和 RAG Provider 适配接口。当前只完成 Codex Runtime 与 AnythingLLM RAG Provider 的接入，后续可以扩展 Claude、Hermes 或其他实现。
+
+## 快速体验
+
+只使用 Codex 对话和 Agent 编排时，AnythingLLM 不是必需依赖：
+
+```sh
+npm install
+npm start
+```
+
+然后访问 <http://127.0.0.1:8787>。桌面模式使用：
+
+```sh
+npm run desktop
+```
+
+启用知识库向量检索时，再启动 AnythingLLM Desktop，并在 Hippo 系统设置中完成连接。完整安装和部署步骤见[安装与部署](#安装与部署)。
 
 ## 为什么做 Hippo
 
@@ -20,6 +39,32 @@ Hippo 不替代 Codex，也不使用 AnythingLLM 执行对话：
 4. Skill、MCP、系统提示词和权限配置分散，难以沉淀为可复用的 Agent 类型。
 
 Hippo 在保留本地 Runtime 原生能力的前提下，为这些问题提供应用层抽象。
+
+## 产品界面
+
+### 首页与默认工作区
+
+首页提供统一任务入口。输入内容后，Hippo 会在默认工作区中创建新会话；也可以直接安装 `hippo-agent-builder` Skill，让 Codex 根据自然语言需求设计智能体蓝图。
+
+![Hippo 首页与默认工作区](docs/images/hippo-home.png)
+
+### 两级知识库
+
+知识库使用左侧一级知识库/二级主题树与右侧详情布局，集中展示描述、主题目录、文档状态、工作区引用和 RAG 同步信息。
+
+![Hippo 两级知识库管理](docs/images/hippo-knowledge.png)
+
+### Agent 可视化编排
+
+每个智能体从不可删除的 Root 节点开始。节点可以拖拽、连接和删除连线；右侧只配置节点真正需要的接口描述、系统提示词、审批策略、RAG、Skill 与 MCP。
+
+![Hippo Agent 可视化编排画布](docs/images/hippo-agent-canvas.png)
+
+### DAG 对话执行
+
+RootAgent 负责读取运行图、派发 Worker、处理节点结果并决定下一步。对话中可以查看耗时、节点状态、审批入口和运行详情，等待期间不会丢失当前进度。
+
+![Hippo DAG Agent 对话执行结果](docs/images/hippo-dag-run.png)
 
 ## 核心能力
 
@@ -278,15 +323,25 @@ npm run mcp
 npm run install:chrome-extension
 ```
 
-## 当前状态
+## 实现状态
 
-Hippo 仍处于快速开发阶段。目前重点是：
+当前已经实现：
 
-- 完善 Codex Session、权限、取消和流式事件适配
-- 稳定 RootAgent 与 NodeRun 运行协议
-- 完善可视化 Agent 蓝图编辑器
-- 完善知识同步、主题检索和本地 Embedding 方案
-- 抽象更多 Runtime 与 RAG Provider
+- Codex app-server 会话映射、多轮续接、流式事件、权限审批、停止和重连恢复
+- 首页与默认工作区、工作区级多会话、Agent 授权和会话内切换
+- 本地两级知识库、目录元数据、文档管理、工作区引用和主题筛选
+- AnythingLLM 主题级 Workspace 映射、文档同步和节点级 RAG MCP
+- Agent Blueprint v1、可视化 DAG 画布、版本化编辑和实时 Schema 校验
+- RootAgent 协调调度、独立 Node Session、运行状态、输入输出、审批和 Trace 持久化
+- `hippo-agent-builder` Skill 及工作区级系统 MCP 注入
+- Web、Electron Desktop 和 Chrome 侧边栏三种本地入口
+
+后续工作主要包括：
+
+- 扩展 Claude、Hermes 等 Runtime Adapter
+- 支持可替换的本地 RAG Provider 和 Embedding 管线
+- 增强运行图可观测性、失败恢复和长任务管理
+- 完善数据迁移、安装打包和 Beta 发布流程
 
 Agent 运行图设计见 [docs/root-agent-runtime.md](docs/root-agent-runtime.md)，智能体构建 Skill 的多轮评价记录见 [docs/agent-builder-skill-evaluation.md](docs/agent-builder-skill-evaluation.md)。
 
