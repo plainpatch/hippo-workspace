@@ -51,7 +51,6 @@ refreshAll();
 
 function bindEvents() {
   const messageInput = document.getElementById("messageInput");
-  document.getElementById("refreshBtn").addEventListener("click", refreshAll);
   document.getElementById("projectHomeBtn").addEventListener("click", renderActiveProject);
   document.getElementById("searchBtn")?.addEventListener("click", () => toast("搜索入口已预留。"));
   document.getElementById("agentsBtn").addEventListener("click", showAgentsPage);
@@ -71,6 +70,13 @@ function bindEvents() {
     else openProjectForm(getActiveProject());
   });
   document.getElementById("closeDrawerBtn").addEventListener("click", closeDrawer);
+  document.getElementById("closeKnowledgeModalBtn")?.addEventListener("click", closeKnowledgeModal);
+  document.getElementById("knowledgeModal")?.addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) closeKnowledgeModal();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeKnowledgeModal();
+  });
   document.getElementById("projectForm").addEventListener("submit", saveProject);
   document.getElementById("projectKnowledgeFilter")?.addEventListener("input", () => {
     const active = getActiveProject();
@@ -334,7 +340,7 @@ function renderActiveProject() {
   }
 
   name.textContent = project.name;
-  meta.textContent = `${project.localWorkspaceFolderName || project.id} · ${state.conversations.length} 个会话 · ${project.knowledgeDomainRefs?.length || 0} 个知识库 · ${project.knowledgeTopicRefs?.length || 0} 个主题筛选 · ${project.agentIds?.length || 0} 个 Agent`;
+  meta.textContent = "";
   configButton.textContent = "工作区设置";
   input.disabled = false;
   input.placeholder = `向「${project.name}」提问；可选加载 Agent`;
@@ -455,10 +461,16 @@ function showSettingsPage() {
   document.getElementById("composerForm").classList.add("hidden");
   setHeaderConfigButton(false);
   document.getElementById("activeProjectName").textContent = "系统设置";
-  document.getElementById("activeProjectMeta").textContent = "配置 APP 系统路径、runtime 和 RAG provider。部分设置保存后需要重启生效。";
+  document.getElementById("activeProjectMeta").textContent = "管理本地数据目录、Codex 默认权限和 AnythingLLM RAG 连接。";
   const settings = state.status?.wrapper?.settings || {};
   const codex = settings.runtimes?.codex || {};
   const anythingllm = settings.ragProviders?.anythingllm || {};
+  const credentialSource = {
+    environment: "环境变量",
+    keychain: "macOS Keychain",
+    "local-file": "本地凭证存储",
+    none: "未配置",
+  }[anythingllm.credentialSource] || "未配置";
   const stream = document.getElementById("chatStream");
   stream.innerHTML = `
     <section class="settingsPanel">
@@ -466,52 +478,58 @@ function showSettingsPage() {
         <div class="settingsSection">
           <h2>系统路径</h2>
           <label>资源根目录
-            <input name="resourceRootPath" value="${escapeHtml(settings.resourceRootPath || settings.appHomePath || "")}" />
+            <input name="resourceRootPath" value="${escapeHtml(settings.resourceRootPath || settings.appHomePath || "")}" required />
           </label>
-          <small>保存后重启生效；工作区和知识库目录会基于这个路径。</small>
+          <small>工作区和知识库目录由 Hippo 自动创建。修改根目录不会迁移已有数据，保存后需要重启。</small>
         </div>
         <div class="settingsSection">
-          <h2>Runtime</h2>
-          <label>默认 Runtime
-            <select name="defaultRuntimeId">
-              <option value="codex" ${settings.defaultRuntimeId === "codex" ? "selected" : ""}>Codex</option>
-            </select>
-          </label>
-          <label>Codex Command
-            <input name="codexCommand" value="${escapeHtml(codex.command || "codex")}" />
-          </label>
-          <label>Codex Model
-            <input name="codexModel" value="${escapeHtml(codex.model || "")}" placeholder="可选" />
-          </label>
-          <label>Sandbox
+          <div class="settingsSectionHeading">
+            <div><h2>Codex Runtime</h2><small>命令、模型和服务等级从环境变量或 Codex 配置自动加载。</small></div>
+            <span id="codexDiagnosticStatus" class="settingsStatus">检测中</span>
+          </div>
+          <dl class="settingsSummary">
+            <dt>命令</dt><dd><code>${escapeHtml(codex.command || "codex")}</code></dd>
+            <dt>模型</dt><dd>${escapeHtml(codex.model || "跟随 Codex 默认配置")}</dd>
+            <dt>传输</dt><dd>${escapeHtml(codex.transport || "app-server")}</dd>
+            <dt>服务等级</dt><dd>${escapeHtml(codex.serviceTier || "默认")}</dd>
+          </dl>
+          <label>默认文件权限
             <select name="codexSandboxMode">
-              ${["workspace-write", "read-only", "danger-full-access"].map((item) =>
-                `<option value="${item}" ${codex.sandboxMode === item ? "selected" : ""}>${item}</option>`
-              ).join("")}
+              <option value="workspace-write" ${codex.sandboxMode === "workspace-write" ? "selected" : ""}>工作区读写</option>
+              <option value="read-only" ${codex.sandboxMode === "read-only" ? "selected" : ""}>只读</option>
+              <option value="danger-full-access" ${codex.sandboxMode === "danger-full-access" ? "selected" : ""}>完全访问</option>
             </select>
-          </label>
-          <label>Service Tier
-            <input name="codexServiceTier" value="${escapeHtml(codex.serviceTier || "fast")}" />
           </label>
         </div>
         <div class="settingsSection">
-          <h2>RAG Provider</h2>
-          <label>默认 RAG Provider
-            <select name="ragProviderId">
-              <option value="anythingllm" ${settings.ragProviderId === "anythingllm" ? "selected" : ""}>AnythingLLM</option>
-            </select>
+          <div class="settingsSectionHeading">
+            <div><h2>AnythingLLM RAG</h2><small>仅用于文档入库、向量化和检索，不参与 Agent 对话。</small></div>
+            <span id="ragDiagnosticStatus" class="settingsStatus">${anythingllm.apiKeyConfigured ? "待检测" : "未配置"}</span>
+          </div>
+          <label>服务地址
+            <input name="anythingllmBaseUrl" type="url" value="${escapeHtml(anythingllm.baseUrl || "")}" required />
           </label>
-          <label>AnythingLLM URL
-            <input name="anythingllmBaseUrl" value="${escapeHtml(anythingllm.baseUrl || "")}" />
+          <label>Developer API Key
+            <input name="anythingllmApiKey" type="password" autocomplete="off" ${anythingllm.credentialSource === "environment" ? "disabled" : ""} placeholder="${anythingllm.apiKeyConfigured ? "已配置，留空保持不变" : "输入 AnythingLLM Developer API Key"}" />
           </label>
-          <small>RAG provider URL 保存后需要重启服务才能重新初始化客户端。</small>
+          <div class="settingsCredentialMeta">
+            <span>凭证来源：${escapeHtml(credentialSource)}</span>
+            ${anythingllm.credentialSource === "environment" ? "<span>由环境变量管理，无需在此填写。</span>" : ""}
+          </div>
+          <div class="settingsActions">
+            <button id="testRagSettingsBtn" type="button">测试连接</button>
+            ${anythingllm.apiKeyConfigured && anythingllm.credentialSource !== "environment" ? '<button id="clearRagCredentialBtn" class="danger" type="button">移除密钥</button>' : ""}
+          </div>
         </div>
         <button class="primary" type="submit">保存设置</button>
       </form>
     </section>
   `;
   document.getElementById("appSettingsForm")?.addEventListener("submit", saveAppSettings);
+  document.getElementById("testRagSettingsBtn")?.addEventListener("click", testRagSettings);
+  document.getElementById("clearRagCredentialBtn")?.addEventListener("click", clearRagCredential);
   stream.scrollTop = 0;
+  void loadSettingsDiagnostics();
 }
 
 async function refreshSettingsPage() {
@@ -521,21 +539,86 @@ async function refreshSettingsPage() {
 
 async function saveAppSettings(event) {
   event.preventDefault();
+  const submit = event.currentTarget.querySelector("button[type='submit']");
+  submit.disabled = true;
   const form = new FormData(event.currentTarget);
+  const payload = Object.fromEntries(form.entries());
+  if (!String(payload.anythingllmApiKey || "").trim()) delete payload.anythingllmApiKey;
+  try {
+    const result = await request("/api/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    state.status = {
+      ...(state.status || {}),
+      wrapper: {
+        ...(state.status?.wrapper || {}),
+        settings: result.settings,
+      },
+    };
+    toast(settingsRestartText(result.requiresRestart));
+    showSettingsPage();
+  } finally {
+    if (submit.isConnected) submit.disabled = false;
+  }
+}
+
+async function loadSettingsDiagnostics() {
+  try {
+    const diagnostics = await request("/api/settings/diagnostics");
+    const codexStatus = document.getElementById("codexDiagnosticStatus");
+    if (codexStatus) {
+      codexStatus.textContent = diagnostics.codex?.ok ? diagnostics.codex.version || "可用" : "不可用";
+      codexStatus.className = `settingsStatus ${diagnostics.codex?.ok ? "ok" : "error"}`;
+      codexStatus.title = diagnostics.codex?.error || "";
+    }
+    renderRagDiagnostic(diagnostics.anythingllm);
+  } catch {
+    // The global request helper already presents the actionable error.
+  }
+}
+
+async function testRagSettings() {
+  const form = document.getElementById("appSettingsForm");
+  const button = document.getElementById("testRagSettingsBtn");
+  if (!form || !button) return;
+  const values = new FormData(form);
+  button.disabled = true;
+  try {
+    const result = await request("/api/settings/test-rag", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        baseUrl: values.get("anythingllmBaseUrl"),
+        apiKey: values.get("anythingllmApiKey") || undefined,
+      }),
+    });
+    renderRagDiagnostic(result);
+    toast(result.ok ? "AnythingLLM 连接成功。" : result.error || "AnythingLLM 连接失败。", !result.ok);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function clearRagCredential() {
+  if (!window.confirm("移除 Hippo 保存的 AnythingLLM Developer API Key？")) return;
   const result = await request("/api/settings", {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(stripEmpty(Object.fromEntries(form.entries()))),
+    body: JSON.stringify({ clearAnythingllmApiKey: true }),
   });
-  state.status = {
-    ...(state.status || {}),
-    wrapper: {
-      ...(state.status?.wrapper || {}),
-      settings: result.settings,
-    },
-  };
-  toast(settingsRestartText(result.requiresRestart));
+  state.status.wrapper.settings = result.settings;
+  toast("AnythingLLM API Key 已移除。");
   showSettingsPage();
+}
+
+function renderRagDiagnostic(result = {}) {
+  const target = document.getElementById("ragDiagnosticStatus");
+  if (!target) return;
+  target.textContent = result.ok ? "连接正常" : result.error ? "连接失败" : "未配置";
+  target.className = `settingsStatus ${result.ok ? "ok" : result.error ? "error" : ""}`;
+  target.title = result.error || "";
 }
 
 async function renderInboxManager() {
@@ -708,24 +791,18 @@ async function resumeWaitingNode(event) {
 }
 
 function focusKnowledgeCreateAction() {
-  const selected = state.selectedKnowledgePath;
-  if (selected?.includes("/")) {
-    state.selectedKnowledgePath = selected.split("/")[0];
-    renderKnowledgeManager();
-  }
-  document.querySelector("#knowledgeTopicForm input[name='name']")?.focus();
-  if (!document.querySelector("#knowledgeTopicForm input[name='name']")) {
-    document.getElementById("knowledgeDomainForm")?.classList.remove("hidden");
-    document.getElementById("knowledgeDomainName")?.focus();
-  }
+  const domains = getKnowledgeDomains();
+  const selected = findKnowledgeNode(state.selectedKnowledgePath, domains) || domains[0];
+  if (!selected) return openKnowledgeDomainModal();
+  const domain = selected.level === 1
+    ? selected
+    : domains.find((item) => item.path === selected.path.split("/")[0]);
+  if (domain) openKnowledgeTopicModal(domain);
 }
 
 function renderKnowledgeManager() {
   const stream = document.getElementById("chatStream");
-  const tree = state.knowledge?.tree;
-  const domains = Array.isArray(tree?.children)
-    ? tree.children.filter((item) => item.type === "folder")
-    : [];
+  const domains = getKnowledgeDomains();
   const selectedNode = findKnowledgeNode(state.selectedKnowledgePath, domains) || domains[0] || null;
   state.selectedKnowledgePath = selectedNode?.path || "";
   stream.innerHTML = `
@@ -735,11 +812,6 @@ function renderKnowledgeManager() {
           <h2>知识库</h2>
           <button id="newKnowledgeDomainBtn" type="button">新建</button>
         </div>
-        <form id="knowledgeDomainForm" class="knowledgeQuickForm hidden">
-          <label>领域类型 <input id="knowledgeDomainName" name="name" required placeholder="例如：网关平台" /></label>
-          <label>描述 <textarea name="description" rows="3" required placeholder="说明这个领域覆盖的文档范围"></textarea></label>
-          <button class="primary" type="submit">创建知识库</button>
-        </form>
         <div class="knowledgeTreeList">
           ${domains.length ? domains.map((domain) => renderKnowledgeTreeItem(domain, selectedNode?.path || "")).join("") : `<div class="emptyBlock">还没有知识库。</div>`}
         </div>
@@ -749,15 +821,7 @@ function renderKnowledgeManager() {
       </section>
     </section>
   `;
-  document.getElementById("knowledgeDomainForm")?.addEventListener("submit", saveKnowledgeDomain);
-  document.getElementById("newKnowledgeDomainBtn")?.addEventListener("click", () => {
-    document.getElementById("knowledgeDomainForm")?.classList.toggle("hidden");
-    document.getElementById("knowledgeDomainName")?.focus();
-  });
-  document.getElementById("knowledgeTopicForm")?.addEventListener("submit", saveKnowledgeTopic);
-  stream.querySelectorAll("[data-knowledge-meta-path]").forEach((form) => {
-    form.addEventListener("submit", saveKnowledgeMetadata);
-  });
+  document.getElementById("newKnowledgeDomainBtn")?.addEventListener("click", openKnowledgeDomainModal);
   stream.querySelectorAll("[data-knowledge-node-path]").forEach((button) => {
     button.addEventListener("click", () => {
       state.selectedKnowledgePath = button.dataset.knowledgeNodePath;
@@ -766,6 +830,18 @@ function renderKnowledgeManager() {
   });
   stream.querySelectorAll("[data-sync-topic-path]").forEach((button) => {
     button.addEventListener("click", () => syncKnowledgeTopic(button.dataset.syncTopicPath, button));
+  });
+  stream.querySelectorAll("[data-edit-knowledge-path]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const node = findKnowledgeNode(button.dataset.editKnowledgePath, domains);
+      if (node) openKnowledgeMetadataModal(node);
+    });
+  });
+  stream.querySelectorAll("[data-create-topic-path]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const domain = findKnowledgeNode(button.dataset.createTopicPath, domains);
+      if (domain) openKnowledgeTopicModal(domain);
+    });
   });
   stream.scrollTop = 0;
 }
@@ -804,12 +880,21 @@ function renderKnowledgeDetail(node, domains) {
         <h2>${escapeHtml(node.title || node.name)}</h2>
       </div>
       <div class="knowledgeDetailActions">
-        <small>${escapeHtml(node.path)}</small>
+        ${isDomain ? `<button data-create-topic-path="${escapeHtml(node.path)}" type="button">新建主题</button>` : ""}
         ${isDomain ? "" : `<button data-sync-topic-path="${escapeHtml(node.path)}" type="button">同步 RAG</button>`}
+        <button data-edit-knowledge-path="${escapeHtml(node.path)}" type="button">编辑</button>
       </div>
     </div>
-    ${renderKnowledgeMetadataForm(node, `${isDomain ? `${topics.length} 主题 · ` : ""}${documents.length} 文档`)}
-    ${isDomain ? renderKnowledgeTopicCreator(node) : ""}
+    <div class="knowledgeOverview">
+      <div class="knowledgeDescription">
+        <span>描述</span>
+        <p>${escapeHtml(node.description || "未填写描述")}</p>
+      </div>
+      <div class="knowledgeStats" aria-label="内容统计">
+        ${isDomain ? `<span><strong>${topics.length}</strong>主题</span>` : ""}
+        <span><strong>${documents.length}</strong>文档</span>
+      </div>
+    </div>
     <div class="knowledgeDetailSection">
       <h3>${isDomain ? "目录列表" : "文档列表"}</h3>
       ${isDomain ? renderKnowledgeTopicDirectory(topics) : renderKnowledgeDocumentList(documents)}
@@ -837,17 +922,6 @@ function renderEmptyKnowledgeDetail() {
       <h2>还没有知识库</h2>
       <p>在左侧新建一级知识库，再为其添加二级主题。</p>
     </div>
-  `;
-}
-
-function renderKnowledgeTopicCreator(domain) {
-  return `
-    <form id="knowledgeTopicForm" class="knowledgeInlineForm">
-      <input name="domainPath" type="hidden" value="${escapeHtml(domain.path)}" />
-      <label>新建主题 <input name="name" required placeholder="例如：部署运维" /></label>
-      <label>描述 <textarea name="description" rows="2" required placeholder="说明这个主题下应放哪些资料"></textarea></label>
-      <button class="primary" type="submit">创建主题</button>
-    </form>
   `;
 }
 
@@ -881,24 +955,6 @@ function renderKnowledgeDocumentList(documents) {
   `;
 }
 
-function renderKnowledgeMetadataForm(item, summary) {
-  const typeLabel = item.level === 1 ? "一级知识库" : "二级主题";
-  const title = item.title || item.name;
-  return `
-    <form class="knowledgeMetaForm" data-knowledge-meta-path="${escapeHtml(item.path)}">
-      <div class="knowledgeMetaHeader">
-        <strong>${escapeHtml(`${typeLabel} · ${title}`)}</strong>
-        <small>${escapeHtml(summary)}</small>
-      </div>
-      <div class="knowledgeMetaFields">
-        <label>名称 <input name="name" required value="${escapeHtml(title)}" /></label>
-        <label>描述 <textarea name="description" rows="2" required>${escapeHtml(item.description || "")}</textarea></label>
-        <button type="submit">保存</button>
-      </div>
-    </form>
-  `;
-}
-
 function findKnowledgeNode(pathValue, domains) {
   if (!pathValue) return null;
   for (const domain of domains) {
@@ -913,6 +969,90 @@ function getKnowledgeTopics(domain) {
   return Array.isArray(domain?.children) ? domain.children.filter((item) => item.type === "folder") : [];
 }
 
+function getKnowledgeDomains() {
+  const children = state.knowledge?.tree?.children;
+  return Array.isArray(children) ? children.filter((item) => item.type === "folder") : [];
+}
+
+function openKnowledgeDomainModal() {
+  openKnowledgeModal({
+    title: "新建知识库",
+    subtitle: "创建一级领域及其检索边界。",
+    content: `
+      <form id="knowledgeDomainForm" class="knowledgeModalForm">
+        <label>名称 <input name="name" required placeholder="例如：产品知识库" /></label>
+        <label>描述 <textarea name="description" rows="4" required placeholder="说明这个知识库覆盖的文档领域"></textarea></label>
+        ${renderKnowledgeModalActions("创建知识库")}
+      </form>
+    `,
+    onReady: (body) => body.querySelector("#knowledgeDomainForm")?.addEventListener("submit", saveKnowledgeDomain),
+  });
+}
+
+function openKnowledgeTopicModal(domain) {
+  openKnowledgeModal({
+    title: "新建主题",
+    subtitle: `添加到“${domain.title || domain.name}”。主题将映射到独立的 RAG Workspace。`,
+    content: `
+      <form id="knowledgeTopicForm" class="knowledgeModalForm">
+        <input name="domainPath" type="hidden" value="${escapeHtml(domain.path)}" />
+        <label>名称 <input name="name" required placeholder="例如：部署运维" /></label>
+        <label>描述 <textarea name="description" rows="4" required placeholder="说明这个主题下应存放哪些资料"></textarea></label>
+        ${renderKnowledgeModalActions("创建主题")}
+      </form>
+    `,
+    onReady: (body) => body.querySelector("#knowledgeTopicForm")?.addEventListener("submit", saveKnowledgeTopic),
+  });
+}
+
+function openKnowledgeMetadataModal(item) {
+  const title = item.title || item.name;
+  openKnowledgeModal({
+    title: item.level === 1 ? "编辑知识库" : "编辑主题",
+    subtitle: item.path,
+    content: `
+      <form class="knowledgeModalForm" data-knowledge-meta-path="${escapeHtml(item.path)}">
+        <label>名称 <input name="name" required value="${escapeHtml(title)}" /></label>
+        <label>描述 <textarea name="description" rows="4" required>${escapeHtml(item.description || "")}</textarea></label>
+        ${renderKnowledgeModalActions("保存")}
+      </form>
+    `,
+    onReady: (body) => body.querySelector("[data-knowledge-meta-path]")?.addEventListener("submit", saveKnowledgeMetadata),
+  });
+}
+
+function renderKnowledgeModalActions(primaryLabel) {
+  return `
+    <div class="knowledgeModalActions">
+      <button data-close-knowledge-modal type="button">取消</button>
+      <button class="primary" type="submit">${escapeHtml(primaryLabel)}</button>
+    </div>
+  `;
+}
+
+function openKnowledgeModal({ title, subtitle, content, onReady }) {
+  const modal = document.getElementById("knowledgeModal");
+  const body = document.getElementById("knowledgeModalBody");
+  document.getElementById("knowledgeModalTitle").textContent = title;
+  document.getElementById("knowledgeModalSubtitle").textContent = subtitle || "";
+  body.innerHTML = content;
+  body.querySelectorAll("[data-close-knowledge-modal]").forEach((button) => {
+    button.addEventListener("click", closeKnowledgeModal);
+  });
+  onReady?.(body);
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  requestAnimationFrame(() => body.querySelector("input, textarea, select")?.focus());
+}
+
+function closeKnowledgeModal() {
+  const modal = document.getElementById("knowledgeModal");
+  if (!modal || modal.classList.contains("hidden")) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.getElementById("knowledgeModalBody").innerHTML = "";
+}
+
 function collectKnowledgeDocuments(item) {
   if (!item) return [];
   if (item.type === "file") return [item];
@@ -924,12 +1064,13 @@ async function saveKnowledgeDomain(event) {
   event.preventDefault();
   const formNode = event.currentTarget;
   const form = new FormData(formNode);
-  await submitJson("/api/knowledge/domains", {
+  const result = await submitJson("/api/knowledge/domains", {
     name: form.get("name"),
     description: form.get("description"),
   }, false);
-  formNode.reset();
+  closeKnowledgeModal();
   state.knowledge = await request("/api/knowledge");
+  state.selectedKnowledgePath = result.path;
   renderProjectKnowledgeTree([]);
   renderKnowledgeManager();
   toast("知识库已创建。");
@@ -939,13 +1080,14 @@ async function saveKnowledgeTopic(event) {
   event.preventDefault();
   const formNode = event.currentTarget;
   const form = new FormData(formNode);
-  await submitJson("/api/knowledge/topics", {
+  const result = await submitJson("/api/knowledge/topics", {
     domainPath: form.get("domainPath"),
     name: form.get("name"),
     description: form.get("description"),
   }, false);
-  formNode.reset();
+  closeKnowledgeModal();
   state.knowledge = await request("/api/knowledge");
+  state.selectedKnowledgePath = result.path;
   renderProjectKnowledgeTree([]);
   renderKnowledgeManager();
   toast("主题已创建。");
@@ -964,6 +1106,7 @@ async function saveKnowledgeMetadata(event) {
       description: form.get("description"),
     }),
   });
+  closeKnowledgeModal();
   state.knowledge = await request("/api/knowledge");
   renderProjectKnowledgeTree([]);
   renderKnowledgeManager();
@@ -1112,7 +1255,9 @@ function renderProjectAgentPicker(selectedAgentIds = []) {
 }
 
 function renderRuntimePills(items) {
-  document.getElementById("runtimePills").innerHTML = items
+  const target = document.getElementById("runtimePills");
+  if (!target) return;
+  target.innerHTML = items
     .map(([label, status]) => `<span class="pill ${status}">${escapeHtml(label)}</span>`)
     .join("");
 }
@@ -3278,9 +3423,10 @@ async function copyRenderedCode(button) {
 }
 
 function settingsRestartText(requiresRestart = {}) {
+  const labels = { resourceRootPath: "资源根目录" };
   const restartKeys = Object.entries(requiresRestart)
     .filter(([, required]) => required)
-    .map(([key]) => key);
+    .map(([key]) => labels[key] || key);
   return restartKeys.length
     ? `设置已保存；${restartKeys.join("、")} 需要重启后生效。`
     : "设置已保存。";

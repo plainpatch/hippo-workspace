@@ -44,9 +44,7 @@
             </div>
           </div>
           <div class="headerActions">
-            <div id="runtimePills" class="pills"></div>
             <button id="projectConfigBtn" type="button">工作区设置</button>
-            <button id="refreshBtn" type="button">刷新</button>
           </div>
         </header>
 
@@ -124,6 +122,19 @@
           <dl id="runtimeDetails" class="kv"></dl>
         </div>
       </aside>
+    </div>
+
+    <div id="knowledgeModal" class="knowledgeModal hidden" aria-hidden="true">
+      <section class="knowledgeModalPanel" role="dialog" aria-modal="true" aria-labelledby="knowledgeModalTitle">
+        <header class="knowledgeModalHeader">
+          <div>
+            <h2 id="knowledgeModalTitle">知识库</h2>
+            <p id="knowledgeModalSubtitle"></p>
+          </div>
+          <button id="closeKnowledgeModalBtn" type="button" aria-label="关闭">×</button>
+        </header>
+        <div id="knowledgeModalBody" class="knowledgeModalBody"></div>
+      </section>
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>

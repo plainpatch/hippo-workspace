@@ -1,7 +1,7 @@
 :root {
   color-scheme: dark;
   --app-bg: #0f0f0f;
-  --sidebar-bg: #171717;
+  --sidebar-bg: #1a1b1b;
   --sidebar-active: #272727;
   --sidebar-hover: #222222;
   --main-bg: #111111;
@@ -108,7 +108,7 @@ dd {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   border-right: 1px solid var(--line);
-  background: #1a1b1b;
+  background: var(--sidebar-bg);
   color: #ebebeb;
 }
 
@@ -116,7 +116,7 @@ dd {
   display: grid;
   gap: 6px;
   padding: 10px 10px 8px;
-  background: #1a1b1b;
+  background: var(--sidebar-bg);
 }
 
 .sysButton {
@@ -162,7 +162,7 @@ dd {
   overflow: auto;
   padding: 12px 8px 9px 15px;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
-  background: linear-gradient(90deg, #474b4e 0%, #474b4e 16%, #43474a 42%, #2a2c2d 70%, #272728 100%);
+  background: var(--sidebar-bg);
 }
 
 .sectionLabel {
@@ -490,7 +490,7 @@ dd {
   align-items: center;
   padding: 10px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
-  background: #171717;
+  background: var(--sidebar-bg);
 }
 
 .accountButton {
@@ -594,6 +594,10 @@ dd {
   white-space: nowrap;
   color: var(--muted);
   font-size: 12px;
+}
+
+.projectTitle p:empty {
+  display: none;
 }
 
 .headerActions,
@@ -2162,14 +2166,13 @@ dd {
 .knowledgeTreePane {
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   align-content: start;
   padding: 10px;
 }
 
 .knowledgeTreeHeader,
-.knowledgeDetailHeader,
-.knowledgeMetaHeader {
+.knowledgeDetailHeader {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -2194,27 +2197,6 @@ dd {
   padding: 4px 9px;
   border-color: var(--line-strong);
   background: #242424;
-}
-
-.knowledgeQuickForm,
-.knowledgeInlineForm,
-.knowledgeMetaForm {
-  min-width: 0;
-  display: grid;
-  gap: 10px;
-}
-
-.knowledgeQuickForm {
-  margin-bottom: 10px;
-}
-
-.knowledgeQuickForm label,
-.knowledgeInlineForm label,
-.knowledgeMetaFields label {
-  display: grid;
-  gap: 5px;
-  color: #bdbdbd;
-  font-size: 12px;
 }
 
 .knowledgeTreeList,
@@ -2313,55 +2295,56 @@ dd {
   opacity: 0.64;
 }
 
-.knowledgeDetailSection {
+.knowledgeOverview {
+  min-width: 0;
   display: grid;
-  gap: 8px;
-  border-top: 1px solid var(--line);
-  padding-top: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 24px;
+  padding: 4px 0 2px;
 }
 
-.knowledgeMetaHeader strong {
-  color: #eeeeee;
-  font-size: 14px;
-  font-weight: 650;
+.knowledgeDescription {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
 }
 
-.knowledgeMetaHeader small {
-  flex: 0 0 auto;
-  color: #909090;
+.knowledgeDescription span {
+  color: #8f8f8f;
+  font-size: 12px;
+}
+
+.knowledgeDescription p {
+  max-width: 680px;
+  color: #dddddd;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.knowledgeStats {
+  display: flex;
+  gap: 18px;
+  color: #9a9a9a;
   font-size: 12px;
   white-space: nowrap;
 }
 
-.knowledgeMetaFields {
+.knowledgeStats span {
   display: grid;
-  grid-template-columns: minmax(120px, 0.7fr) minmax(180px, 1.3fr) auto;
+  gap: 2px;
+}
+
+.knowledgeStats strong {
+  color: #eeeeee;
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.knowledgeDetailSection {
+  display: grid;
   gap: 8px;
-  align-items: end;
-}
-
-.knowledgeMetaFields label {
-  display: grid;
-  gap: 5px;
-  color: #bdbdbd;
-  font-size: 12px;
-}
-
-.knowledgeMetaFields input,
-.knowledgeMetaFields textarea {
-  min-height: 34px;
-}
-
-.knowledgeMetaFields button {
-  min-height: 34px;
-  padding: 6px 10px;
-  border-color: var(--line-strong);
-  background: #242424;
-}
-
-.knowledgeInlineForm {
-  grid-template-columns: minmax(140px, 0.6fr) minmax(220px, 1fr) auto;
-  align-items: end;
   border-top: 1px solid var(--line);
   padding-top: 12px;
 }
@@ -2413,6 +2396,112 @@ dd {
   gap: 6px;
 }
 
+.knowledgeModal {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.68);
+}
+
+.knowledgeModalPanel {
+  width: min(520px, 100%);
+  max-height: min(680px, calc(100vh - 40px));
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #1b1b1b;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.46);
+}
+
+.knowledgeModalHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--line);
+  padding: 16px 18px;
+}
+
+.knowledgeModalHeader > div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.knowledgeModalHeader h2 {
+  color: #f1f1f1;
+  font-size: 16px;
+}
+
+.knowledgeModalHeader p {
+  color: #929292;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.knowledgeModalHeader > button {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: #bdbdbd;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.knowledgeModalHeader > button:hover {
+  color: #ffffff;
+  background: #292929;
+}
+
+.knowledgeModalBody {
+  padding: 18px;
+}
+
+.knowledgeModalForm {
+  display: grid;
+  gap: 14px;
+}
+
+.knowledgeModalForm label {
+  display: grid;
+  gap: 7px;
+  color: #d0d0d0;
+  font-size: 12px;
+}
+
+.knowledgeModalForm input,
+.knowledgeModalForm textarea {
+  background: #202020;
+}
+
+.knowledgeModalActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  margin-top: 2px;
+  padding-top: 14px;
+}
+
+.knowledgeModalActions button {
+  min-height: 34px;
+  padding: 6px 12px;
+  border-color: var(--line-strong);
+  background: #242424;
+}
+
+.knowledgeModalActions .primary {
+  color: #111111;
+  background: #f4f4f5;
+}
+
 .settingsPanel {
   width: min(var(--chat-width), calc(100vw - var(--sidebar-width) - 56px));
   margin: 0 auto;
@@ -2440,6 +2529,71 @@ dd {
   line-height: 1.25;
 }
 
+.settingsSectionHeading {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.settingsSectionHeading > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.settingsStatus {
+  max-width: 220px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 3px 8px;
+  color: var(--muted);
+  background: #191919;
+  font-size: 11px;
+}
+
+.settingsStatus.ok {
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #8ee6c3;
+}
+
+.settingsStatus.error {
+  border-color: rgba(239, 68, 68, 0.42);
+  color: #fca5a5;
+}
+
+.settingsSummary {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr);
+  gap: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 10px 12px;
+  background: #191919;
+  font-size: 12px;
+}
+
+.settingsSummary dt {
+  color: var(--muted);
+}
+
+.settingsSummary dd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #e5e5e5;
+}
+
+.settingsSummary code {
+  font: inherit;
+}
+
 .settingsSection label {
   display: grid;
   gap: 7px;
@@ -2460,6 +2614,31 @@ dd {
 .settingsSection small {
   color: var(--muted);
   line-height: 1.45;
+}
+
+.settingsCredentialMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settingsActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settingsActions button {
+  min-height: 32px;
+  padding: 5px 10px;
+  border-color: var(--line-strong);
+  background: #1a1a1a;
+}
+
+.settingsActions .danger {
+  color: #fca5a5;
 }
 
 .kv {
@@ -2512,14 +2691,14 @@ dd {
   }
 
   .chatHeader {
-    align-items: flex-start;
-    flex-direction: column;
-    height: auto;
-    padding: 12px 16px;
+    align-items: center;
+    flex-direction: row;
+    height: 54px;
+    padding: 0 16px;
   }
 
   .chatWorkspace {
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-rows: 54px minmax(0, 1fr) auto;
   }
 
   .composer {
@@ -2535,8 +2714,6 @@ dd {
     max-height: 280px;
   }
 
-  .knowledgeInlineForm,
-  .knowledgeMetaFields,
   .knowledgeDirectoryItem,
   .dagVisualEditor,
   .agentCanvasLayout,
@@ -2588,8 +2765,7 @@ dd {
     width: calc(100vw - 24px);
   }
 
-  .composerBar,
-  .headerActions {
+  .composerBar {
     align-items: stretch;
     flex-direction: column;
     width: 100%;
@@ -2603,8 +2779,12 @@ dd {
     grid-template-columns: 1fr;
   }
 
-  .knowledgeForms,
-  .knowledgeMetaFields {
+  .knowledgeForms {
     grid-template-columns: 1fr;
+  }
+
+  .knowledgeOverview {
+    grid-template-columns: 1fr;
+    gap: 14px;
   }
 }

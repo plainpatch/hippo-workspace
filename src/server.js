@@ -1,6 +1,7 @@
 import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import multer from "multer";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -27,9 +28,12 @@ const inlineTextExtensions = new Set([
 ]);
 const upload = multer({ storage: multer.memoryStorage() });
 const app = express();
-const client = createAnythingLlmClient();
 const appSettings = new AppSettingsService();
 const settings = appSettings.getSettings();
+const client = createAnythingLlmClient({
+  baseUrl: settings.ragProviders.anythingllm.baseUrl,
+  apiKey: appSettings.getAnythingLlmCredentials().apiKey,
+});
 const ragProvider = createRagProvider({ id: settings.ragProviderId, client });
 const resourceManager = new ResourceManager({ rootPath: settings.resourceRootPath, client: ragProvider });
 const runtimeRegistry = new RuntimeRegistry({ settings });
@@ -84,10 +88,41 @@ app.get("/api/settings", (_req, res) => {
 app.patch("/api/settings", (req, res) => {
   const result = appSettings.updateSettings(req.body || {});
   Object.assign(settings, result.settings);
+  client.configure({
+    baseUrl: settings.ragProviders.anythingllm.baseUrl,
+    apiKey: appSettings.getAnythingLlmCredentials().apiKey,
+  });
   runtimeRegistry.updateSettings(settings);
   agentOrchestrator.settings = settings;
   res.json(result);
 });
+
+app.get("/api/settings/diagnostics", asyncHandler(async (_req, res) => {
+  const codex = settings.runtimes.codex;
+  res.json({
+    codex: await inspectCommand(codex.command, ["--version"]),
+    anythingllm: await safeRagStatus(),
+  });
+}));
+
+app.post("/api/settings/test-rag", asyncHandler(async (req, res) => {
+  const storedCredential = appSettings.getAnythingLlmCredentials();
+  const candidate = createAnythingLlmClient({
+    baseUrl: String(req.body?.baseUrl || settings.ragProviders.anythingllm.baseUrl),
+    apiKey: String(req.body?.apiKey || storedCredential.apiKey),
+  });
+  try {
+    res.json({ ...(await candidate.status()), credentialSource: req.body?.apiKey ? "input" : storedCredential.source });
+  } catch (error) {
+    res.json({
+      ok: false,
+      error: error.message || "AnythingLLM connection failed.",
+      status: error.status || 500,
+      baseUrl: candidate.baseUrl,
+      credentialSource: req.body?.apiKey ? "input" : storedCredential.source,
+    });
+  }
+}));
 
 app.get("/api/resources", asyncHandler(async (_req, res) => {
   res.json(await resourceManager.getStatus());
@@ -433,6 +468,34 @@ app.listen(config.wrapperPort, () => {
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
+function inspectCommand(command, args = []) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve({ command, ...result });
+    };
+    const timeout = setTimeout(() => {
+      child.kill();
+      finish({ ok: false, error: "检测超时" });
+    }, 5000);
+    timeout.unref?.();
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => finish({ ok: false, error: error.message }));
+    child.on("close", (code) => finish({
+      ok: code === 0,
+      version: (stdout || stderr).trim().split("\n")[0] || "",
+      error: code === 0 ? "" : (stderr || stdout).trim() || `退出码 ${code}`,
+    }));
+  });
 }
 
 function renderWorkspaceFile(contents, fileName) {

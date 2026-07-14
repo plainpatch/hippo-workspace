@@ -3,8 +3,13 @@ import path from "node:path";
 
 export class AnythingLlmClient {
   constructor({ baseUrl, apiKey }) {
-    this.baseUrl = baseUrl.replace(/\/+$/, "");
-    this.apiKey = apiKey;
+    this.configure({ baseUrl, apiKey });
+  }
+
+  configure({ baseUrl, apiKey }) {
+    this.baseUrl = String(baseUrl || "").replace(/\/+$/, "");
+    this.apiKey = String(apiKey || "").trim();
+    return this;
   }
 
   get configured() {
@@ -12,7 +17,7 @@ export class AnythingLlmClient {
   }
 
   async status() {
-    const auth = await this.request("/auth");
+    const auth = await this.request("/auth", { timeoutMs: 5000 });
     return {
       ok: true,
       baseUrl: this.baseUrl,
@@ -103,7 +108,7 @@ export class AnythingLlmClient {
     });
   }
 
-  async request(pathname, { method = "GET", body, form } = {}) {
+  async request(pathname, { method = "GET", body, form, timeoutMs = 60000 } = {}) {
     if (!this.apiKey) {
       throw new AnythingLlmError(
         "ANYTHINGLLM_API_KEY is not configured for the wrapper service.",
@@ -127,6 +132,7 @@ export class AnythingLlmClient {
       method,
       headers,
       body: requestBody,
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     const text = await response.text();

@@ -447,8 +447,7 @@ export class RuntimeRegistry {
   }
 
   updateSettings(settings = {}) {
-    this.codexRuntime?.close?.();
-    this.settings = {
+    const nextSettings = {
       ...this.settings,
       ...settings,
       runtimes: {
@@ -456,7 +455,13 @@ export class RuntimeRegistry {
         ...(settings.runtimes || {}),
       },
     };
-    this.codexRuntime = null;
+    const runtimeChanged = JSON.stringify(this.settings.runtimes?.codex || {}) !==
+      JSON.stringify(nextSettings.runtimes?.codex || {});
+    if (runtimeChanged) {
+      this.codexRuntime?.close?.();
+      this.codexRuntime = null;
+    }
+    this.settings = nextSettings;
     return this.settings;
   }
 

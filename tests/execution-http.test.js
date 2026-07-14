@@ -254,6 +254,44 @@ test("HTTP app-server approvals survive UI disconnect and resume after a decisio
   assert.equal(staleResolution.resolved, false);
 });
 
+test("HTTP settings expose automatic diagnostics and validate editable values", { timeout: 10000 }, async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-settings-http-test-"));
+  const port = await getFreePort();
+  const server = await startServer({
+    home,
+    logPath: path.join(home, "unused.log"),
+    port,
+    command: fakeAppServerPath,
+    transport: "app-server",
+  });
+  t.after(async () => {
+    await stopServer(server);
+    await fs.rm(home, { recursive: true, force: true });
+  });
+
+  const diagnostics = await jsonRequest(port, "/api/settings/diagnostics");
+  assert.equal(diagnostics.codex.ok, true);
+  assert.match(diagnostics.codex.version, /fake-codex/);
+
+  const updated = await jsonRequest(port, "/api/settings", {
+    method: "PATCH",
+    body: {
+      codexSandboxMode: "read-only",
+      anythingllmBaseUrl: "http://127.0.0.1:65534/",
+    },
+  });
+  assert.equal(updated.settings.runtimes.codex.sandboxMode, "read-only");
+  assert.equal(updated.settings.ragProviders.anythingllm.baseUrl, "http://127.0.0.1:65534");
+  assert.equal("apiKey" in updated.settings.ragProviders.anythingllm, false);
+  await assert.rejects(
+    jsonRequest(port, "/api/settings", {
+      method: "PATCH",
+      body: { anythingllmBaseUrl: "invalid" },
+    }),
+    /HTTP\(S\) URL/
+  );
+});
+
 test("DAG app-server approvals route to coordinator and worker turns while the root thread resumes", { timeout: 20000 }, async (t) => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-dag-app-server-test-"));
   const port = await getFreePort();

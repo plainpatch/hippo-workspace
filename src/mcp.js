@@ -8,9 +8,12 @@ import { createRagProvider } from "./rag-provider.js";
 import { RuntimeRegistry } from "./runtime-adapter.js";
 
 export function createMcpServer() {
-  const client = createAnythingLlmClient();
   const appSettings = new AppSettingsService();
   const settings = appSettings.getSettings();
+  const client = createAnythingLlmClient({
+    baseUrl: settings.ragProviders.anythingllm.baseUrl,
+    apiKey: appSettings.getAnythingLlmCredentials().apiKey,
+  });
   const ragProvider = createRagProvider({ id: settings.ragProviderId, client });
   const resourceManager = new ResourceManager({ rootPath: settings.resourceRootPath, client: ragProvider });
   const runtimeRegistry = new RuntimeRegistry({ settings });
@@ -500,9 +503,12 @@ export function createMcpServer() {
 }
 
 export function createRagMcpServer({ workspaceId, topN = 4 } = {}) {
-  const client = createAnythingLlmClient();
   const appSettings = new AppSettingsService();
   const settings = appSettings.getSettings();
+  const client = createAnythingLlmClient({
+    baseUrl: settings.ragProviders.anythingllm.baseUrl,
+    apiKey: appSettings.getAnythingLlmCredentials().apiKey,
+  });
   const ragProvider = createRagProvider({ id: settings.ragProviderId, client });
   const resourceManager = new ResourceManager({ rootPath: settings.resourceRootPath, client: ragProvider });
   const agentOrchestrator = new AgentOrchestrator({

@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 import readline from "node:readline";
 
+if (process.argv.includes("--version")) {
+  process.stdout.write("fake-codex 1.0.0\n");
+  process.exit(0);
+}
+
 const lines = readline.createInterface({ input: process.stdin });
 const turns = new Map();
 const approvedThreads = new Set();
