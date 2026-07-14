@@ -5,9 +5,15 @@ export class ExecutionManager {
     this.records = new Map();
   }
 
-  ensure(key, executor) {
+  ensure(key, executor, { restartCompleted = false } = {}) {
     const existing = this.records.get(key);
-    if (existing) return { record: existing, created: false };
+    if (existing && (!restartCompleted || existing.status === "running")) {
+      return { record: existing, created: false };
+    }
+    if (existing) {
+      clearTimeout(existing.cleanupTimer);
+      this.records.delete(key);
+    }
 
     const record = {
       key,

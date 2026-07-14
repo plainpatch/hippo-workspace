@@ -4,6 +4,12 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { config } from "./config.js";
 import { RuntimeRegistry } from "./runtime-adapter.js";
+import {
+  AGENT_BLUEPRINT_SCHEMA_ID,
+  AGENT_BLUEPRINT_SCHEMA_VERSION,
+  getAgentBlueprintSchema,
+  validateAgentBlueprintSchema,
+} from "./agent-blueprint-schema.js";
 
 const skillSchema = z.object({
   name: z.string().min(1),
@@ -11,9 +17,18 @@ const skillSchema = z.object({
   instructions: z.string().optional(),
 }).strict();
 
+const mcpServersSchema = z.array(z.string().min(1)).refine(
+  (items) => new Set(items).size === items.length,
+  { message: "MCP server names must be unique." }
+);
+
 const nodeRagSchema = z.object({
   enabled: z.boolean().default(false),
-  topN: z.number().int().positive().default(4),
+  topN: z.number().int().min(1).max(100).default(4),
+}).strict();
+
+const executionPolicySchema = z.object({
+  maxDecisions: z.number().int().min(1).max(1000).default(50),
 }).strict();
 
 const agentNodeSchema = z.object({
@@ -29,7 +44,7 @@ const agentNodeSchema = z.object({
   runtimeId: z.string().min(1).optional(),
   rag: nodeRagSchema.optional(),
   skills: z.array(skillSchema).default([]),
-  mcpServers: z.array(z.string().min(1)).default([]),
+  mcpServers: mcpServersSchema.default([]),
   input: z.unknown().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
 }).strict();
@@ -44,6 +59,7 @@ const agentEdgeSchema = z.object({
 const createWorkspaceSchema = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
+  hippoMcpEnabled: z.boolean().default(false),
   agentIds: z.array(z.string().min(1)).default([]),
   knowledgeDomainRefs: z.array(z.string().min(1)).default([]),
   knowledgeTopicRefs: z.array(z.string().min(1)).default([]),
@@ -53,6 +69,7 @@ const createWorkspaceSchema = z.object({
 const updateWorkspaceSchema = z.object({
   name: z.string().min(1).optional(),
   description: z.string().optional(),
+  hippoMcpEnabled: z.boolean().optional(),
   agentIds: z.array(z.string().min(1)).optional(),
   knowledgeDomainRefs: z.array(z.string().min(1)).optional(),
   knowledgeTopicRefs: z.array(z.string().min(1)).optional(),
@@ -82,27 +99,40 @@ const updateConversationSchema = z.object({
 }).strict();
 
 const createAgentSchema = z.object({
+  $schema: z.literal(AGENT_BLUEPRINT_SCHEMA_ID).default(AGENT_BLUEPRINT_SCHEMA_ID),
+  schemaVersion: z.literal(AGENT_BLUEPRINT_SCHEMA_VERSION).default(AGENT_BLUEPRINT_SCHEMA_VERSION),
   type: z.enum(["single", "dag"]).default("single"),
   name: z.string().min(1),
   description: z.string().optional(),
   systemPrompt: z.string().optional(),
   skills: z.array(skillSchema).default([]),
-  mcpServers: z.array(z.string().min(1)).default([]),
+  mcpServers: mcpServersSchema.default([]),
   runtimeId: z.string().min(1).default(config.defaultRuntimeId),
-  rag: z.record(z.string(), z.unknown()).optional(),
+  rag: nodeRagSchema.default({ enabled: false, topN: 4 }),
   rootNodeId: z.string().optional(),
   nodes: z.array(agentNodeSchema).default([]),
   edges: z.array(agentEdgeSchema).default([]),
-  executionPolicy: z.record(z.string(), z.unknown()).optional(),
+  executionPolicy: executionPolicySchema.default({ maxDecisions: 50 }),
   metadata: z.record(z.string(), z.unknown()).optional(),
 }).strict();
 
-const updateAgentSchema = createAgentSchema.partial().extend({
+const updateAgentSchema = z.object({
+  $schema: z.literal(AGENT_BLUEPRINT_SCHEMA_ID).optional(),
+  schemaVersion: z.literal(AGENT_BLUEPRINT_SCHEMA_VERSION).optional(),
+  type: z.enum(["single", "dag"]).optional(),
+  name: z.string().min(1).optional(),
+  description: z.string().optional(),
+  systemPrompt: z.string().optional(),
+  expectedVersion: z.number().int().positive(),
   skills: z.array(skillSchema).optional(),
-  mcpServers: z.array(z.string().min(1)).optional(),
+  mcpServers: mcpServersSchema.optional(),
   runtimeId: z.string().min(1).optional(),
+  rag: nodeRagSchema.optional(),
+  rootNodeId: z.string().optional(),
   nodes: z.array(agentNodeSchema).optional(),
   edges: z.array(agentEdgeSchema).optional(),
+  executionPolicy: executionPolicySchema.optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 }).strict();
 
 const executeAgentTaskSchema = z.object({
@@ -123,6 +153,12 @@ const workspaceRagPlanSchema = z.object({
 const workspaceRagSearchSchema = workspaceRagPlanSchema.extend({
   query: z.string().min(1),
   topN: z.number().int().positive().default(4),
+}).strict();
+
+const workspaceRagDocumentsSchema = workspaceRagPlanSchema.extend({
+  suffixes: z.array(z.string().min(1)).default([]),
+  page: z.number().int().positive().default(1),
+  pageSize: z.number().int().min(1).max(100).default(50),
 }).strict();
 
 const retryNodeRunSchema = z.object({
@@ -183,6 +219,56 @@ export class AgentOrchestrator {
     return { workspaces: store.workspaces };
   }
 
+  async ensureDefaultWorkspace() {
+    return this.withStoreLock(async () => {
+      const store = await this.readStore();
+      const existing = store.workspaces.find((workspace) => workspace.metadata?.isDefault === true);
+      if (existing) {
+        if (typeof existing.hippoMcpEnabled === "boolean") return { workspace: existing, created: false };
+        const workspace = { ...existing, hippoMcpEnabled: true, updatedAt: new Date().toISOString() };
+        store.workspaces[store.workspaces.findIndex((item) => item.id === existing.id)] = workspace;
+        await this.writeStore(store);
+        return { workspace, created: false };
+      }
+
+      const namedDefault = store.workspaces.find((workspace) => workspace.name === "默认工作区");
+      if (namedDefault) {
+        const workspace = {
+          ...namedDefault,
+          hippoMcpEnabled: typeof namedDefault.hippoMcpEnabled === "boolean" ? namedDefault.hippoMcpEnabled : true,
+          metadata: { ...(namedDefault.metadata || {}), isDefault: true },
+          updatedAt: new Date().toISOString(),
+        };
+        store.workspaces[store.workspaces.findIndex((item) => item.id === namedDefault.id)] = workspace;
+        await this.writeStore(store);
+        return { workspace, created: false };
+      }
+
+      const now = new Date().toISOString();
+      const workspaceId = randomUUID();
+      const workspaceDirectory = this.resourceManager
+        ? await this.resourceManager.createWorkspace({ workspaceId, workspaceName: "默认工作区" })
+        : {};
+      const workspace = {
+        id: workspaceId,
+        name: "默认工作区",
+        description: "用于从 Hippo 首页发起的日常任务。",
+        hippoMcpEnabled: true,
+        agentIds: [],
+        knowledgeDomainRefs: [],
+        knowledgeTopicRefs: [],
+        localWorkspacePath: workspaceDirectory.workspacePath || "",
+        localWorkspaceFolderName: workspaceDirectory.workspaceFolderName || "",
+        metadata: { isDefault: true },
+        createdAt: now,
+        updatedAt: now,
+      };
+      store.workspaces.push(workspace);
+      await this.writeStore(store);
+      return { workspace, created: true };
+    });
+  }
+
   async listAgents() {
     const store = await this.readStore();
     return { agents: store.agents };
@@ -193,6 +279,14 @@ export class AgentOrchestrator {
     const agent = store.agents.find((item) => item.id === id);
     if (!agent) throw new AgentOrchestratorError(`Agent ${id} was not found.`, 404);
     return { agent };
+  }
+
+  getAgentSchema() {
+    return {
+      schemaId: AGENT_BLUEPRINT_SCHEMA_ID,
+      schemaVersion: AGENT_BLUEPRINT_SCHEMA_VERSION,
+      schema: getAgentBlueprintSchema(),
+    };
   }
 
   validateAgent(input) {
@@ -208,29 +302,17 @@ export class AgentOrchestrator {
 
   async createAgent(input) {
     const payload = createAgentSchema.parse(input);
-    validateAgentPrototype(payload);
     return this.withStoreLock(async () => {
       const store = await this.readStore();
       const now = new Date().toISOString();
-      const agent = {
+      const agent = normalizeAgent({
         id: randomUUID(),
-        type: payload.type,
         version: 1,
-        name: payload.name,
-        description: payload.description || "",
-        systemPrompt: payload.systemPrompt || "",
-        skills: payload.skills,
-        mcpServers: dedupe(payload.mcpServers),
-        runtimeId: payload.runtimeId,
-        rag: normalizeNodeRag(payload.rag),
-        rootNodeId: payload.type === "dag" ? payload.rootNodeId || payload.nodes[0]?.id || "" : "",
-        nodes: payload.type === "dag" ? normalizeAgentNodes(payload.nodes) : [],
-        edges: payload.type === "dag" ? normalizeAgentEdges(payload.edges) : [],
-        executionPolicy: payload.executionPolicy || {},
-        metadata: payload.metadata || {},
+        ...payload,
         createdAt: now,
         updatedAt: now,
-      };
+      });
+      validateAgentPrototype(agent);
       store.agents.push(agent);
       await this.writeStore(store);
       return { agent };
@@ -244,9 +326,18 @@ export class AgentOrchestrator {
       const index = store.agents.findIndex((item) => item.id === id);
       if (index === -1) throw new AgentOrchestratorError(`Agent ${id} was not found.`, 404);
       const current = store.agents[index];
+      if (payload.expectedVersion !== current.version) {
+        throw new AgentOrchestratorError(
+          `Agent ${id} has changed since version ${payload.expectedVersion}.`,
+          409,
+          { expectedVersion: payload.expectedVersion, actualVersion: current.version }
+        );
+      }
       const candidate = {
         ...current,
         ...definedOnly({
+          $schema: payload.$schema,
+          schemaVersion: payload.schemaVersion,
           type: payload.type,
           name: payload.name,
           description: payload.description,
@@ -262,16 +353,12 @@ export class AgentOrchestrator {
           metadata: payload.metadata,
         }),
       };
-      validateAgentPrototype(candidate);
-      const updated = {
+      const updated = normalizeAgent({
         ...candidate,
         version: Number(current.version || 1) + 1,
-        rag: normalizeNodeRag(candidate.rag),
-        rootNodeId: candidate.type === "dag" ? candidate.rootNodeId || candidate.nodes?.[0]?.id || "" : "",
-        nodes: candidate.type === "dag" ? normalizeAgentNodes(candidate.nodes) : [],
-        edges: candidate.type === "dag" ? normalizeAgentEdges(candidate.edges) : [],
         updatedAt: new Date().toISOString(),
-      };
+      });
+      validateAgentPrototype(updated);
       store.agents[index] = updated;
       await this.writeStore(store);
       return { agent: updated };
@@ -281,23 +368,22 @@ export class AgentOrchestrator {
   async deleteAgent(id) {
     return this.withStoreLock(async () => {
       const store = await this.readStore();
-      const next = store.agents.filter((item) => item.id !== id);
-      if (next.length === store.agents.length) {
+      if (!store.agents.some((item) => item.id === id)) {
         throw new AgentOrchestratorError(`Agent ${id} was not found.`, 404);
       }
-      store.agents = next;
-      let detachedWorkspaces = 0;
-      store.workspaces = store.workspaces.map((workspace) => {
-        if (!workspace.agentIds?.includes(id)) return workspace;
-        detachedWorkspaces += 1;
-        return {
-          ...workspace,
-          agentIds: workspace.agentIds.filter((agentId) => agentId !== id),
-          updatedAt: new Date().toISOString(),
-        };
-      });
+      const workspaceIds = store.workspaces
+        .filter((workspace) => workspace.agentIds?.includes(id))
+        .map((workspace) => workspace.id);
+      if (workspaceIds.length) {
+        throw new AgentOrchestratorError(
+          `Agent ${id} is still referenced by a workspace.`,
+          409,
+          { workspaceIds }
+        );
+      }
+      store.agents = store.agents.filter((item) => item.id !== id);
       await this.writeStore(store);
-      return { deleted: true, id, detachedWorkspaces };
+      return { deleted: true, id };
     });
   }
 
@@ -426,11 +512,40 @@ export class AgentOrchestrator {
       const store = await this.readStore();
       const now = new Date().toISOString();
       let interruptedRuns = 0;
+      let restoredRuns = 0;
+      let storeChanged = false;
       store.agentRuns = store.agentRuns.map((storedRun) => {
         const run = normalizeAgentRun(storedRun);
+        const resultApprovalNode = findDurableResultApprovalNode(run);
+        if (run.status === "failed" && run.error?.code === "service_restarted" && resultApprovalNode) {
+          run.status = "waiting_approval";
+          run.error = undefined;
+          run.updatedAt = now;
+          run.rootCoordinator.status = "ready";
+          run.rootCoordinator.runtimeRunId = "";
+          run.rootCoordinator.updatedAt = now;
+          resultApprovalNode.status = "waiting_approval";
+          resultApprovalNode.error = undefined;
+          resultApprovalNode.runtimeRunId = "";
+          resultApprovalNode.updatedAt = now;
+          resultApprovalNode.trace.push(createTrace("node_run_approval_restored", { reason: "service_restarted" }, now));
+          run.trace.push(createTrace("agent_run_approval_restored", { reason: "service_restarted" }, now));
+          restoredRuns += 1;
+          storeChanged = true;
+          return run;
+        }
+        if (run.status === "waiting_approval" && resultApprovalNode) {
+          if (resultApprovalNode.runtimeRunId || run.rootCoordinator?.runtimeRunId) {
+            resultApprovalNode.runtimeRunId = "";
+            if (run.rootCoordinator) run.rootCoordinator.runtimeRunId = "";
+            storeChanged = true;
+          }
+          return run;
+        }
         const interruptedManagedRun = run.managed && ["pending", "waiting_approval"].includes(run.status);
         if (!["running", "coordinating"].includes(run.status) && !interruptedManagedRun) return run;
         interruptedRuns += 1;
+        storeChanged = true;
         run.status = "failed";
         run.error = {
           code: "service_restarted",
@@ -453,8 +568,8 @@ export class AgentOrchestrator {
         run.trace.push(createTrace("agent_run_interrupted", { reason: "service_restarted" }, now));
         return run;
       });
-      if (interruptedRuns) await this.writeStore(store);
-      return { interruptedRuns };
+      if (storeChanged) await this.writeStore(store);
+      return { interruptedRuns, restoredRuns };
     });
   }
 
@@ -508,7 +623,7 @@ export class AgentOrchestrator {
     return { workspace: project, agent, request, retrieval, agentRun };
   }
 
-  async advanceGraphRun(workspaceId, runId) {
+  async advanceGraphRun(workspaceId, runId, onEvent) {
     const { workspace: project } = await this.getWorkspace(workspaceId);
     const { run } = await this.getAgentRun(workspaceId, runId);
     if (run.agentSnapshot?.type !== "dag") {
@@ -522,7 +637,7 @@ export class AgentOrchestrator {
       message: run.input?.task || "",
       sessionId: run.rootSessionId,
     };
-    const updated = await this.coordinateGraphRun(project, run.agentSnapshot, request, runId);
+    const updated = await this.coordinateGraphRun(project, run.agentSnapshot, request, runId, onEvent);
     return { workspace: project, run: updated.run };
   }
 
@@ -599,7 +714,7 @@ export class AgentOrchestrator {
     });
   }
 
-  async resumeNodeRun(workspaceId, runId, input = {}) {
+  async approveNodeRun(workspaceId, runId, input = {}) {
     const payload = resumeNodeRunSchema.parse(input);
     const { run } = await this.getAgentRun(workspaceId, runId);
     const nodeRun = payload.nodeRunId
@@ -609,7 +724,7 @@ export class AgentOrchestrator {
     if (nodeRun.status !== "waiting_approval") {
       throw new AgentOrchestratorError("Only node runs waiting for approval can be resumed.", 400);
     }
-    await this.updateAgentRun(workspaceId, runId, (current, now) => {
+    return this.updateAgentRun(workspaceId, runId, (current, now) => {
       const currentNode = current.nodeRuns[nodeRun.id];
       currentNode.status = "completed";
       currentNode.approval = { resumed: true, value: payload.output, updatedAt: now };
@@ -623,7 +738,11 @@ export class AgentOrchestrator {
       current.trace.push(createTrace("agent_run_resumed", { runId, nodeRunId: nodeRun.id }, now));
       return current;
     });
-    return this.advanceGraphRun(workspaceId, runId);
+  }
+
+  async resumeNodeRun(workspaceId, runId, input = {}, onEvent) {
+    await this.approveNodeRun(workspaceId, runId, input);
+    return this.advanceGraphRun(workspaceId, runId, onEvent);
   }
 
   async requestGraphRunUser(workspaceId, runId, input = {}) {
@@ -711,6 +830,7 @@ export class AgentOrchestrator {
       id: workspaceId,
       name: payload.name,
       description: payload.description || "",
+      hippoMcpEnabled: payload.hippoMcpEnabled,
       agentIds: dedupe(payload.agentIds),
       knowledgeDomainRefs,
       knowledgeTopicRefs,
@@ -753,6 +873,7 @@ export class AgentOrchestrator {
         ...definedOnly({
           name: payload.name,
           description: payload.description,
+          hippoMcpEnabled: payload.hippoMcpEnabled,
           agentIds: payload.agentIds ? dedupe(payload.agentIds) : undefined,
           knowledgeDomainRefs: domainsChanged ? nextDomainRefs : undefined,
           knowledgeTopicRefs: domainsChanged || topicsChanged ? nextTopicRefs : undefined,
@@ -1004,7 +1125,7 @@ export class AgentOrchestrator {
     const agent = payload.agentId ? (await this.getAgent(payload.agentId)).agent : undefined;
     if (agent && !project.agentIds?.includes(agent.id)) {
       throw new AgentOrchestratorError(
-        `Agent ${agent.id} is not enabled for workspace ${project.id}.`,
+        `智能体「${agent.name || agent.id}」未在工作区「${project.name || project.id}」中启用，请先在工作区设置中添加。`,
         403
       );
     }
@@ -1014,9 +1135,12 @@ export class AgentOrchestrator {
       skipped: true,
       reason: rag.enabled ? "model-tool-controlled" : "rag-disabled",
     };
+    const baseRuntimeOptions = project.hippoMcpEnabled
+      ? withHippoSystemToolRuntimeOptions(buildRuntimeOptions(payload))
+      : buildRuntimeOptions(payload);
     const runtimeOptions = agent?.type === "dag"
-      ? buildRuntimeOptions(payload)
-      : withRagToolRuntimeOptions(buildRuntimeOptions(payload), project.id, rag);
+      ? baseRuntimeOptions
+      : withRagToolRuntimeOptions(baseRuntimeOptions, project.id, rag);
     const message = buildAgentMessage(project, agent, payload.task, payload.context, {
       runtimeId: agent?.runtimeId || this.settings.defaultRuntimeId || config.defaultRuntimeId,
       rag,
@@ -1283,7 +1407,9 @@ export class AgentOrchestrator {
         ...request.runtimeOptions,
         runtimeApprovalPolicy,
       }, project.id, rootNode.rag);
-      const prompt = buildRootCoordinatorPrompt(project, run, rootNode, { nativeGraphTools: runtimeId === "codex" });
+      const prompt = buildRootCoordinatorPrompt(project, run, rootNode, {
+        nativeGraphTools: runtimeId === "codex" && project.hippoMcpEnabled,
+      });
       const rootAgent = buildRootCoordinatorAgent(run.agentSnapshot, rootNode);
 
       await this.updateAgentRun(project.id, runId, (current, now) => {
@@ -1308,10 +1434,6 @@ export class AgentOrchestrator {
           runId: coordinatorRunId,
           runtimeOptions: {
             ...coordinatorRuntimeOptions,
-            mcpServerUrls: {
-              ...(coordinatorRuntimeOptions.mcpServerUrls || {}),
-              hippo: `http://127.0.0.1:${config.wrapperPort}/mcp`,
-            },
             ignoreUserConfig: true,
           },
           onEvent: (event) => this.handleDagRuntimeEvent({
@@ -1515,6 +1637,7 @@ export class AgentOrchestrator {
         currentNode.status = resultApprovalPolicy === "manual" ? "waiting_approval" : "completed";
         currentNode.output = result;
         currentNode.runtimeSession = result.runtimeSession;
+        currentNode.runtimeRunId = "";
         currentNode.updatedAt = now;
         const trace = createTrace(resultApprovalPolicy === "manual" ? "node_run_approval_waiting" : "node_run_completed", {
           nodeRunId,
@@ -1639,7 +1762,7 @@ export class AgentOrchestrator {
     return {
       workspace,
       scope,
-      knowledge,
+      knowledge: omitKnowledgeDocuments(knowledge),
       protocol: {
         authorization:
           "一级知识库是工作区授权边界；二级主题是该边界内的检索筛选。请求范围只能是工作区授权范围的子集。",
@@ -1649,6 +1772,18 @@ export class AgentOrchestrator {
           "每个二级主题映射到一个 RAG provider workspace；Hippo 会按选定主题 fan-out 检索并合并结果。",
       },
     };
+  }
+
+  async listWorkspaceKnowledgeDocuments(workspaceOrId, input = {}) {
+    const payload = workspaceRagDocumentsSchema.parse(input);
+    const workspace = typeof workspaceOrId === "string" ? (await this.getWorkspace(workspaceOrId)).workspace : workspaceOrId;
+    const scope = resolveWorkspaceKnowledgeScope(workspace, payload);
+    const listing = this.resourceManager
+      ? scope.empty
+        ? emptyKnowledgeDocumentListing(this.resourceManager.knowledgeDir, payload)
+        : await this.resourceManager.listWorkspaceKnowledgeDocuments(scope, payload)
+      : emptyKnowledgeDocumentListing("", payload);
+    return { scope, ...listing };
   }
 
   async searchWorkspaceKnowledge(workspaceOrId, input = {}) {
@@ -1678,14 +1813,17 @@ export class AgentOrchestrator {
       searches.push({ topic, workspaceSlug: sync.workspaceSlug, documentNames: sync.documentNames, result });
     }
 
-    const results = mergeRagResults(searches);
+    const rootPath = this.resourceManager?.knowledgeDir || "";
+    const { results, unresolvedResultCount } = mergeRagResults(searches, rootPath);
     return {
       skipped: false,
       query: input.query,
+      rootPath,
       scope,
       topics: knowledgeIndex.topics,
       searches,
       results,
+      unresolvedResultCount,
     };
   }
 
@@ -1758,7 +1896,7 @@ export function buildAgentMessage(project, agent, task, context = undefined, opt
       ? `Agent 可访问 MCP：\n${agent.mcpServers.map((name) => `- ${name}`).join("\n")}`
       : agent ? "Agent 可访问 MCP：未显式配置。" : "",
     options.rag?.enabled
-      ? `当前节点已启用 RAG 工具。仅在任务需要工作区知识时调用 hippo_rag_scope 和 hippo_rag_search；检索上限为 Top ${options.rag.topN}。不要在执行前默认检索。`
+      ? `当前节点已启用 RAG 工具。可使用 hippo_rag_scope 查看授权范围、hippo_rag_list_documents 分页定位文档、hippo_rag_search 执行语义检索；检索上限为 Top ${options.rag.topN}。不要在执行前默认检索。`
       : "当前节点未配置 RAG 工具，不要执行知识库检索。",
     options.runtimeOptions?.sandboxMode ? `本轮 Codex sandbox 权限：${options.runtimeOptions.sandboxMode}` : "",
     project.localWorkspacePath ? `本地工作区目录：\n${project.localWorkspacePath}` : "",
@@ -1816,6 +1954,16 @@ function buildRuntimeOptions(payload) {
       ? payload.sandboxMode
       : "",
   });
+}
+
+function withHippoSystemToolRuntimeOptions(runtimeOptions) {
+  return {
+    ...runtimeOptions,
+    mcpServerUrls: {
+      ...(runtimeOptions?.mcpServerUrls || {}),
+      hippo: `http://127.0.0.1:${config.wrapperPort}/mcp`,
+    },
+  };
 }
 
 function withRagToolRuntimeOptions(runtimeOptions, workspaceId, ragValue) {
@@ -1883,13 +2031,39 @@ function resolveWorkspaceKnowledgeScope(workspace, input = {}) {
   return { domainRefs, topicRefs, empty };
 }
 
+function omitKnowledgeDocuments(knowledge = {}) {
+  const omitFromTopic = ({ documents: _documents, ...topic }) => topic;
+  return {
+    domains: (knowledge.domains || []).map((domain) => ({
+      ...domain,
+      topics: (domain.topics || []).map(omitFromTopic),
+    })),
+    topics: (knowledge.topics || []).map(omitFromTopic),
+  };
+}
+
+function emptyKnowledgeDocumentListing(rootPath, payload) {
+  return {
+    rootPath,
+    filters: {
+      suffixes: dedupe((payload.suffixes || []).map((suffix) => {
+        const value = String(suffix).trim().toLowerCase();
+        return value.startsWith(".") ? value : `.${value}`;
+      })),
+    },
+    pagination: { page: payload.page, pageSize: payload.pageSize, total: 0, totalPages: 0 },
+    documents: [],
+  };
+}
+
 function topicPath(value) {
   const parts = String(value || "").replaceAll("\\", "/").split("/").filter(Boolean);
   return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : "";
 }
 
-function mergeRagResults(searches = []) {
+function mergeRagResults(searches = [], rootPath = "") {
   const rows = [];
+  let unresolvedResultCount = 0;
   for (const search of searches) {
     const rawResults = Array.isArray(search.result?.results)
       ? search.result.results
@@ -1898,6 +2072,11 @@ function mergeRagResults(searches = []) {
         : [];
     for (const item of rawResults) {
       const score = Number(item.score ?? item.metadata?.score ?? 0);
+      const document = matchRagResultDocument(item, search.topic.documents || []);
+      if (!document) {
+        unresolvedResultCount += 1;
+        continue;
+      }
       rows.push({
         ...item,
         score,
@@ -1905,12 +2084,52 @@ function mergeRagResults(searches = []) {
         topicName: search.topic.name,
         domainPath: search.topic.domainPath,
         domainName: search.topic.domainName,
+        file: {
+          rootPath,
+          relativePath: document.relativePath,
+          path: path.join(rootPath, ...document.relativePath.split("/")),
+        },
       });
     }
   }
-  return rows
-    .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
-    .slice(0, 12);
+  return {
+    results: rows
+      .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
+      .slice(0, 12),
+    unresolvedResultCount,
+  };
+}
+
+function matchRagResultDocument(result, documents = []) {
+  const metadata = result?.metadata || {};
+  const hints = dedupe([
+    metadata.sourcePath,
+    metadata.title,
+    metadata.chunkSource,
+    fileNameFromUrl(metadata.url),
+    String(result?.text || "").match(/sourceDocument:\s*([^\n<]+)/i)?.[1]?.trim(),
+  ].map(normalizeDocumentHint));
+  const exact = documents.find((document) => hints.includes(normalizeDocumentHint(document.relativePath)));
+  if (exact) return exact;
+  const byName = documents.filter((document) => {
+    const names = [document.title, path.posix.basename(document.relativePath)].map(normalizeDocumentHint);
+    return names.some((name) => hints.includes(name));
+  });
+  if (byName.length === 1) return byName[0];
+  return documents.length === 1 ? documents[0] : undefined;
+}
+
+function normalizeDocumentHint(value) {
+  return String(value || "").replaceAll("\\", "/").trim().toLowerCase();
+}
+
+function fileNameFromUrl(value) {
+  if (!value) return "";
+  try {
+    return path.posix.basename(decodeURIComponent(new URL(String(value)).pathname));
+  } catch {
+    return path.posix.basename(String(value).replaceAll("\\", "/"));
+  }
 }
 
 function normalizeWorkspaces(workspaces) {
@@ -1923,6 +2142,9 @@ function normalizeWorkspaces(workspaces) {
       id: workspace.id,
       name: workspace.name,
       description: workspace.description || "",
+      hippoMcpEnabled: typeof workspace.hippoMcpEnabled === "boolean"
+        ? workspace.hippoMcpEnabled
+        : workspace.metadata?.isDefault === true,
       agentIds: Array.isArray(workspace.agentIds) ? workspace.agentIds : [],
       knowledgeDomainRefs: normalizeDomainRefs(
         Array.isArray(workspace.knowledgeDomainRefs) ? workspace.knowledgeDomainRefs : [],
@@ -1947,45 +2169,45 @@ function normalizeAgent(agent) {
   const current = agent || {};
   const type = current.type === "dag" ? "dag" : "single";
   const nodes = type === "dag" ? normalizeAgentNodes(current.nodes) : [];
-  return {
+  return definedOnly({
+    $schema: AGENT_BLUEPRINT_SCHEMA_ID,
+    schemaVersion: AGENT_BLUEPRINT_SCHEMA_VERSION,
     id: current.id,
     type,
     version: Number(current.version || 1),
     name: current.name,
     description: current.description || "",
     systemPrompt: current.systemPrompt || "",
-    skills: Array.isArray(current.skills) ? current.skills : [],
-    mcpServers: Array.isArray(current.mcpServers) ? current.mcpServers : [],
+    skills: normalizeSkills(current.skills),
+    mcpServers: dedupe(Array.isArray(current.mcpServers) ? current.mcpServers : []),
     runtimeId: current.runtimeId || config.defaultRuntimeId,
     rag: normalizeNodeRag(current.rag),
     rootNodeId: type === "dag" ? current.rootNodeId || nodes[0]?.id || "" : "",
     nodes,
     edges: type === "dag" ? normalizeAgentEdges(current.edges) : [],
-    executionPolicy: current.executionPolicy && typeof current.executionPolicy === "object" && !Array.isArray(current.executionPolicy)
-      ? current.executionPolicy
-      : {},
+    executionPolicy: normalizeExecutionPolicy(current.executionPolicy),
     metadata: current.metadata || {},
     createdAt: current.createdAt,
     updatedAt: current.updatedAt,
-  };
+  });
 }
 
 function normalizeAgentNodes(nodes) {
   if (!Array.isArray(nodes)) return [];
-  return nodes.map((node) => stripEmptyObject({
+  return nodes.map((node) => definedOnly({
     id: String(node.id || "").trim(),
     kind: "task",
     resultApprovalPolicy: normalizeResultApprovalPolicy(node.resultApprovalPolicy),
     runtimeApprovalPolicy: normalizeRuntimeApprovalPolicy(node.runtimeApprovalPolicy),
-    transitionInstruction: node.transitionInstruction || "",
+    transitionInstruction: String(node.transitionInstruction || ""),
     name: node.name || node.id || "",
-    description: node.description || "",
-    agentId: node.agentId || "",
-    systemPrompt: node.systemPrompt || "",
+    description: String(node.description || ""),
+    agentId: node.agentId || undefined,
+    systemPrompt: String(node.systemPrompt || ""),
     runtimeId: node.runtimeId || undefined,
     rag: normalizeNodeRag(node.rag),
-    skills: Array.isArray(node.skills) ? node.skills : [],
-    mcpServers: Array.isArray(node.mcpServers) ? node.mcpServers : [],
+    skills: normalizeSkills(node.skills),
+    mcpServers: dedupe(Array.isArray(node.mcpServers) ? node.mcpServers : []),
     input: node.input,
     metadata: node.metadata || {},
   })).filter((node) => node.id);
@@ -2003,7 +2225,23 @@ function normalizeNodeRag(value) {
   const rag = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   return {
     enabled: rag.enabled === true,
-    topN: Math.max(1, Number(rag.topN) || 4),
+    topN: Math.min(100, Math.max(1, Number(rag.topN) || 4)),
+  };
+}
+
+function normalizeSkills(skills) {
+  if (!Array.isArray(skills)) return [];
+  return skills.map((skill) => stripEmptyObject({
+    name: String(skill?.name || "").trim(),
+    description: skill?.description || "",
+    instructions: skill?.instructions || "",
+  })).filter((skill) => skill.name);
+}
+
+function normalizeExecutionPolicy(value) {
+  const policy = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  return {
+    maxDecisions: Math.min(1000, Math.max(1, Number(policy.maxDecisions) || 50)),
   };
 }
 
@@ -2024,6 +2262,14 @@ function normalizeAgentEdges(edges) {
 
 function validateAgentPrototype(agent) {
   const normalized = normalizeAgent(agent);
+  const schemaResult = validateAgentBlueprintSchema(normalized);
+  if (!schemaResult.valid) {
+    throw new AgentOrchestratorError("Agent blueprint does not match schema v1.", 400, {
+      schemaId: AGENT_BLUEPRINT_SCHEMA_ID,
+      schemaVersion: AGENT_BLUEPRINT_SCHEMA_VERSION,
+      errors: schemaResult.errors,
+    });
+  }
   if (normalized.type !== "dag") return normalized;
   if (!normalized.nodes.length) {
     throw new AgentOrchestratorError("DAG agent requires at least one node.", 400);
@@ -2038,6 +2284,10 @@ function validateAgentPrototype(agent) {
   if (!normalized.rootNodeId || !nodeIds.has(normalized.rootNodeId)) {
     throw new AgentOrchestratorError("DAG agent rootNodeId must reference an existing node.", 400);
   }
+  if (normalized.rootNodeId !== "root") {
+    throw new AgentOrchestratorError("DAG agent rootNodeId must be root.", 400);
+  }
+  const edgeIds = new Set();
   for (const edge of normalized.edges) {
     if (!nodeIds.has(edge.from) || !nodeIds.has(edge.to)) {
       throw new AgentOrchestratorError(`DAG edge ${edge.id} references an unknown node.`, 400);
@@ -2045,6 +2295,10 @@ function validateAgentPrototype(agent) {
     if (edge.from === edge.to) {
       throw new AgentOrchestratorError(`DAG edge ${edge.id} cannot point to the same node.`, 400);
     }
+    if (edgeIds.has(edge.id)) {
+      throw new AgentOrchestratorError(`DAG has duplicate edge id: ${edge.id}.`, 400);
+    }
+    edgeIds.add(edge.id);
   }
   const edgeKeys = new Set();
   for (const edge of normalized.edges) {
@@ -2055,6 +2309,7 @@ function validateAgentPrototype(agent) {
     edgeKeys.add(key);
   }
   assertAcyclic(normalized.nodes, normalized.edges);
+  assertReachableFromRoot(normalized.nodes, normalized.edges, normalized.rootNodeId);
   return normalized;
 }
 
@@ -2072,6 +2327,26 @@ function assertAcyclic(nodes, edges) {
     visited.add(nodeId);
   };
   for (const node of nodes) visit(node.id);
+}
+
+function assertReachableFromRoot(nodes, edges, rootNodeId) {
+  const outgoing = new Map(nodes.map((node) => [node.id, []]));
+  for (const edge of edges) outgoing.get(edge.from)?.push(edge.to);
+  const reachable = new Set();
+  const visit = (nodeId) => {
+    if (reachable.has(nodeId)) return;
+    reachable.add(nodeId);
+    for (const next of outgoing.get(nodeId) || []) visit(next);
+  };
+  visit(rootNodeId);
+  const unreachable = nodes.map((node) => node.id).filter((nodeId) => !reachable.has(nodeId));
+  if (unreachable.length) {
+    throw new AgentOrchestratorError(
+      `DAG contains nodes that are unreachable from root: ${unreachable.join(", ")}.`,
+      400,
+      { unreachableNodeIds: unreachable }
+    );
+  }
 }
 
 function snapshotAgentDefinition(agent) {
@@ -2165,6 +2440,16 @@ function graphRunStatusAfterNodeUpdate(run) {
   return "coordinating";
 }
 
+function findDurableResultApprovalNode(run) {
+  if (!run?.agentSnapshot || run.agentSnapshot.type !== "dag") return undefined;
+  return Object.values(run.nodeRuns || {}).find((nodeRun) => {
+    if (!nodeRun.output || nodeRun.approval?.resumed) return false;
+    if (!["waiting_approval", "failed"].includes(nodeRun.status)) return false;
+    const node = run.agentSnapshot.nodes.find((item) => item.id === (nodeRun.prototypeNodeId || nodeRun.nodeId));
+    return normalizeResultApprovalPolicy(node?.resultApprovalPolicy) === "manual";
+  });
+}
+
 function findLatestNodeRunByPrototype(run, nodeId) {
   return Object.values(run.nodeRuns || {})
     .filter((nodeRun) => (nodeRun.prototypeNodeId || nodeRun.nodeId) === nodeId)
@@ -2223,6 +2508,7 @@ function buildRootCoordinatorPrompt(project, run, rootNode, { nativeGraphTools =
       status: nodeRun.status,
       input: nodeRun.input,
       output: summarizeNodeOutput(nodeRun.output),
+      approval: nodeRun.approval,
       error: nodeRun.error,
       transitionInstruction: node?.transitionInstruction || "",
     };
@@ -2236,10 +2522,11 @@ function buildRootCoordinatorPrompt(project, run, rootNode, { nativeGraphTools =
     `原始任务：\n${run.input?.task || ""}`,
     `Agent 图原型：\n${JSON.stringify(prototype, null, 2)}`,
     `当前 Runtime Graph：\n${JSON.stringify(runtimeGraph, null, 2)}`,
+    "Runtime Graph 中 approval.resumed=true 表示用户已经确认该节点结果；应直接按照确认值和流转规则继续，不得再次请求同一项确认。",
     run.userResponses?.length ? `用户后续回复：\n${JSON.stringify(run.userResponses, null, 2)}` : "当前没有用户后续回复。",
     rootNode.transitionInstruction ? `Root 结果处置规则：\n${rootNode.transitionInstruction}` : "Root 未配置额外结果处置规则，按默认拓扑开始调度。",
     normalizeNodeRag(rootNode.rag).enabled
-      ? `Root 节点已启用独立 RAG 工具。仅在需要工作区知识时调用 hippo_rag_scope 或 hippo_rag_search，Top N 固定为 ${normalizeNodeRag(rootNode.rag).topN}；不要默认检索。`
+      ? `Root 节点已启用独立 RAG 工具。可使用 hippo_rag_scope、hippo_rag_list_documents 和 hippo_rag_search，Top N 固定为 ${normalizeNodeRag(rootNode.rag).topN}；不要默认检索。`
       : "Root 节点未配置 RAG 工具。",
     `调用 Hippo MCP Graph Tool 推进运行：hippo_get_agent_run、hippo_dispatch_graph_node、hippo_request_graph_user、hippo_complete_graph_run、hippo_fail_graph_run。所有工具参数中的 workspaceId 使用 ${project.id}，runId 使用 ${run.id}。你可以连续调用节点，直到 Run 完成、失败、等待审批或等待用户。`,
     nativeGraphTools
@@ -2312,7 +2599,7 @@ function buildDagNodePrompt(project, run, nodeDef, nodeInput) {
     nodeDef.description ? `节点接口描述：\n${nodeDef.description}` : "",
     nodeDef.systemPrompt ? `节点系统提示词：\n${nodeDef.systemPrompt}` : "",
     normalizeNodeRag(nodeDef.rag).enabled
-      ? `当前节点已启用 RAG 工具。仅在任务需要工作区知识时调用 hippo_rag_scope 或 hippo_rag_search，Top N 固定为 ${normalizeNodeRag(nodeDef.rag).topN}；不要默认检索。`
+      ? `当前节点已启用 RAG 工具。可使用 hippo_rag_scope、hippo_rag_list_documents 和 hippo_rag_search，Top N 固定为 ${normalizeNodeRag(nodeDef.rag).topN}；不要默认检索。`
       : "当前节点未配置 RAG 工具。",
     `原始任务：\n${run.input?.task || ""}`,
     nodeInput.dispatchInput !== undefined ? `RootAgent 派发输入：\n${JSON.stringify(nodeInput.dispatchInput, null, 2)}` : "RootAgent 未提供额外派发输入。",

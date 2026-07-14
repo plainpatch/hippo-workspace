@@ -69,6 +69,20 @@ Hippo 中的 Agent 是一份可复用的能力蓝图，而不是另一个模型�
 
 Agent 蓝图可以只有一个 Root 节点，也可以包含多个通过默认拓扑连接的节点。用户不需要在创建时区分“单 Agent”或“DAG Agent”。
 
+蓝图使用版本化 JSON Schema 作为持久化和交换契约。当前版本为 `Agent Blueprint v1`，规范文件位于 `schemas/agent-blueprint-v1.schema.json`：
+
+- `$schema` 和 `schemaVersion` 标识蓝图契约版本。
+- `version` 是具体 Agent 的修订版本，创建时由服务端置为 `1`，每次编辑递增。
+- 编辑必须携带读取时的 `expectedVersion`，避免覆盖其他会话中的新修改。
+- `single` Agent 不包含运行图；`dag` Agent 的 `rootNodeId` 固定为 `root`，并校验节点、连线、环路和 Root 可达性。
+- Agent 蓝图只描述原型。Session、NodeRun、输入输出、状态和 Trace 属于独立的运行时图。
+
+REST 提供 `/api/agents/schema`、`/api/agents/validate` 和 `/api/agents` 下的创建、查看、编辑、删除接口。完整系统 MCP 提供对应的 `hippo_get_agent_schema`、`hippo_validate_agent_graph`、`hippo_create_agent`、`hippo_get_agent`、`hippo_update_agent` 和 `hippo_delete_agent` 工具。
+
+项目内置 `.agents/skills/hippo-agent-builder` Skill。它要求模型先读取实时 Schema，再设计和校验蓝图；只有用户明确要求创建或更新时才写入，并通过 `expectedVersion` 处理并发编辑。Skill/MCP 名称不会被凭空生成，未接通 MCP 时只返回可导入的蓝图，不会声称已经保存。
+
+首页的“导入 hippo-agent-builder 到 Codex”会把该 Skill 安装或更新到 `CODEX_HOME/skills/hippo-agent-builder`；未设置 `CODEX_HOME` 时使用 `~/.codex/skills/hippo-agent-builder`。安装后从 Hippo 新建的 Codex 会话会加载该 Skill。
+
 ### 多 Agent 协作
 
 多节点 Agent 使用 RootAgent 协调执行：
@@ -243,7 +257,10 @@ http://127.0.0.1:8787/mcp
 该端点提供工作区、知识库、Agent 和运行图管理工具。启用节点级 RAG 后，Runtime 会收到一个绑定工作区和 Top N 的专用 RAG MCP，只暴露：
 
 - `hippo_rag_scope`
+- `hippo_rag_list_documents`
 - `hippo_rag_search`
+
+完整系统 MCP 按工作区配置注入。默认工作区默认开启，因此 `hippo-agent-builder` 可以读取实时 Schema，并在用户确认后直接校验、创建或更新智能体；其他工作区默认关闭，可在工作区设置中显式开启。RAG MCP 独立按节点配置注入，未启用 RAG 的节点不会获得检索工具。
 
 也可以通过 stdio 启动完整系统 MCP：
 
@@ -271,7 +288,7 @@ Hippo 仍处于快速开发阶段。目前重点是：
 - 完善知识同步、主题检索和本地 Embedding 方案
 - 抽象更多 Runtime 与 RAG Provider
 
-Agent 运行图设计见 [docs/root-agent-runtime.md](docs/root-agent-runtime.md)。
+Agent 运行图设计见 [docs/root-agent-runtime.md](docs/root-agent-runtime.md)，智能体构建 Skill 的多轮评价记录见 [docs/agent-builder-skill-evaluation.md](docs/agent-builder-skill-evaluation.md)。
 
 ## 开发检查
 

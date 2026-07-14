@@ -1,7 +1,7 @@
 import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import multer from "multer";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -17,6 +17,8 @@ import { AppSettingsService } from "./app-settings.js";
 import { createRagProvider } from "./rag-provider.js";
 import { RuntimeRegistry } from "./runtime-adapter.js";
 import { ExecutionManager } from "./execution-manager.js";
+import { decodeMultipartFileName } from "./filename-utils.js";
+import { HippoSkillInstaller } from "./skill-installer.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "..", "public");
@@ -46,6 +48,9 @@ const agentOrchestrator = new AgentOrchestrator({
 });
 const mcpSessions = new Map();
 const executionManager = new ExecutionManager();
+const skillInstaller = new HippoSkillInstaller({
+  sourceRoot: path.join(__dirname, "..", ".agents", "skills"),
+});
 
 await agentOrchestrator.reconcileInterruptedRuns();
 
@@ -58,7 +63,10 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.post("/mcp", asyncHandler(handleMcpPost));
+app.post("/mcp", asyncHandler((req, res) => handleMcpPost(req, res, () => createMcpServer({
+  agentOrchestrator,
+  settings,
+}))));
 app.get("/mcp", asyncHandler(handleMcpSessionRequest));
 app.delete("/mcp", asyncHandler(handleMcpSessionRequest));
 app.post("/mcp/rag", asyncHandler((req, res) => handleMcpPost(req, res, () => createRagMcpServer({
@@ -79,6 +87,18 @@ app.get("/api/status", asyncHandler(async (_req, res) => {
     },
     anythingllm: await safeRagStatus(),
   });
+}));
+
+app.get("/api/skills/hippo-agent-builder", asyncHandler(async (_req, res) => {
+  res.json(await skillInstaller.getAgentBuilderStatus());
+}));
+
+app.post("/api/skills/hippo-agent-builder/install", asyncHandler(async (req, res) => {
+  if (!isLoopbackAddress(req.socket.remoteAddress)) {
+    res.status(403).json({ error: "Skill installation is only available from this device." });
+    return;
+  }
+  res.json(await skillInstaller.installAgentBuilder());
 }));
 
 app.get("/api/settings", (_req, res) => {
@@ -148,6 +168,16 @@ app.post("/api/knowledge/topics/sync", asyncHandler(async (req, res) => {
   res.json(await resourceManager.syncTopicWorkspace(req.body.topicPath, { force: Boolean(req.body.force) }));
 }));
 
+app.post("/api/knowledge/reveal", asyncHandler(async (req, res) => {
+  if (!isLoopbackAddress(req.socket.remoteAddress)) {
+    res.status(403).json({ error: "File manager actions are only available from this device." });
+    return;
+  }
+  const target = await resourceManager.resolveKnowledgePath(req.body?.path);
+  await revealInFileManager(target);
+  res.json({ ok: true, path: target.relativePath });
+}));
+
 app.post("/api/knowledge/text", asyncHandler(async (req, res) => {
   res.json(await resourceManager.ingestKnowledgeText(req.body));
 }));
@@ -156,7 +186,7 @@ app.post("/api/knowledge/upload", upload.single("file"), asyncHandler(async (req
   if (!req.file) throw new AnythingLlmError("Missing multipart file field.", 400);
   res.json(await resourceManager.ingestKnowledgeFile({
     fileBuffer: req.file.buffer,
-    fileName: req.file.originalname,
+    fileName: decodeMultipartFileName(req.file.originalname),
     relativeDir: req.body.relativeDir || "",
     metadata: parseMetadata(req.body.metadata),
   }));
@@ -164,6 +194,10 @@ app.post("/api/knowledge/upload", upload.single("file"), asyncHandler(async (req
 
 app.get("/api/workspaces", asyncHandler(async (_req, res) => {
   res.json(await agentOrchestrator.listWorkspaces());
+}));
+
+app.post("/api/workspaces/default", asyncHandler(async (_req, res) => {
+  res.json(await agentOrchestrator.ensureDefaultWorkspace());
 }));
 
 app.get("/api/agents", asyncHandler(async (_req, res) => {
@@ -177,6 +211,10 @@ app.post("/api/agents", asyncHandler(async (req, res) => {
 app.post("/api/agents/validate", asyncHandler(async (req, res) => {
   res.json(agentOrchestrator.validateAgent(req.body));
 }));
+
+app.get("/api/agents/schema", (_req, res) => {
+  res.json(agentOrchestrator.getAgentSchema());
+});
 
 app.get("/api/agents/:id", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.getAgent(req.params.id));
@@ -245,6 +283,22 @@ app.get("/workspace-files/:id", asyncHandler(async (req, res) => {
   }
   res.setHeader("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(path.basename(filePath))}`);
   res.sendFile(realFilePath);
+}));
+
+app.get("/knowledge-files", asyncHandler(async (req, res) => {
+  const target = await resourceManager.resolveKnowledgePath(req.query.path);
+  if (target.type !== "file") {
+    res.status(400).json({ error: "Knowledge path does not reference a file." });
+    return;
+  }
+  if (inlineTextExtensions.has(path.extname(target.absolutePath).toLowerCase())) {
+    const contents = await fs.readFile(target.absolutePath, "utf8");
+    res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'");
+    res.type("html").send(renderWorkspaceFile(contents, path.basename(target.absolutePath)));
+    return;
+  }
+  res.setHeader("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(path.basename(target.absolutePath))}`);
+  res.sendFile(target.absolutePath);
 }));
 
 app.get("/api/workspaces/:id/knowledge-index", asyncHandler(async (req, res) => {
@@ -345,7 +399,32 @@ app.post("/api/workspaces/:id/runs/:runId/retry", asyncHandler(async (req, res) 
 }));
 
 app.post("/api/workspaces/:id/runs/:runId/resume", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.resumeNodeRun(req.params.id, req.params.runId, req.body));
+  const approved = await agentOrchestrator.approveNodeRun(req.params.id, req.params.runId, req.body);
+  const key = executionKey(req.params.id, req.params.runId);
+  executionManager.ensure(key, async (publish) => {
+    try {
+      const result = await agentOrchestrator.advanceGraphRun(req.params.id, req.params.runId, publish);
+      publish({
+        type: "done",
+        agentRun: result.run,
+        result: {
+          runtimeId: result.run.request?.runtimeId || result.run.agentSnapshot?.runtimeId || config.defaultRuntimeId,
+          runId: result.run.id,
+          text: result.run.status === "waiting_user"
+            ? result.run.output?.question || "RootAgent 正在等待用户输入。"
+            : "",
+          output: result.run.output,
+        },
+      });
+    } catch (error) {
+      const current = (await agentOrchestrator.getAgentRun(req.params.id, req.params.runId)).run;
+      if (!isTerminalRunStatus(current.status)) {
+        await agentOrchestrator.failGraphRun(req.params.id, req.params.runId, { reason: error.message }).catch(() => {});
+      }
+      throw error;
+    }
+  }, { restartCompleted: true });
+  res.status(202).json(approved);
 }));
 
 app.post("/api/workspaces/:id/execute", asyncHandler(async (req, res) => {
@@ -468,6 +547,31 @@ app.listen(config.wrapperPort, () => {
 
 function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
+async function revealInFileManager(target) {
+  if (process.platform === "darwin") {
+    await execFilePromise("open", target.type === "directory" ? [target.absolutePath] : ["-R", target.absolutePath]);
+    return;
+  }
+  if (process.platform === "win32") {
+    const args = target.type === "directory" ? [target.absolutePath] : [`/select,${target.absolutePath}`];
+    await execFilePromise("explorer.exe", args);
+    return;
+  }
+  const directory = target.type === "directory" ? target.absolutePath : path.dirname(target.absolutePath);
+  await execFilePromise("xdg-open", [directory]);
+}
+
+function execFilePromise(command, args) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, (error) => error ? reject(error) : resolve());
+  });
+}
+
+function isLoopbackAddress(address) {
+  const value = String(address || "").toLowerCase();
+  return value === "::1" || value === "127.0.0.1" || value.startsWith("::ffff:127.");
 }
 
 function inspectCommand(command, args = []) {

@@ -56,6 +56,43 @@ export class ResourceManager {
     };
   }
 
+  async resolveKnowledgePath(relativePath) {
+    await this.ensureBaseDirectories();
+    const safePath = assertSafeRelativePath(relativePath);
+    if (!safePath) throw new ResourceManagerError("Knowledge path is required.", 400);
+
+    const targetPath = path.resolve(this.knowledgeDir, safePath);
+    const relativeTarget = path.relative(this.knowledgeDir, targetPath);
+    if (relativeTarget.startsWith("..") || path.isAbsolute(relativeTarget)) {
+      throw new ResourceManagerError("Knowledge path is outside the knowledge directory.", 403);
+    }
+
+    let realKnowledgeDir;
+    let realTargetPath;
+    let targetStat;
+    try {
+      [realKnowledgeDir, realTargetPath] = await Promise.all([
+        fs.realpath(this.knowledgeDir),
+        fs.realpath(targetPath),
+      ]);
+      const realRelativeTarget = path.relative(realKnowledgeDir, realTargetPath);
+      if (realRelativeTarget.startsWith("..") || path.isAbsolute(realRelativeTarget)) {
+        throw new ResourceManagerError("Knowledge path is outside the knowledge directory.", 403);
+      }
+      targetStat = await fs.stat(realTargetPath);
+    } catch (error) {
+      if (error instanceof ResourceManagerError) throw error;
+      if (error.code === "ENOENT") throw new ResourceManagerError("Knowledge path was not found.", 404);
+      throw error;
+    }
+
+    return {
+      relativePath: safePath,
+      absolutePath: realTargetPath,
+      type: targetStat.isDirectory() ? "directory" : "file",
+    };
+  }
+
   async createKnowledgeFolder(relativePath, metadata = {}) {
     const safePath = assertDrawerPath(relativePath);
     const target = path.join(this.knowledgeDir, safePath);
@@ -294,6 +331,52 @@ export class ResourceManager {
       domainName: domain.name,
     })));
     return { domains, topics };
+  }
+
+  async listWorkspaceKnowledgeDocuments(
+    { domainRefs = [], topicRefs = [] } = {},
+    { suffixes = [], page = 1, pageSize = 50 } = {}
+  ) {
+    await this.ensureBaseDirectories();
+    const index = await this.readKnowledgeIndex();
+    const selectedDomains = new Set((domainRefs || []).map(assertPrimaryDrawerPath).filter(Boolean));
+    const selectedTopics = new Set((topicRefs || []).map(assertTopicPath).filter(Boolean));
+    const normalizedSuffixes = normalizeDocumentSuffixes(suffixes);
+    const documents = Object.values(index.documents || {})
+      .filter((document) => {
+        const topic = document.topicPath || getTopicPath(document.relativePath);
+        return isTopicInWorkspaceScope(topic, selectedDomains, selectedTopics);
+      })
+      .filter((document) => {
+        if (!normalizedSuffixes.length) return true;
+        return normalizedSuffixes.includes(path.posix.extname(document.relativePath).toLowerCase());
+      })
+      .sort((a, b) => a.relativePath.localeCompare(b.relativePath))
+      .map((document) => ({
+        id: document.id,
+        title: document.title || path.posix.basename(document.relativePath),
+        relativePath: document.relativePath,
+        domainPath: getPrimaryDrawer(document.relativePath),
+        topicPath: document.topicPath || getTopicPath(document.relativePath),
+        suffix: path.posix.extname(document.relativePath).toLowerCase(),
+        type: document.type,
+        sourceSize: document.sourceSize,
+        updatedAt: document.updatedAt,
+      }));
+    const safePage = Math.max(1, Number(page) || 1);
+    const safePageSize = Math.min(100, Math.max(1, Number(pageSize) || 50));
+    const offset = (safePage - 1) * safePageSize;
+    return {
+      rootPath: this.knowledgeDir,
+      filters: { suffixes: normalizedSuffixes },
+      pagination: {
+        page: safePage,
+        pageSize: safePageSize,
+        total: documents.length,
+        totalPages: Math.ceil(documents.length / safePageSize),
+      },
+      documents: documents.slice(offset, offset + safePageSize),
+    };
   }
 
   async syncTopicWorkspace(topicPath, options = {}) {
@@ -542,11 +625,16 @@ async function readTree(root, current, index) {
         children: childTree.children,
       });
     } else if (entry.isFile()) {
+      const document = index.documents[relativePath] || {};
       children.push({
         type: "file",
         name: entry.name,
         path: relativePath,
-        documentNames: index.documents[relativePath]?.documentNames || [],
+        title: document.title || entry.name,
+        documentNames: document.documentNames || [],
+        sourceSize: document.sourceSize,
+        sourceMtimeMs: document.sourceMtimeMs,
+        updatedAt: document.updatedAt,
       });
     }
   }
@@ -693,6 +781,14 @@ function isTopicInWorkspaceScope(topicPath, selectedDomains, selectedTopics) {
   if (!topicPath || topicPath.split("/").length !== 2) return false;
   if (!selectedDomains.has(getPrimaryDrawer(topicPath))) return false;
   return !selectedTopics.size || selectedTopics.has(topicPath);
+}
+
+function normalizeDocumentSuffixes(suffixes = []) {
+  return [...new Set((suffixes || []).map((suffix) => {
+    const value = String(suffix || "").trim().toLowerCase();
+    if (!value) return "";
+    return value.startsWith(".") ? value : `.${value}`;
+  }).filter(Boolean))];
 }
 
 function enrichTopicIndex(topic, documentsByPath) {

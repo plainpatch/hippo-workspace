@@ -42,6 +42,8 @@ test("HTTP execution survives disconnect, resumes sessions, cancels, and reconci
     { cancel: false }
   );
   assert.ok(initial.events.some((event) => event.type === "prepared"), JSON.stringify(initial.events));
+  const prepared = initial.events.find((event) => event.type === "prepared");
+  assert.equal(prepared.request.runtimeOptions.mcpServerUrls?.hippo, undefined);
   await initial.reader.cancel();
 
   const mappedConversation = await poll(async () => {
@@ -316,7 +318,7 @@ test("DAG app-server approvals route to coordinator and worker turns while the r
       rootNodeId: "root",
       nodes: [
         { id: "root", name: "Root", runtimeApprovalPolicy: "on-request" },
-        { id: "worker", name: "Worker", runtimeApprovalPolicy: "on-request" },
+        { id: "worker", name: "Worker", runtimeApprovalPolicy: "on-request", resultApprovalPolicy: "manual" },
       ],
       edges: [{ from: "root", to: "worker" }],
     },
@@ -373,9 +375,25 @@ test("DAG app-server approvals route to coordinator and worker turns while the r
   const completionResponse = await fetch(
     `http://127.0.0.1:${port}/api/workspaces/${workspace.id}/runs/${runId}/events?after=${workerApproval.sequence}`
   );
-  const completion = await readEvents(completionResponse.body, (events) => events.some(isTerminalEvent));
-  assert.ok(completion.events.some((event) => event.type === "dag_node_completed"));
-  assert.ok(completion.events.some((event) => event.type === "done"));
+  const waitingForResultApproval = await readEvents(completionResponse.body, (events) => events.some(isTerminalEvent));
+  assert.ok(waitingForResultApproval.events.some((event) => event.type === "dag_node_waiting"));
+  assert.ok(waitingForResultApproval.events.some((event) => event.type === "done"));
+
+  const waitingRun = (await jsonRequest(port, `/api/workspaces/${workspace.id}/runs/${runId}`)).run;
+  assert.equal(waitingRun.status, "waiting_approval");
+  const waitingWorker = Object.values(waitingRun.nodeRuns).find((node) => node.prototypeNodeId === "worker");
+  const resumed = await jsonRequest(port, `/api/workspaces/${workspace.id}/runs/${runId}/resume`, {
+    method: "POST",
+    body: { nodeRunId: waitingWorker.id, output: { decision: "approved" } },
+  });
+  assert.equal(resumed.run.status, "coordinating");
+
+  const resumedResponse = await fetch(
+    `http://127.0.0.1:${port}/api/workspaces/${workspace.id}/runs/${runId}/events`
+  );
+  const resumedEvents = await readEvents(resumedResponse.body, (events) => events.some(isTerminalEvent));
+  assert.ok(resumedEvents.events.some((event) => event.type === "root_coordinator_started"));
+  assert.ok(resumedEvents.events.some((event) => event.type === "done"));
 
   const completed = (await jsonRequest(port, `/api/workspaces/${workspace.id}/runs/${runId}`)).run;
   assert.equal(completed.status, "completed");
@@ -384,6 +402,7 @@ test("DAG app-server approvals route to coordinator and worker turns while the r
   assert.equal(completed.rootCoordinator.runtimeSession.sessionId, "thread-1");
   const workerRun = Object.values(completed.nodeRuns).find((node) => node.prototypeNodeId === "worker");
   assert.equal(workerRun.status, "completed");
+  assert.deepEqual(workerRun.approval.value, { decision: "approved" });
   assert.equal(workerRun.runtimeSession.sessionId, "thread-2");
 });
 

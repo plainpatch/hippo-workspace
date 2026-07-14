@@ -47,3 +47,25 @@ test("an executor that exits without a terminal event is converted to an error",
   manager.subscribe("workspace:missing-terminal", (event) => events.push(event));
   assert.deepEqual(events.map((event) => event.type), ["prepared", "error"]);
 });
+
+test("a completed execution key can start a new continuation", async () => {
+  const manager = new ExecutionManager({ retentionMs: 1000 });
+  let executions = 0;
+  const executor = async (publish) => {
+    executions += 1;
+    publish({ type: "done", attempt: executions });
+  };
+
+  manager.ensure("workspace:continuation", executor);
+  await tick();
+  await tick();
+  const restarted = manager.ensure("workspace:continuation", executor, { restartCompleted: true });
+  assert.equal(restarted.created, true);
+  await tick();
+  await tick();
+
+  const events = [];
+  manager.subscribe("workspace:continuation", (event) => events.push(event));
+  assert.equal(executions, 2);
+  assert.deepEqual(events.map((event) => event.attempt), [2]);
+});

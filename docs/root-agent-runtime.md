@@ -28,7 +28,9 @@ Default edges describe the normal path, not an automatic workflow engine. There 
 
 ## Node RAG Tool
 
-RAG is an optional node capability, not an eager execution mode. Each node owns `rag.enabled` and `rag.topN`. When enabled, Hippo injects a dedicated read-only MCP server into that node session with only `hippo_rag_scope` and `hippo_rag_search`. The model decides whether retrieval is needed, while the server enforces the current workspace authorization boundary and the node's configured Top N. Disabled nodes receive no RAG MCP server. AnythingLLM remains only the retrieval provider.
+RAG is an optional node capability, not an eager execution mode. Each node owns `rag.enabled` and `rag.topN`. When enabled, Hippo injects a dedicated read-only MCP server into that node session with `hippo_rag_scope`, `hippo_rag_list_documents`, and `hippo_rag_search`. The model decides whether retrieval is needed, while the server enforces the current workspace authorization boundary and the node's configured Top N. Disabled nodes receive no RAG MCP server. AnythingLLM remains only the retrieval provider.
+
+`hippo_rag_search` resolves each vector result back to the authorized Hippo document index. Every returned result includes the knowledge root, relative document path, and directly accessible local file path. Results whose source cannot be identified safely are omitted and counted in `unresolvedResultCount` instead of guessing a file.
 
 ## Runtime Loop
 

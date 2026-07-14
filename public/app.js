@@ -10,19 +10,23 @@ const state = {
   projects: [],
   agents: [],
   knowledge: null,
+  agentBuilderSkill: null,
   status: null,
   activeProjectId: null,
   activeConversationId: null,
   conversations: [],
+  selectedAgentByConversation: new Map(),
   collapsedProjectIds: new Set(),
+  collapsedKnowledgePaths: new Set(),
   selectedKnowledgePath: "",
+  knowledgeSearchQuery: "",
   workspaceKnowledgeSelection: {
     drawers: new Set(),
     topics: new Set(),
   },
   selectedDagNodeId: "root",
   selectedDagEdgeKey: "",
-  currentView: "chat",
+  currentView: "home",
   activeRun: null,
   reconnectingRunId: "",
   executionStream: null,
@@ -30,6 +34,10 @@ const state = {
   conversationSaveChains: new Map(),
   messages: [],
 };
+
+const ACTIVE_EXECUTION_STATUSES = new Set(["preparing", "pending", "coordinating", "running", "waiting_approval", "waiting_user"]);
+const RESUMABLE_EXECUTION_STATUSES = new Set(["preparing", "pending", "coordinating", "running"]);
+const TERMINAL_EXECUTION_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 const DAG_NODE_WIDTH = 210;
 const DAG_NODE_HEIGHT = 188;
@@ -43,15 +51,22 @@ const icons = {
   newConversation: `<svg class="projectActionIcon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3H6a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3h12a3 3 0 0 0 3-3v-6"></path><path d="M17.5 3.5a2.1 2.1 0 0 1 3 3L11 16l-4 1 1-4 9.5-9.5Z"></path></svg>`,
   pin: `<svg class="pinIcon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 4 5 5"></path><path d="M14 5 8 11l-1 5 5-1 6-6"></path><path d="m9 15-5 5"></path></svg>`,
   archive: `<svg class="archiveIcon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="5" rx="1.5"></rect><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9"></path><path d="M10 13h4"></path></svg>`,
+  folderOpen: `<svg class="folderOpenIcon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5V6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v1.5"></path><path d="M3.5 9.5h18l-2 9a2 2 0 0 1-2 1.5h-11a2 2 0 0 1-2-1.5l-1-9Z"></path></svg>`,
 };
 
 bindEvents();
 setDrawerOpen(false);
 refreshAll();
+setInterval(updateExecutionClocks, 1000);
 
 function bindEvents() {
   const messageInput = document.getElementById("messageInput");
-  document.getElementById("projectHomeBtn").addEventListener("click", renderActiveProject);
+  document.getElementById("agentSelect")?.addEventListener("change", (event) => {
+    if (state.activeConversationId) {
+      state.selectedAgentByConversation.set(state.activeConversationId, event.currentTarget.value || "");
+    }
+  });
+  document.getElementById("projectHomeBtn").addEventListener("click", showHomePage);
   document.getElementById("searchBtn")?.addEventListener("click", () => toast("搜索入口已预留。"));
   document.getElementById("agentsBtn").addEventListener("click", showAgentsPage);
   document.getElementById("knowledgeBtn").addEventListener("click", showKnowledgePage);
@@ -61,7 +76,8 @@ function bindEvents() {
   document.getElementById("settingsBtn").addEventListener("click", showSettingsPage);
   document.getElementById("createProjectBtn").addEventListener("click", () => openProjectForm());
   document.getElementById("projectConfigBtn").addEventListener("click", () => {
-    if (state.currentView === "agents") openAgentForm();
+    if (state.currentView === "home") openProjectForm();
+    else if (state.currentView === "agents") openAgentForm();
     else if (state.currentView === "agent-editor") submitActiveAgentEditor();
     else if (state.currentView === "knowledge") focusKnowledgeCreateAction();
     else if (state.currentView === "inbox") showInboxPage();
@@ -96,7 +112,9 @@ function bindEvents() {
 async function refreshAll() {
   if (state.executionStream) disconnectExecutionStream();
   await checkStatus();
-  await Promise.allSettled([loadProjects(), loadAgents(), loadKnowledge()]);
+  await request("/api/workspaces/default", { method: "POST" });
+  await Promise.allSettled([loadProjects(), loadAgents(), loadKnowledge(), loadAgentBuilderSkillStatus()]);
+  if (state.currentView === "home") showHomePage();
 }
 
 async function checkStatus() {
@@ -120,7 +138,7 @@ async function loadProjects() {
   const data = await request("/api/workspaces");
   state.projects = data.workspaces;
   if (!state.activeProjectId && state.projects.length) {
-    state.activeProjectId = state.projects[0].id;
+    state.activeProjectId = (state.projects.find((project) => project.metadata?.isDefault === true) || state.projects[0]).id;
   }
   if (state.activeProjectId && !state.projects.some((project) => project.id === state.activeProjectId)) {
     state.activeProjectId = state.projects[0]?.id || null;
@@ -185,7 +203,7 @@ async function refreshMessageRunSummaries(projectId) {
       await queueConversationSave(projectId, conversation.id, state.messages, { immediate: true });
     }
     const activeRun = conversationRuns.find((run) =>
-      run.rootSessionId === conversation?.id && ["pending", "running", "coordinating", "waiting_approval"].includes(run.status)
+      run.rootSessionId === conversation?.id && RESUMABLE_EXECUTION_STATUSES.has(run.status)
     );
     if (activeRun) restoreActiveExecution(projectId, activeRun);
     else if (state.activeRun?.projectId === projectId) clearActiveRun();
@@ -205,6 +223,11 @@ async function loadKnowledge() {
   state.knowledge = data;
   renderProjectKnowledgeTreeFromForm(getActiveProject());
   if (state.currentView === "knowledge") renderKnowledgeManager();
+}
+
+async function loadAgentBuilderSkillStatus() {
+  state.agentBuilderSkill = await request("/api/skills/hippo-agent-builder");
+  if (state.currentView === "home") showHomePage();
 }
 
 function renderProjectList() {
@@ -241,7 +264,7 @@ function renderProjectList() {
   target.querySelectorAll("[data-project-id]").forEach((button) => {
     button.addEventListener("click", async () => {
       const projectId = button.dataset.projectId;
-      if (projectId === state.activeProjectId) {
+      if (projectId === state.activeProjectId && state.currentView === "chat") {
         if (state.collapsedProjectIds.has(projectId)) state.collapsedProjectIds.delete(projectId);
         else state.collapsedProjectIds.add(projectId);
         renderProjectList();
@@ -310,6 +333,102 @@ function renderConversationList() {
   `;
 }
 
+function showHomePage() {
+  state.currentView = "home";
+  setActiveSystemNav("home");
+  setChatStreamMode("homeStream");
+  document.getElementById("composerForm").classList.add("hidden");
+  document.getElementById("activeProjectName").textContent = "首页";
+  document.getElementById("activeProjectMeta").textContent = "从默认工作区开始一项新任务。";
+  setHeaderConfigButton(false);
+
+  const stream = document.getElementById("chatStream");
+  const defaultWorkspace = state.projects.find((item) => item.metadata?.isDefault === true);
+  stream.innerHTML = `
+    <div class="homePage">
+      <div class="homeBrand" aria-label="Hippo">
+        <div class="homeLogo">H</div>
+        <span>Hippo</span>
+      </div>
+      <form class="homePromptForm" data-home-prompt-form>
+        <textarea name="task" rows="2" required autofocus placeholder="向 Hippo 描述任务"></textarea>
+        <div class="homePromptBar">
+          <span class="homeWorkspaceHint">⌂ ${defaultWorkspace ? escapeHtml(defaultWorkspace.name) : "默认工作区"}</span>
+          <button class="homeSubmitButton" type="submit" aria-label="开始新会话">↑</button>
+        </div>
+      </form>
+      <div class="homeQuickActions" aria-label="智能体快捷操作">
+        <button data-install-agent-builder type="button">
+          <span class="homeQuickIcon">↓</span>
+          <span><strong>${state.agentBuilderSkill?.installed ? "更新 hippo-agent-builder" : "导入 hippo-agent-builder 到 Codex"}</strong></span>
+        </button>
+        <button data-home-template="create-agent" type="button">
+          <span class="homeQuickIcon">A</span>
+          <span><strong>使用智能体 Skill 创建新智能体</strong></span>
+        </button>
+      </div>
+    </div>
+  `;
+  const form = stream.querySelector("[data-home-prompt-form]");
+  form?.addEventListener("submit", startHomeConversation);
+  stream.querySelector("[data-install-agent-builder]")?.addEventListener("click", installAgentBuilderSkill);
+  stream.querySelector("[data-home-template='create-agent']")?.addEventListener("click", () => {
+    const input = form?.elements.task;
+    if (!input) return;
+    input.value = "使用 hippo-agent-builder Skill，根据以下需求创建一个新的 Hippo 智能体：";
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  });
+  stream.scrollTop = 0;
+}
+
+async function installAgentBuilderSkill(event) {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    state.agentBuilderSkill = await request("/api/skills/hippo-agent-builder/install", { method: "POST" });
+    showHomePage();
+    toast("hippo-agent-builder 已导入 Codex，新的 Codex 会话将自动加载。");
+  } finally {
+    if (button.isConnected) button.disabled = false;
+  }
+}
+
+async function startHomeConversation(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const task = String(new FormData(form).get("task") || "").trim();
+  if (!task) return;
+  const submitButton = form.querySelector("[type='submit']");
+  submitButton.disabled = true;
+  try {
+    let workspace = state.projects.find((item) => item.metadata?.isDefault === true);
+    if (!workspace) {
+      workspace = (await request("/api/workspaces/default", { method: "POST" })).workspace;
+      await loadProjects();
+    }
+    disconnectExecutionStream();
+    clearActiveRun();
+    state.activeProjectId = workspace.id;
+    state.activeConversationId = null;
+    state.collapsedProjectIds.delete(workspace.id);
+    await loadConversations(workspace.id);
+    const { conversation } = await submitJson(`/api/workspaces/${encodeURIComponent(workspace.id)}/conversations`, {
+      title: deriveConversationTitle(task),
+      messages: [],
+    }, false);
+    state.activeConversationId = conversation.id;
+    await loadConversations(workspace.id);
+    renderActiveProject();
+    const messageInput = document.getElementById("messageInput");
+    messageInput.value = task;
+    resizeComposer(messageInput);
+    document.getElementById("composerForm").requestSubmit();
+  } finally {
+    if (submitButton.isConnected) submitButton.disabled = false;
+  }
+}
+
 function renderActiveProject() {
   state.currentView = "chat";
   setActiveSystemNav("chat");
@@ -355,19 +474,30 @@ function renderActiveProject() {
 
 function renderMessages() {
   const stream = document.getElementById("chatStream");
+  const expandedExecutionIds = new Set(
+    [...stream.querySelectorAll("[data-execution-detail-id][open]")].map((item) => item.dataset.executionDetailId)
+  );
   stream.innerHTML = state.messages.map((message) => `
     <article class="message ${escapeHtml(message.role)}">
       <div class="messageAvatar">${message.role === "user" ? "你" : "H"}</div>
       <div class="messageBody">
         <div class="messageMeta">${message.role === "user" ? "你" : "Hippo Agent"}</div>
-        <div class="messageText">${formatMessage(message.text)}</div>
+        ${renderMessageText(message)}
+        ${message.role === "assistant" ? renderExecutionProgress(message) : ""}
         ${message.role === "assistant" ? renderRuntimeRequests(message) : ""}
         ${message.agentRunSummary ? renderAgentRunSummary(message.agentRunSummary, message.runId) : ""}
       </div>
     </article>
   `).join("");
+  stream.querySelectorAll("[data-execution-detail-id]").forEach((detail) => {
+    detail.open = expandedExecutionIds.has(detail.dataset.executionDetailId);
+  });
+  updateExecutionClocks();
   stream.querySelectorAll("[data-run-detail-id]").forEach((button) => {
     button.addEventListener("click", () => showRunDetail(button.dataset.runDetailId));
+  });
+  stream.querySelectorAll("[data-resume-form]").forEach((form) => {
+    form.addEventListener("submit", resumeWaitingNode);
   });
   stream.querySelectorAll("[data-runtime-request-decision]").forEach((button) => {
     button.addEventListener("click", () => resolveRuntimeApproval(button));
@@ -382,6 +512,32 @@ function renderMessages() {
     button.addEventListener("click", () => copyRenderedCode(button));
   });
   stream.scrollTop = stream.scrollHeight;
+}
+
+function renderMessageText(message) {
+  let text = String(message?.text || "");
+  if (message?.role === "assistant" && message.metadata?.status === "waiting_approval" && isEmptyRuntimeEnvelope(text)) {
+    const waitingNode = [...(message.agentRunSummary?.nodes || [])].reverse()
+      .find((node) => node.status === "waiting_approval" && node.text);
+    if (waitingNode?.text) text = waitingNode.text;
+  }
+  if (message?.role === "assistant" && text.trim().startsWith("{")) {
+    try {
+      text = extractRunOutputText(JSON.parse(text)) || text;
+    } catch {
+      // Keep non-JSON model output unchanged.
+    }
+  }
+  return text ? `<div class="messageText">${formatMessage(text)}</div>` : "";
+}
+
+function isEmptyRuntimeEnvelope(value) {
+  try {
+    const parsed = JSON.parse(String(value || ""));
+    return parsed && typeof parsed === "object" && parsed.runtimeId && parsed.runId && !String(parsed.text || "").trim();
+  } catch {
+    return false;
+  }
 }
 
 function showAgentsPage() {
@@ -424,7 +580,7 @@ function showAgentsPage() {
 
 function formatAgentCardMeta(agent) {
   const nodeCount = agent.type === "dag" ? Math.max(1, (agent.nodes || []).length) : 1;
-  return `${nodeCount} 节点 · v${agent.version || 1} · ${agent.runtimeId || "codex"}`;
+  return `${nodeCount} 节点 · v${agent.version || 1} · Schema ${agent.schemaVersion || 1} · ${agent.runtimeId || "codex"}`;
 }
 
 function showKnowledgePage() {
@@ -435,7 +591,7 @@ function showKnowledgePage() {
   document.getElementById("composerForm").classList.add("hidden");
   setHeaderConfigButton(true);
   document.getElementById("activeProjectName").textContent = "知识库";
-  document.getElementById("activeProjectMeta").textContent = "系统路径 knowledge 下的两级目录：一级知识库表示领域类型，二级主题表示领域下的细分知识类型。";
+  document.getElementById("activeProjectMeta").textContent = "按领域和主题组织本地文档，并为工作区提供可控的检索范围。";
   document.getElementById("projectConfigBtn").textContent = "新建主题";
   renderKnowledgeManager();
 }
@@ -775,19 +931,100 @@ async function resumeWaitingNode(event) {
   event.preventDefault();
   const project = getActiveProject();
   const form = event.currentTarget;
+  const submit = form.querySelector("button[type='submit']");
   const rawOutput = new FormData(form).get("output");
-  await request(`/api/workspaces/${encodeURIComponent(project.id)}/runs/${encodeURIComponent(form.dataset.runId)}/resume`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      nodeRunId: form.dataset.nodeRunId,
-      output: parseLooseJson(rawOutput),
-    }),
-  });
-  toast("审批已提交，节点已继续。");
-  await loadConversations(project.id);
-  await saveActiveConversation();
-  await renderInboxManager();
+  const message = state.messages.find((item) => item.role === "assistant" && item.runId === form.dataset.runId);
+  if (submit) {
+    submit.disabled = true;
+    submit.textContent = "正在继续...";
+  }
+  if (message) {
+    message.metadata = mergeMessageMetadata(message.metadata, {
+      status: "coordinating",
+      executionStage: "已确认，协调者正在继续",
+      completedAt: "",
+    });
+    if (message.agentRunSummary) {
+      message.agentRunSummary = {
+        ...message.agentRunSummary,
+        status: "coordinating",
+        nodes: (message.agentRunSummary.nodes || []).map((node) =>
+          node.id === form.dataset.nodeRunId ? { ...node, status: "coordinating" } : node
+        ),
+      };
+    }
+    appendExecutionActivity(message, {
+      key: `approval_submitted:${form.dataset.nodeRunId}`,
+      label: "已提交节点确认",
+      detail: "协调者正在安排下一步",
+    });
+    if (state.currentView === "chat") renderMessages();
+  }
+  try {
+    const data = await request(`/api/workspaces/${encodeURIComponent(project.id)}/runs/${encodeURIComponent(form.dataset.runId)}/resume`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        nodeRunId: form.dataset.nodeRunId,
+        output: parseLooseJson(rawOutput),
+      }),
+    });
+    if (message && data.run) {
+      message.agentRunSummary = summarizeAgentRun(data.run);
+      applyRunSnapshotToMessage(message, data.run);
+      appendExecutionActivity(message, {
+        key: `approval_resumed:${form.dataset.nodeRunId}`,
+        label: "已确认节点结果",
+        detail: data.run.status === "completed" ? "任务已完成" : "协调者已继续调度",
+      });
+      if (state.activeConversationId) {
+        await queueConversationSave(project.id, state.activeConversationId, state.messages, { immediate: true });
+      }
+    }
+    if (message && data.run && !TERMINAL_EXECUTION_STATUSES.has(data.run.status)) {
+      const conversationId = getActiveConversation()?.id || data.run.rootSessionId || "";
+      const payload = {
+        runId: data.run.id,
+        sessionId: conversationId,
+        agentId: data.run.agentId || undefined,
+      };
+      const handlers = createExecutionHandlers({
+        project,
+        conversationId,
+        messages: state.messages,
+        payload,
+        assistantMessage: message,
+      });
+      setActiveRun(project.id, data.run.id, 0, conversationId);
+      void streamRunEvents(project.id, data.run.id, handlers, { conversationId })
+        .catch((error) => recoverExecutionStream(project.id, data.run.id, handlers, message, error));
+    }
+    toast(data.run?.status === "completed" ? "任务已完成。" : "审批已提交，任务已继续。" );
+    if (state.currentView === "inbox") await renderInboxManager();
+    else renderMessages();
+  } catch (error) {
+    if (message) {
+      message.metadata = mergeMessageMetadata(message.metadata, {
+        status: "waiting_approval",
+        executionStage: "等待你的确认",
+      });
+      if (message.agentRunSummary) {
+        message.agentRunSummary = {
+          ...message.agentRunSummary,
+          status: "waiting_approval",
+          nodes: (message.agentRunSummary.nodes || []).map((node) =>
+            node.id === form.dataset.nodeRunId ? { ...node, status: "waiting_approval" } : node
+          ),
+        };
+      }
+      if (state.currentView === "chat") renderMessages();
+    }
+    if (submit) {
+      submit.disabled = false;
+      submit.textContent = "确认并继续";
+    }
+    throw error;
+  }
 }
 
 function focusKnowledgeCreateAction() {
@@ -805,13 +1042,17 @@ function renderKnowledgeManager() {
   const domains = getKnowledgeDomains();
   const selectedNode = findKnowledgeNode(state.selectedKnowledgePath, domains) || domains[0] || null;
   state.selectedKnowledgePath = selectedNode?.path || "";
+  const headerAction = document.getElementById("projectConfigBtn");
+  setHeaderConfigButton(!selectedNode || selectedNode.level === 1);
+  if (headerAction) headerAction.textContent = selectedNode ? "新建主题" : "新建知识库";
   stream.innerHTML = `
     <section class="knowledgeManager">
       <aside class="knowledgeTreePane">
         <div class="knowledgeTreeHeader">
           <h2>知识库</h2>
-          <button id="newKnowledgeDomainBtn" type="button">新建</button>
+          <button id="newKnowledgeDomainBtn" type="button">新建知识库</button>
         </div>
+        <input id="knowledgeTreeSearch" class="knowledgeTreeSearch" type="search" value="${escapeHtml(state.knowledgeSearchQuery)}" placeholder="搜索知识库或主题" aria-label="搜索知识库或主题" />
         <div class="knowledgeTreeList">
           ${domains.length ? domains.map((domain) => renderKnowledgeTreeItem(domain, selectedNode?.path || "")).join("") : `<div class="emptyBlock">还没有知识库。</div>`}
         </div>
@@ -822,6 +1063,20 @@ function renderKnowledgeManager() {
     </section>
   `;
   document.getElementById("newKnowledgeDomainBtn")?.addEventListener("click", openKnowledgeDomainModal);
+  const searchInput = document.getElementById("knowledgeTreeSearch");
+  searchInput?.addEventListener("input", () => {
+    state.knowledgeSearchQuery = searchInput.value;
+    filterKnowledgeTree(searchInput.value, stream);
+  });
+  filterKnowledgeTree(state.knowledgeSearchQuery, stream);
+  stream.querySelectorAll("[data-toggle-knowledge-path]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const domainPath = button.dataset.toggleKnowledgePath;
+      if (state.collapsedKnowledgePaths.has(domainPath)) state.collapsedKnowledgePaths.delete(domainPath);
+      else state.collapsedKnowledgePaths.add(domainPath);
+      renderKnowledgeManager();
+    });
+  });
   stream.querySelectorAll("[data-knowledge-node-path]").forEach((button) => {
     button.addEventListener("click", () => {
       state.selectedKnowledgePath = button.dataset.knowledgeNodePath;
@@ -843,25 +1098,41 @@ function renderKnowledgeManager() {
       if (domain) openKnowledgeTopicModal(domain);
     });
   });
+  stream.querySelectorAll("[data-reveal-knowledge-path]").forEach((button) => {
+    button.addEventListener("click", () => revealKnowledgePath(button.dataset.revealKnowledgePath, button));
+  });
+  stream.querySelectorAll("[data-add-knowledge-documents]").forEach((button) => {
+    button.addEventListener("click", () => {
+      [...stream.querySelectorAll("[data-knowledge-file-input]")]
+        .find((input) => input.dataset.knowledgeFileInput === button.dataset.addKnowledgeDocuments)
+        ?.click();
+    });
+  });
+  stream.querySelectorAll("[data-knowledge-file-input]").forEach((input) => {
+    input.addEventListener("change", () => uploadKnowledgeDocuments(input.dataset.knowledgeFileInput, input.files));
+  });
+  stream.querySelectorAll("[data-knowledge-drop-path]").forEach((dropZone) => bindKnowledgeDropZone(dropZone));
   stream.scrollTop = 0;
 }
 
 function renderKnowledgeTreeItem(domain, selectedPath) {
   const topics = getKnowledgeTopics(domain);
   const isActive = domain.path === selectedPath;
+  const isCollapsed = state.collapsedKnowledgePaths.has(domain.path);
   return `
-    <div class="knowledgeTreeGroup">
-      <button class="knowledgeTreeNode domain ${isActive ? "active" : ""}" data-knowledge-node-path="${escapeHtml(domain.path)}" type="button">
-        <span>▾</span>
-        <strong>${escapeHtml(domain.title || domain.name)}</strong>
-        <small>${topics.length}</small>
-      </button>
-      <div class="knowledgeTreeChildren">
+    <div class="knowledgeTreeGroup" data-knowledge-group="${escapeHtml(domain.path)}" data-search-text="${escapeHtml(knowledgeSearchText(domain))}">
+      <div class="knowledgeTreeDomainRow">
+        <button class="knowledgeTreeToggle ${isCollapsed ? "collapsed" : ""}" data-toggle-knowledge-path="${escapeHtml(domain.path)}" type="button" aria-label="${isCollapsed ? "展开" : "折叠"} ${escapeHtml(domain.title || domain.name)}" aria-expanded="${!isCollapsed}">${icons.chevron}</button>
+        <button class="knowledgeTreeNode domain ${isActive ? "active" : ""}" data-knowledge-node-path="${escapeHtml(domain.path)}" type="button">
+          <strong>${escapeHtml(domain.title || domain.name)}</strong>
+          <small>${topics.length}</small>
+        </button>
+      </div>
+      <div class="knowledgeTreeChildren ${isCollapsed ? "hidden" : ""}">
         ${topics.map((topic) => `
-          <button class="knowledgeTreeNode topic ${topic.path === selectedPath ? "active" : ""}" data-knowledge-node-path="${escapeHtml(topic.path)}" type="button">
-            <span></span>
+          <button class="knowledgeTreeNode topic ${topic.path === selectedPath ? "active" : ""}" data-knowledge-node-path="${escapeHtml(topic.path)}" data-search-text="${escapeHtml(knowledgeSearchText(topic))}" type="button">
             <strong>${escapeHtml(topic.title || topic.name)}</strong>
-            <small>${countKnowledgeDocs(topic)}</small>
+            <small class="knowledgeTreeTopicMeta"><i class="${getTopicIndexInfo(topic).tone}"></i>${countKnowledgeDocs(topic)}</small>
           </button>
         `).join("")}
       </div>
@@ -873,6 +1144,8 @@ function renderKnowledgeDetail(node, domains) {
   const isDomain = node.level === 1;
   const topics = isDomain ? getKnowledgeTopics(node) : [];
   const documents = collectKnowledgeDocuments(node);
+  const referenceCount = getKnowledgeReferenceCount(node);
+  const indexInfo = isDomain ? getDomainIndexInfo(topics) : getTopicIndexInfo(node);
   return `
     <div class="knowledgeDetailHeader">
       <div>
@@ -881,7 +1154,7 @@ function renderKnowledgeDetail(node, domains) {
       </div>
       <div class="knowledgeDetailActions">
         ${isDomain ? `<button data-create-topic-path="${escapeHtml(node.path)}" type="button">新建主题</button>` : ""}
-        ${isDomain ? "" : `<button data-sync-topic-path="${escapeHtml(node.path)}" type="button">同步 RAG</button>`}
+        ${isDomain ? "" : `<button data-sync-topic-path="${escapeHtml(node.path)}" type="button">${escapeHtml(indexInfo.actionLabel)}</button>`}
         <button data-edit-knowledge-path="${escapeHtml(node.path)}" type="button">编辑</button>
       </div>
     </div>
@@ -893,25 +1166,43 @@ function renderKnowledgeDetail(node, domains) {
       <div class="knowledgeStats" aria-label="内容统计">
         ${isDomain ? `<span><strong>${topics.length}</strong>主题</span>` : ""}
         <span><strong>${documents.length}</strong>文档</span>
+        <span><strong>${referenceCount}</strong>工作区</span>
       </div>
     </div>
-    <div class="knowledgeDetailSection">
-      <h3>${isDomain ? "目录列表" : "文档列表"}</h3>
+    <div class="knowledgeIndexSummary ${indexInfo.tone}">
+      <span>${escapeHtml(indexInfo.label)}</span>
+      <p>${escapeHtml(indexInfo.description)}</p>
+    </div>
+    <div class="knowledgeDetailSection" ${isDomain ? "" : `data-knowledge-drop-path="${escapeHtml(node.path)}"`}>
+      <div class="knowledgeDetailSectionHeader">
+        <h3>${isDomain ? "目录列表" : "文档列表"}</h3>
+        ${isDomain ? "" : `
+          <div class="knowledgeDocumentActions">
+            <input class="hidden" data-knowledge-file-input="${escapeHtml(node.path)}" type="file" multiple />
+            <button data-add-knowledge-documents="${escapeHtml(node.path)}" type="button">添加文档</button>
+            <button class="knowledgeRevealButton" data-reveal-knowledge-path="${escapeHtml(node.path)}" type="button" title="打开主题目录" aria-label="打开 ${escapeHtml(node.title || node.name)} 主题目录">${icons.folderOpen}</button>
+          </div>
+        `}
+      </div>
       ${isDomain ? renderKnowledgeTopicDirectory(topics) : renderKnowledgeDocumentList(documents)}
     </div>
     <div class="knowledgeDetailSection">
-      <h3>相关配置</h3>
+      <h3>使用情况</h3>
       <dl class="knowledgeConfigList">
-        <dt>路径</dt><dd>${escapeHtml(node.path)}</dd>
-        <dt>层级</dt><dd>${isDomain ? "一级知识库 / 领域类型" : "二级主题 / 细分知识类型"}</dd>
-        <dt>工作区引用</dt><dd>${isDomain ? "工作区引用此一级知识库后，检索包含其下主题。" : "二级主题可在工作区设置中勾选为检索筛选项。"}</dd>
-        <dt>文档数</dt><dd>${documents.length}</dd>
-        ${isDomain ? "" : `
-          <dt>RAG Workspace</dt><dd>${escapeHtml(node.rag?.workspaceSlug || "未创建")}</dd>
-          <dt>RAG 状态</dt><dd>${escapeHtml(node.rag?.status || "pending")}</dd>
-          <dt>最近同步</dt><dd>${escapeHtml(node.rag?.syncedAt || "未同步")}</dd>
-        `}
+        <dt>工作区引用</dt><dd>${referenceCount ? `${referenceCount} 个工作区正在使用` : "暂未被工作区引用"}</dd>
+        <dt>最近更新</dt><dd>${escapeHtml(formatKnowledgeTime(node.rag?.syncedAt || newestDocumentTime(documents)))}</dd>
       </dl>
+      <details class="knowledgeTechnicalInfo">
+        <summary>技术信息</summary>
+        <dl class="knowledgeConfigList">
+          <dt>本地路径</dt><dd>${escapeHtml(node.path)}</dd>
+          <dt>层级</dt><dd>${isDomain ? "一级知识库" : "二级主题"}</dd>
+          ${isDomain ? "" : `
+            <dt>RAG Workspace</dt><dd>${escapeHtml(node.rag?.workspaceSlug || "未创建")}</dd>
+            <dt>Provider 状态</dt><dd>${escapeHtml(node.rag?.status || "pending")}</dd>
+          `}
+        </dl>
+      </details>
     </div>
   `;
 }
@@ -941,18 +1232,126 @@ function renderKnowledgeTopicDirectory(topics) {
 }
 
 function renderKnowledgeDocumentList(documents) {
-  if (!documents.length) return `<div class="knowledgeTopicEmpty">暂无文档。</div>`;
+  if (!documents.length) return `<div class="knowledgeTopicEmpty knowledgeDropEmpty">拖入文件，或点击“添加文档”。</div>`;
   return `
     <div class="knowledgeDirectoryList">
-      ${documents.map((doc) => `
-        <div class="knowledgeDirectoryItem static">
-          <strong>${escapeHtml(doc.name)}</strong>
-          <span>${escapeHtml(doc.path)}</span>
-          ${doc.documentNames?.length ? `<small>${escapeHtml(doc.documentNames.length)} RAG 文档</small>` : ""}
-        </div>
-      `).join("")}
+      ${documents.map(renderKnowledgeDocumentItem).join("")}
     </div>
   `;
+}
+
+function renderKnowledgeDocumentItem(doc) {
+  const indexInfo = getDocumentIndexInfo(doc);
+  const metadata = [formatFileSize(doc.sourceSize), formatKnowledgeTime(doc.sourceMtimeMs || doc.updatedAt)]
+    .filter((item) => item && item !== "未更新")
+    .join(" · ");
+  return `
+    <div class="knowledgeDirectoryItem static">
+      <a class="knowledgeDocumentLink" href="/knowledge-files?path=${encodeURIComponent(doc.path)}" target="_blank" rel="noopener">${escapeHtml(doc.title || doc.name)}</a>
+      <span>${escapeHtml(metadata || "本地文档")}</span>
+      <small class="knowledgeDocumentStatus ${indexInfo.tone}">${escapeHtml(indexInfo.label)}</small>
+    </div>
+  `;
+}
+
+function filterKnowledgeTree(value, root = document) {
+  const query = String(value || "").trim().toLocaleLowerCase();
+  root.querySelectorAll("[data-knowledge-group]").forEach((group) => {
+    const domainMatches = !query || group.dataset.searchText.includes(query);
+    const topics = [...group.querySelectorAll(".knowledgeTreeNode.topic")];
+    let visibleTopics = 0;
+    for (const topic of topics) {
+      const visible = !query || domainMatches || topic.dataset.searchText.includes(query);
+      topic.classList.toggle("hidden", !visible);
+      if (visible) visibleTopics += 1;
+    }
+    group.classList.toggle("hidden", Boolean(query) && !domainMatches && !visibleTopics);
+    const children = group.querySelector(".knowledgeTreeChildren");
+    if (query && !group.classList.contains("hidden")) children?.classList.remove("hidden");
+    else children?.classList.toggle("hidden", state.collapsedKnowledgePaths.has(group.dataset.knowledgeGroup));
+  });
+}
+
+function getDocumentIndexInfo(document) {
+  return document.documentNames?.length
+    ? { label: "已索引", tone: "ok" }
+    : { label: "待索引", tone: "pending" };
+}
+
+function getTopicIndexInfo(topic) {
+  const documents = collectKnowledgeDocuments(topic);
+  const rawStatus = topic.rag?.status || "pending";
+  const indexedCount = documents.filter((document) => document.documentNames?.length).length;
+  if (rawStatus === "error" || rawStatus === "partial") {
+    return {
+      label: rawStatus === "partial" ? "部分文档索引失败" : "索引异常",
+      description: topic.rag?.error || "请重试更新索引。",
+      actionLabel: "重试索引",
+      tone: "error",
+    };
+  }
+  if (!documents.length) {
+    return {
+      label: "等待添加文档",
+      description: "添加本地文档后即可建立检索索引。",
+      actionLabel: "建立索引",
+      tone: "neutral",
+    };
+  }
+  if (indexedCount < documents.length) {
+    return {
+      label: `${documents.length - indexedCount} 个文档待索引`,
+      description: `当前 ${indexedCount}/${documents.length} 个文档可用于检索。`,
+      actionLabel: indexedCount ? "更新索引" : "建立索引",
+      tone: "pending",
+    };
+  }
+  return {
+    label: "索引已就绪",
+    description: `${documents.length} 个文档可用于检索${topic.rag?.syncedAt ? `，${formatKnowledgeTime(topic.rag.syncedAt)}更新` : ""}。`,
+    actionLabel: "更新索引",
+    tone: "ok",
+  };
+}
+
+function getDomainIndexInfo(topics) {
+  if (!topics.length) return { label: "等待创建主题", description: "创建主题后可按知识类型管理文档。", tone: "neutral" };
+  const topicStates = topics.map(getTopicIndexInfo);
+  const errorCount = topicStates.filter((item) => item.tone === "error").length;
+  const pendingCount = topicStates.filter((item) => ["pending", "neutral"].includes(item.tone)).length;
+  if (errorCount) return { label: `${errorCount} 个主题存在异常`, description: "进入对应主题查看索引状态并重试。", tone: "error" };
+  if (pendingCount) return { label: `${pendingCount} 个主题尚未就绪`, description: "部分主题没有文档或需要更新索引。", tone: "pending" };
+  return { label: "全部主题可检索", description: `${topics.length} 个主题的索引均已就绪。`, tone: "ok" };
+}
+
+function getKnowledgeReferenceCount(node) {
+  const domainPath = node.level === 1 ? node.path : node.path.split("/")[0];
+  return state.projects.filter((workspace) => {
+    if (!(workspace.knowledgeDomainRefs || []).includes(domainPath)) return false;
+    if (node.level === 1) return true;
+    const topicRefs = workspace.knowledgeTopicRefs || [];
+    return !topicRefs.length || topicRefs.includes(node.path);
+  }).length;
+}
+
+function newestDocumentTime(documents) {
+  const values = documents.map((document) => Number(document.sourceMtimeMs) || Date.parse(document.updatedAt || "")).filter(Number.isFinite);
+  return values.length ? Math.max(...values) : undefined;
+}
+
+function formatKnowledgeTime(value) {
+  if (!value) return "未更新";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "未更新";
+  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
+}
+
+function formatFileSize(value) {
+  const size = Number(value);
+  if (!Number.isFinite(size) || size < 0) return "";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 ** 2) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 ** 2).toFixed(1)} MB`;
 }
 
 function findKnowledgeNode(pathValue, domains) {
@@ -1138,6 +1537,77 @@ async function syncKnowledgeTopic(topicPath, button) {
   }
 }
 
+async function uploadKnowledgeDocuments(topicPath, fileList) {
+  const files = [...(fileList || [])];
+  if (!topicPath || !files.length) return;
+  const button = [...document.querySelectorAll("[data-add-knowledge-documents]")]
+    .find((item) => item.dataset.addKnowledgeDocuments === topicPath);
+  if (button) button.disabled = true;
+  let saved = 0;
+  let indexFailed = 0;
+  try {
+    for (let index = 0; index < files.length; index += 1) {
+      if (button) button.textContent = `导入中 ${index + 1}/${files.length}`;
+      const body = new FormData();
+      body.append("file", files[index]);
+      body.append("relativeDir", topicPath);
+      try {
+        const result = await request("/api/knowledge/upload", { method: "POST", body });
+        saved += 1;
+        if (result.ragError) indexFailed += 1;
+      } catch {
+        // request() already reports the failed file.
+      }
+    }
+    state.knowledge = await request("/api/knowledge");
+    renderProjectKnowledgeTree([]);
+    renderKnowledgeManager();
+    if (saved < files.length) toast(`已添加 ${saved}/${files.length} 个文档。`, true);
+    else if (indexFailed) toast(`${saved} 个文档已保存，${indexFailed} 个需要重新建立索引。`);
+    else toast(`已添加 ${saved} 个文档。`);
+  } finally {
+    if (button?.isConnected) {
+      button.disabled = false;
+      button.textContent = "添加文档";
+    }
+  }
+}
+
+function bindKnowledgeDropZone(dropZone) {
+  const clear = () => dropZone.classList.remove("dragging");
+  dropZone.addEventListener("dragenter", (event) => {
+    event.preventDefault();
+    dropZone.classList.add("dragging");
+  });
+  dropZone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  });
+  dropZone.addEventListener("dragleave", (event) => {
+    if (!dropZone.contains(event.relatedTarget)) clear();
+  });
+  dropZone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    clear();
+    uploadKnowledgeDocuments(dropZone.dataset.knowledgeDropPath, event.dataTransfer?.files);
+  });
+}
+
+async function revealKnowledgePath(relativePath, button) {
+  if (!relativePath || button?.disabled) return;
+  if (button) button.disabled = true;
+  try {
+    await request("/api/knowledge/reveal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: relativePath }),
+    });
+    toast("已打开主题目录。");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 function setActiveSystemNav(view) {
   document.querySelectorAll("[data-system-view]").forEach((button) => {
     button.classList.toggle("active", button.dataset.systemView === view);
@@ -1148,14 +1618,20 @@ function renderAgentOptions() {
   const target = document.getElementById("agentSelect");
   if (!target) return;
   const project = getActiveProject();
-  const availableAgents = project?.agentIds?.length
-    ? state.agents.filter((agent) => project.agentIds.includes(agent.id))
-    : state.agents;
+  const enabledAgentIds = new Set(project?.agentIds || []);
+  const availableAgents = project
+    ? state.agents.filter((agent) => enabledAgentIds.has(agent.id))
+    : [];
+  const conversation = getActiveConversation();
+  const rememberedAgentId = conversation?.id && state.selectedAgentByConversation.has(conversation.id)
+    ? state.selectedAgentByConversation.get(conversation.id)
+    : conversation?.activeAgentId || "";
   target.innerHTML = [`<option value="">通用助手</option>`].concat(
     availableAgents.map((agent) =>
       `<option value="${escapeHtml(agent.id)}">${escapeHtml(agent.name)}</option>`
     )
   ).join("");
+  target.value = enabledAgentIds.has(rememberedAgentId) ? rememberedAgentId : "";
 }
 
 function renderAgentList() {
@@ -1284,6 +1760,7 @@ async function saveProject(event) {
   const body = {
     name: form.get("name"),
     description: form.get("description"),
+    hippoMcpEnabled: form.get("hippoMcpEnabled") === "on",
     agentIds: [...formNode.querySelectorAll("[name='agentIds']:checked")].map((item) => item.value),
     knowledgeDomainRefs: [...new Set([
       ...selectedDrawerRefs,
@@ -1305,6 +1782,7 @@ async function saveProject(event) {
   state.conversations = [];
   state.messages = [];
   await loadProjects();
+  if (state.currentView === "home") showHomePage();
   closeDrawer();
   toast("工作区已保存。");
 }
@@ -1325,6 +1803,8 @@ async function saveAgent(event) {
   const rootNode = nodes.find((node) => node.id === "root") || {};
   const type = nodes.length > 1 || edges.length ? "dag" : "single";
   const body = {
+    $schema: "https://hippo.local/schemas/agent-blueprint-v1.schema.json",
+    schemaVersion: 1,
     type,
     name: form.get("name"),
     description: form.get("description"),
@@ -1341,6 +1821,7 @@ async function saveAgent(event) {
     body.executionPolicy = { maxDecisions: Number(form.get("maxDecisions") || 50) };
     validateDagDraft(body);
   }
+  if (id) body.expectedVersion = Number(form.get("version"));
 
   id
     ? await request(`/api/agents/${encodeURIComponent(id)}`, {
@@ -1366,6 +1847,12 @@ async function sendMessage(event) {
   const form = new FormData(event.currentTarget);
   const task = String(form.get("message") || "").trim();
   if (!task) return;
+  const selectedAgentId = String(form.get("agentId") || "");
+  if (selectedAgentId && !project.agentIds?.includes(selectedAgentId)) {
+    renderAgentOptions();
+    toast("当前工作区未启用该智能体，请先在工作区设置中添加。", true);
+    return;
+  }
 
   if (state.activeRun?.projectId === project.id && state.activeRun.conversationId === state.activeConversationId) {
     await steerActiveRun(task);
@@ -1373,11 +1860,12 @@ async function sendMessage(event) {
   }
 
   const conversation = await ensureActiveConversation(task);
+  state.selectedAgentByConversation.set(conversation.id, selectedAgentId);
   renderActiveProject();
   const runId = crypto.randomUUID?.() || `run-${Date.now()}`;
   const payload = {
     task,
-    agentId: form.get("agentId") || undefined,
+    agentId: selectedAgentId || undefined,
     sessionId: conversation.id,
     runId,
     sandboxMode: form.get("sandboxMode") || undefined,
@@ -1392,9 +1880,16 @@ async function sendMessage(event) {
 
   const assistantMessage = {
     role: "assistant",
-    text: "正在准备执行...",
+    text: "",
     runId,
-    metadata: { ...turnMetadata, messageRole: "assistant", status: "preparing" },
+    metadata: {
+      ...turnMetadata,
+      messageRole: "assistant",
+      status: "preparing",
+      startedAt: new Date().toISOString(),
+      executionStage: "正在准备",
+      executionActivities: [{ key: "request_submitted", label: "已提交任务", at: new Date().toISOString() }],
+    },
   };
   state.messages.push(assistantMessage);
   const conversationMessages = state.messages;
@@ -1456,6 +1951,7 @@ function createExecutionHandlers({ project, conversationId, messages, payload, a
   const saveConversation = (immediate = false) => queueConversationSave(project.id, conversationId, messages, { immediate });
   return {
     onEvent(event) {
+      touchExecutionActivity(assistantMessage, event);
       if (event.sequence && isConversationActive(project.id, conversationId)) {
         setActiveRun(project.id, payload.runId, event.sequence, conversationId);
       }
@@ -1469,6 +1965,12 @@ function createExecutionHandlers({ project, conversationId, messages, payload, a
         runtimeId: event.request?.runtimeId || turnMetadata.runtimeId,
         sandboxMode: event.request?.runtimeOptions?.sandboxMode || turnMetadata.sandboxMode || "",
         status: "running",
+        executionStage: "正在连接 Codex",
+      });
+      appendExecutionActivity(assistantMessage, {
+        key: "runtime_connected",
+        label: "已连接 Codex runtime",
+        detail: event.request?.runtimeId || turnMetadata.runtimeId || "codex",
       });
       if (event.agentRun) {
         assistantMessage.agentRunSummary = summarizeAgentRun(event.agentRun);
@@ -1478,36 +1980,69 @@ function createExecutionHandlers({ project, conversationId, messages, payload, a
           status: node.status === "ready" ? "running" : node.status,
         }));
       }
-      assistantMessage.text = "正在调用 Codex runtime...";
+      assistantMessage.text = "";
       renderCurrentConversation();
     },
     onChunk(chunk) {
       if (!chunk) return;
       if (["正在调用 Codex runtime...", "连接已断开，正在恢复..."].includes(assistantMessage.text)) assistantMessage.text = "";
+      assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, { executionStage: "正在生成回复" });
+      appendExecutionActivity(assistantMessage, { key: "response_streaming", label: "正在生成回复" });
       assistantMessage.text += chunk;
       renderCurrentConversation();
       saveConversation();
     },
+    onRuntimeEvent(event) {
+      const activity = describeRuntimeEvent(event);
+      if (!activity) return;
+      assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, { executionStage: activity.stage || activity.label });
+      appendExecutionActivity(assistantMessage, activity);
+      renderCurrentConversation();
+      saveConversation();
+    },
+    onStatus(text) {
+      const detail = String(text || "").trim();
+      if (!detail) return;
+      assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, { executionStage: "Codex 正在处理" });
+      appendExecutionActivity(assistantMessage, { key: "runtime_status", label: "Codex 正在处理", detail: detail.slice(0, 240) });
+      renderCurrentConversation();
+    },
     onDone(data) {
-      assistantMessage.text = extractAgentResponse(data);
+      const runStatus = data.agentRun?.status || "completed";
+      const responseText = extractAgentResponse(data) || extractLatestRunOutput(data.agentRun);
+      if (responseText) assistantMessage.text = responseText;
       assistantMessage.runId = data.agentRun?.id || assistantMessage.runId || payload.runId;
       if (data.agentRun) assistantMessage.agentRunSummary = summarizeAgentRun(data.agentRun);
       assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
         runId: assistantMessage.runId,
-        status: data.agentRun?.status || "completed",
+        status: runStatus,
         runtimeSession: data.result?.runtimeSession,
         runtimeId: data.result?.runtimeId || data.request?.runtimeId || assistantMessage.metadata?.runtimeId,
         sandboxMode: data.result?.runtimeSession?.runtimeOptions?.sandboxMode || data.request?.runtimeOptions?.sandboxMode || assistantMessage.metadata?.sandboxMode || "",
         agentRunId: data.agentRun?.id || "",
         agentRunStatus: data.agentRun?.status || "",
         runtimeRequests: [],
+        executionStage: executionStatusLabel(runStatus),
+        completedAt: TERMINAL_EXECUTION_STATUSES.has(runStatus) ? new Date().toISOString() : "",
       });
+      appendExecutionActivity(assistantMessage, TERMINAL_EXECUTION_STATUSES.has(runStatus)
+        ? { key: runStatus, label: executionStatusLabel(runStatus) }
+        : { key: `paused:${runStatus}`, label: executionStatusLabel(runStatus), detail: runStatus === "waiting_approval" ? "请确认节点结果后继续" : "" });
       if (isConversationActive(project.id, conversationId)) clearActiveRun();
       renderCurrentConversation();
       saveConversation(true);
     },
     onDagNodeEvent(event) {
       assistantMessage.agentRunSummary = updateRunSummaryNode(assistantMessage.agentRunSummary, event);
+      const completed = event.type === "dag_node_completed";
+      appendExecutionActivity(assistantMessage, {
+        key: `${event.type}:${event.nodeRunId || event.nodeId || "node"}`,
+        label: completed ? "节点执行完成" : event.type === "dag_node_waiting" ? "节点等待确认" : "节点开始执行",
+        detail: event.nodeId || "",
+      });
+      assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
+        executionStage: completed ? "正在协调下一步" : event.type === "dag_node_waiting" ? "等待确认" : `正在执行 ${event.nodeId || "节点"}`,
+      });
       renderCurrentConversation();
     },
     onRuntimeRequest(event) {
@@ -1517,7 +2052,9 @@ function createExecutionHandlers({ project, conversationId, messages, payload, a
       assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
         status: "waiting_approval",
         runtimeRequests: requests,
+        executionStage: "等待你的确认",
       });
+      appendExecutionActivity(assistantMessage, { key: `approval:${event.requestId}`, label: "等待你的确认", detail: describeRuntimeRequest(event) });
       assistantMessage.agentRunSummary = updateRuntimeRequestSummary(assistantMessage.agentRunSummary, event, "waiting_approval");
       renderCurrentConversation();
       saveConversation(true);
@@ -1528,7 +2065,9 @@ function createExecutionHandlers({ project, conversationId, messages, payload, a
       assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
         status: "running",
         runtimeRequests: requests,
+        executionStage: "确认完成，继续执行",
       });
+      appendExecutionActivity(assistantMessage, { key: `approval_resolved:${event.requestId}`, label: "确认完成，继续执行" });
       assistantMessage.agentRunSummary = updateRuntimeRequestSummary(assistantMessage.agentRunSummary, event, "running");
       renderCurrentConversation();
       saveConversation(true);
@@ -1537,7 +2076,14 @@ function createExecutionHandlers({ project, conversationId, messages, payload, a
       const currentText = assistantMessage.text && !assistantMessage.text.startsWith("正在") ? assistantMessage.text : "";
       assistantMessage.text = `${currentText}\n\n运行已停止。`.trim();
       assistantMessage.agentRunSummary = updateRunSummaryStatus(assistantMessage.agentRunSummary, "cancelled");
-      assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, { status: "cancelled", cancelledAt: new Date().toISOString(), runtimeRequests: [] });
+      assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
+        status: "cancelled",
+        executionStage: "已停止",
+        cancelledAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        runtimeRequests: [],
+      });
+      appendExecutionActivity(assistantMessage, { key: "cancelled", label: "运行已停止" });
       if (isConversationActive(project.id, conversationId)) clearActiveRun();
       renderCurrentConversation();
       saveConversation(true);
@@ -1548,8 +2094,11 @@ function createExecutionHandlers({ project, conversationId, messages, payload, a
       assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
         status: "failed",
         error: event.error || "运行中断",
+        executionStage: "执行失败",
+        completedAt: new Date().toISOString(),
         runtimeRequests: [],
       });
+      appendExecutionActivity(assistantMessage, { key: "failed", label: "执行失败", detail: event.error || "运行中断" });
       if (isConversationActive(project.id, conversationId)) clearActiveRun();
       renderCurrentConversation();
       saveConversation(true);
@@ -1813,9 +2362,15 @@ function applyRunSnapshotToMessage(message, run) {
     message.text = currentText.includes("运行已停止") ? currentText : `${currentText}\n\n运行已停止。`.trim();
   } else if (run.status === "waiting_user" && run.output?.question) {
     message.text = run.output.question;
+  } else if (run.status === "waiting_approval") {
+    const nodeOutput = extractLatestRunOutput(run);
+    if (nodeOutput) message.text = nodeOutput;
   }
   message.metadata = mergeMessageMetadata(message.metadata, {
     status: run.status,
+    startedAt: message.metadata?.startedAt || run.createdAt || message.metadata?.createdAt,
+    completedAt: TERMINAL_EXECUTION_STATUSES.has(run.status) ? (run.updatedAt || new Date().toISOString()) : "",
+    executionStage: executionStatusLabel(run.status),
     error: run.error?.message || "",
     agentRunId: run.id,
     agentRunStatus: run.status,
@@ -1824,6 +2379,152 @@ function applyRunSnapshotToMessage(message, run) {
       : message.metadata?.runtimeRequests || [],
   });
   return message;
+}
+
+function touchExecutionActivity(message) {
+  if (!message?.metadata) return;
+  message.metadata = mergeMessageMetadata(message.metadata, { lastActivityAt: new Date().toISOString() });
+}
+
+function appendExecutionActivity(message, { key, label, detail = "", stage = "" } = {}) {
+  if (!message || !label) return;
+  const activities = [...(message.metadata?.executionActivities || [])];
+  const normalizedDetail = String(detail || "").replace(/\s+/g, " ").trim().slice(0, 300);
+  const last = activities.at(-1);
+  if (last?.label === "正在执行命令" && label !== "正在执行命令") last.label = "命令执行完成";
+  if (last?.label === label && String(last?.detail || "") === normalizedDetail) return;
+  activities.push({ key: key || label, label, detail: normalizedDetail, at: new Date().toISOString() });
+  message.metadata = mergeMessageMetadata(message.metadata, {
+    executionActivities: activities.slice(-24),
+    executionStage: stage || message.metadata?.executionStage || label,
+    lastActivityAt: new Date().toISOString(),
+  });
+}
+
+function describeRuntimeEvent(event) {
+  const sourceType = event?.sourceType || "";
+  const payload = event?.payload || {};
+  if (sourceType === "thread/started") return { key: "thread_started", label: "已创建 Codex 会话", stage: "Codex 会话已就绪" };
+  if (sourceType === "thread/resumed") return { key: "thread_resumed", label: "已续接 Codex 会话", stage: "Codex 会话已就绪" };
+  if (sourceType === "turn/started") return { key: "turn_started", label: "Codex 开始处理", stage: "正在分析任务" };
+  if (sourceType === "turn/completed") return { key: "turn_completed", label: "Codex 处理完成", stage: "正在整理结果" };
+  if (sourceType === "turn/plan/updated") return { key: "plan_updated", label: "已更新执行计划", stage: "正在执行计划" };
+  if (sourceType === "item/agentMessage/delta") return null;
+
+  const item = payload.item || {};
+  const itemType = item.type || payload.type || "";
+  const completed = sourceType === "item/completed";
+  if (!["item/started", "item/completed", "item/updated"].includes(sourceType)) return null;
+  if (["userMessage", "plan"].includes(itemType)) return null;
+  const suffix = completed ? "完成" : "中";
+  if (itemType === "reasoning") return { key: `reasoning_${suffix}`, label: completed ? "分析完成" : "正在分析", stage: completed ? "分析完成" : "正在分析任务" };
+  if (itemType === "commandExecution") {
+    const command = item.command || item.aggregatedOutput || payload.command || "";
+    return { key: `command_${item.id || suffix}`, label: completed ? "命令执行完成" : "正在执行命令", detail: command, stage: completed ? "命令执行完成" : "正在执行命令" };
+  }
+  if (["mcpToolCall", "toolCall"].includes(itemType)) {
+    const tool = [item.server, item.tool, item.name].filter(Boolean).join(" / ");
+    return { key: `tool_${item.id || suffix}`, label: completed ? "工具调用完成" : "正在调用工具", detail: tool, stage: completed ? "工具调用完成" : `正在调用${tool ? ` ${tool}` : "工具"}` };
+  }
+  if (["fileChange", "fileChanges"].includes(itemType)) return { key: `file_${item.id || suffix}`, label: completed ? "文件修改完成" : "正在修改文件", stage: completed ? "文件修改完成" : "正在修改文件" };
+  if (itemType === "agentMessage") return { key: `message_${suffix}`, label: completed ? "回复生成完成" : "正在生成回复", stage: completed ? "正在整理结果" : "正在生成回复" };
+  return { key: `item_${item.id || itemType || suffix}`, label: completed ? "步骤执行完成" : "正在执行步骤", detail: itemType, stage: completed ? "正在继续处理" : "正在执行任务" };
+}
+
+function describeRuntimeRequest(event) {
+  const params = event?.params || {};
+  if (event?.requestType === "mcpServer/elicitation/request") return params.message || "工具需要补充信息";
+  if (event?.requestType === "item/tool/requestUserInput") return "Codex 需要补充信息";
+  if (event?.requestType === "item/fileChange/requestApproval") return "Codex 请求修改文件";
+  if (event?.requestType === "item/permissions/requestApproval") return "Codex 请求额外权限";
+  return params.command || params.reason || "Codex 请求执行操作";
+}
+
+function renderExecutionProgress(message) {
+  const metadata = message.metadata || {};
+  const status = metadata.status || "";
+  const startedAt = metadata.startedAt || metadata.createdAt || "";
+  if (!message.runId || !startedAt || (!ACTIVE_EXECUTION_STATUSES.has(status) && !TERMINAL_EXECUTION_STATUSES.has(status))) return "";
+  const completedAt = metadata.completedAt || metadata.cancelledAt || "";
+  const active = ACTIVE_EXECUTION_STATUSES.has(status);
+  const activities = metadata.executionActivities || [];
+  const stage = metadata.executionStage || executionStatusLabel(status);
+  const timerPrefix = status === "completed" ? "已处理 " : status === "failed" ? "失败前运行 " : status === "cancelled" ? "停止前运行 " : "已用 ";
+  const detailId = message.runId || metadata.runId;
+  return `
+    <details class="executionProgress ${escapeHtml(status)}" data-execution-detail-id="${escapeHtml(detailId)}">
+      <summary>
+        <span class="executionProgressState">${active ? '<i class="executionPulse" aria-hidden="true"></i>' : ""}<span data-execution-stage>${escapeHtml(active ? stage : executionStatusLabel(status))}</span></span>
+        <time data-execution-clock data-started-at="${escapeHtml(startedAt)}" data-completed-at="${escapeHtml(completedAt)}" data-prefix="${escapeHtml(timerPrefix)}">${escapeHtml(timerPrefix)}${escapeHtml(formatElapsedDuration(startedAt, completedAt))}</time>
+      </summary>
+      <div class="executionActivityList">
+        ${activities.length ? activities.map((activity) => `
+          <div class="executionActivity">
+            <span class="executionActivityMarker" aria-hidden="true"></span>
+            <div>
+              <strong>${escapeHtml(activity.label)}</strong>
+              ${activity.detail ? `<p>${escapeHtml(activity.detail)}</p>` : ""}
+            </div>
+            <time>${escapeHtml(formatActivityTime(activity.at))}</time>
+          </div>
+        `).join("") : `<div class="executionActivityEmpty">运行已开始，正在等待 Codex 返回下一步状态。</div>`}
+      </div>
+    </details>
+  `;
+}
+
+function updateExecutionClocks() {
+  document.querySelectorAll("[data-execution-clock]").forEach((clock) => {
+    clock.textContent = `${clock.dataset.prefix || ""}${formatElapsedDuration(clock.dataset.startedAt, clock.dataset.completedAt)}`;
+  });
+}
+
+function formatElapsedDuration(startedAt, completedAt = "") {
+  const start = new Date(startedAt).getTime();
+  const end = completedAt ? new Date(completedAt).getTime() : Date.now();
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return "0秒";
+  const totalSeconds = Math.max(0, Math.floor((end - start) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours) return `${hours}小时 ${minutes}分 ${seconds}秒`;
+  if (minutes) return `${minutes}分 ${seconds}秒`;
+  return `${seconds}秒`;
+}
+
+function formatActivityTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+}
+
+function executionStatusLabel(status) {
+  return {
+    preparing: "正在准备",
+    pending: "等待执行",
+    coordinating: "正在协调",
+    running: "正在处理",
+    waiting_approval: "等待你的确认",
+    waiting_user: "等待你的输入",
+    completed: "已完成",
+    failed: "执行失败",
+    cancelled: "已停止",
+  }[status] || "运行状态";
+}
+
+function runStatusLabel(status) {
+  return {
+    ready: "就绪",
+    preparing: "准备中",
+    pending: "等待执行",
+    coordinating: "协调中",
+    running: "执行中",
+    waiting_approval: "等待确认",
+    waiting_user: "等待输入",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已停止",
+  }[status] || status || "未知";
 }
 
 function queueConversationSave(projectId, conversationId, messages, { immediate = false } = {}) {
@@ -2117,8 +2818,10 @@ function openProjectForm(project = undefined) {
     form.elements.id.value = active.id;
     form.elements.name.value = active.name || "";
     form.elements.description.value = active.description || "";
+    form.elements.hippoMcpEnabled.checked = active.hippoMcpEnabled === true;
   } else {
     form.elements.id.value = "";
+    form.elements.hippoMcpEnabled.checked = false;
   }
   renderProjectAgentPicker(active?.agentIds || []);
   state.workspaceKnowledgeSelection = {
@@ -2154,6 +2857,8 @@ function openAgentForm(agent = undefined) {
 function setChatStreamMode(mode) {
   const stream = document.getElementById("chatStream");
   stream.classList.toggle("agentEditorStream", mode === "agentEditorStream");
+  stream.classList.toggle("homeStream", mode === "homeStream");
+  document.querySelector(".chatWorkspace")?.classList.toggle("homeMode", mode === "homeStream");
 }
 
 function createAgentDraft(agent = undefined) {
@@ -2161,6 +2866,7 @@ function createAgentDraft(agent = undefined) {
   const edges = agent?.type === "dag" ? [...(agent.edges || [])] : [];
   return ensureRootDraft({
     id: agent?.id || "",
+    version: agent?.version || 0,
     name: agent?.name || "",
     description: agent?.description || "",
     systemPrompt: agent?.systemPrompt || "",
@@ -2206,6 +2912,7 @@ function renderAgentEditor(draft) {
   return `
     <form id="agentForm" class="agentEditor">
       <input name="id" type="hidden" value="${escapeHtml(draft.id)}" />
+      <input name="version" type="hidden" value="${escapeHtml(draft.version)}" />
       <input name="type" type="hidden" value="dag" />
       <input name="rootNodeId" type="hidden" value="root" />
       <input name="maxDecisions" type="hidden" value="${escapeHtml(draft.maxDecisions)}" />
@@ -3089,7 +3796,42 @@ async function request(url, options = {}) {
 
 function extractAgentResponse(data) {
   const result = data.result || {};
-  return result.textResponse || result.text || result.message || JSON.stringify(result, null, 2);
+  if (typeof result === "string") return result;
+  const text = result.textResponse || result.text || result.message;
+  if (typeof text === "string" && text.trim()) return text;
+  const outputText = extractRunOutputText(result.output);
+  if (outputText) return outputText;
+  const displayResult = Object.fromEntries(Object.entries(result).filter(([key, value]) =>
+    !["runtimeId", "runId", "runtimeSession", "events", "text"].includes(key) && value !== undefined
+  ));
+  return Object.keys(displayResult).length ? JSON.stringify(displayResult, null, 2) : "";
+}
+
+function extractRunOutputText(output) {
+  if (!output) return "";
+  if (typeof output === "string") return output;
+  if (typeof output.textResponse === "string" && output.textResponse.trim()) return output.textResponse;
+  if (typeof output.text === "string" && output.text.trim()) return output.text;
+  if (typeof output.message === "string" && output.message.trim()) return output.message;
+  if (typeof output.body === "string" && output.body.trim()) {
+    return [
+      output.title ? `# ${output.title}` : "",
+      output.body,
+      output.interactiveEnding || "",
+      Array.isArray(output.tags) ? output.tags.join(" ") : "",
+    ].filter(Boolean).join("\n\n");
+  }
+  if (output.output && output.output !== output) return extractRunOutputText(output.output);
+  if (output.result && output.result !== output) return extractRunOutputText(output.result);
+  return "";
+}
+
+function extractLatestRunOutput(run) {
+  if (!run) return "";
+  const nodes = Object.values(run.nodeRuns || {}).sort((left, right) =>
+    new Date(right.updatedAt || 0).getTime() - new Date(left.updatedAt || 0).getTime()
+  );
+  return extractRunOutputText(nodes.find((node) => extractRunOutputText(node.output))?.output);
 }
 
 function summarizeAgentRun(run) {
@@ -3099,7 +3841,7 @@ function summarizeAgentRun(run) {
     kind: node.kind || "task",
     status: node.status,
     runtimeSessionId: node.runtimeSession?.sessionId || "",
-    text: summarizeRunOutput(node.output),
+    text: extractRunOutputText(node.output),
   }));
   return {
     id: run?.id || "",
@@ -3117,10 +3859,7 @@ function summarizeAgentRun(run) {
 }
 
 function summarizeRunOutput(output) {
-  if (!output) return "";
-  if (typeof output.text === "string") return output.text.slice(0, 160);
-  if (typeof output === "string") return output.slice(0, 160);
-  return "";
+  return extractRunOutputText(output).slice(0, 160);
 }
 
 function updateRunSummaryNode(summary, event) {
@@ -3159,7 +3898,7 @@ function renderAgentRunSummary(summary, messageRunId = "") {
       <div class="runSummaryHeader">
         <strong>${escapeHtml(summary.agentType === "dag" ? "DAG Run" : "Run")}</strong>
         <div class="runSummaryActions">
-          <span class="runStatus ${escapeHtml(summary.status || "pending")}">${escapeHtml(summary.status || "pending")}</span>
+          <span class="runStatus ${escapeHtml(summary.status || "pending")}">${escapeHtml(runStatusLabel(summary.status || "pending"))}</span>
           ${runId ? `<button class="runDetailButton" data-run-detail-id="${escapeHtml(runId)}" type="button">详情</button>` : ""}
         </div>
       </div>
@@ -3168,14 +3907,23 @@ function renderAgentRunSummary(summary, messageRunId = "") {
         ${summary.rootCoordinator ? `
           <div class="runNode ${escapeHtml(summary.rootCoordinator.status || "pending")}">
             <span>RootAgent · ${escapeHtml(summary.rootCoordinator.decisionCount || 0)} 次决策</span>
-            <small>${escapeHtml(summary.rootCoordinator.status || "pending")}${summary.rootCoordinator.runtimeSessionId ? ` · ${escapeHtml(summary.rootCoordinator.runtimeSessionId.slice(0, 8))}` : ""}</small>
+            <small>${escapeHtml(runStatusLabel(summary.rootCoordinator.status || "pending"))}${summary.rootCoordinator.runtimeSessionId ? ` · ${escapeHtml(summary.rootCoordinator.runtimeSessionId.slice(0, 8))}` : ""}</small>
           </div>
         ` : ""}
         ${nodes.map((node) => `
           <div class="runNode ${escapeHtml(node.status || "pending")}">
             <span>${escapeHtml(node.nodeId || "node")}${node.status === "waiting_approval" ? " · 待审批" : ""}</span>
-            <small>${escapeHtml(node.status || "pending")}${node.runtimeSessionId ? ` · ${escapeHtml(node.runtimeSessionId.slice(0, 8))}` : ""}</small>
+            <small>${escapeHtml(runStatusLabel(node.status || "pending"))}${node.runtimeSessionId ? ` · ${escapeHtml(node.runtimeSessionId.slice(0, 8))}` : ""}</small>
           </div>
+          ${node.status === "waiting_approval" ? `
+            <div class="runApprovalPanel">
+              ${node.text ? `<details><summary>查看节点结果</summary><div class="runApprovalOutput">${formatMessage(node.text)}</div></details>` : ""}
+              <form data-resume-form data-run-id="${escapeHtml(runId)}" data-node-run-id="${escapeHtml(node.id)}">
+                <textarea name="output" rows="2" placeholder="可选：补充给协调者的确认意见"></textarea>
+                <button class="primary" type="submit">确认并继续</button>
+              </form>
+            </div>
+          ` : ""}
         `).join("")}
       </div>
     </div>

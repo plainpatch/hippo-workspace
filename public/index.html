@@ -4,13 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Hippo Agent 工作台</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=20260714-agent-session" />
   </head>
   <body>
     <div class="appShell">
       <aside class="sidebar">
         <div class="systemNav">
-          <button class="sysButton active" id="projectHomeBtn" data-system-view="chat" type="button"><span>▣</span>工作区</button>
+          <button class="sysButton active" id="projectHomeBtn" data-system-view="home" type="button"><span>⌂</span>首页</button>
           <button class="sysButton" id="knowledgeBtn" data-system-view="knowledge" type="button"><span>K</span>知识库</button>
           <button class="sysButton" id="agentsBtn" data-system-view="agents" type="button"><span>A</span>智能体</button>
           <button class="sysButton" id="inboxBtn" data-system-view="inbox" type="button"><span>W</span>待处理</button>
@@ -89,6 +89,16 @@
           <label>工作区说明 <textarea name="description" rows="4" placeholder="这个工作区要解决什么问题"></textarea></label>
           <div class="knowledgePicker">
             <div>
+              <strong>Hippo 系统工具</strong>
+              <p>向 Codex 加载完整 Hippo MCP，包括智能体、工作区、知识库和运行图管理工具。</p>
+            </div>
+            <label class="checkRow">
+              <input name="hippoMcpEnabled" type="checkbox" />
+              <span>在此工作区加载完整 Hippo MCP</span>
+            </label>
+          </div>
+          <div class="knowledgePicker">
+            <div>
               <strong>工作区可用 Agent</strong>
               <p>工作区引用全局 Agent；对话中只能切换已启用的 Agent。</p>
             </div>
@@ -138,6 +148,6 @@
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=dag-visual-editor" type="module"></script>
+    <script src="/app.js?v=20260714-agent-resume-2" type="module"></script>
   </body>
 </html>

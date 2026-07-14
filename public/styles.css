@@ -666,6 +666,177 @@ dd {
   padding: 10px 14px 12px;
 }
 
+.chatWorkspace.homeMode {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.chatWorkspace.homeMode .chatHeader,
+.chatWorkspace.homeMode > .composer {
+  display: none;
+}
+
+.chatStream.homeStream {
+  display: grid;
+  place-items: center;
+  padding: 36px clamp(22px, 6vw, 84px) 72px;
+}
+
+.homePage {
+  width: min(100%, 720px);
+  display: grid;
+  gap: 14px;
+}
+
+.homeBrand {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 20px;
+}
+
+.homeLogo {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  color: #111;
+  background: #ececec;
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.homeBrand > span {
+  color: #dedede;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.homePromptForm {
+  min-height: 112px;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 26px;
+  background: #242424;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+}
+
+.homePromptForm:focus-within {
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.04), 0 8px 28px rgba(0, 0, 0, 0.18);
+}
+
+.homePromptForm textarea {
+  min-height: 58px;
+  border: 0;
+  padding: 18px 22px 4px;
+  resize: none;
+  background: transparent;
+  box-shadow: none;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.homePromptForm textarea:focus {
+  border: 0;
+  box-shadow: none;
+}
+
+.homePromptBar {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 10px 10px 18px;
+}
+
+.homeWorkspaceHint {
+  min-width: 0;
+  overflow: hidden;
+  color: #a9a9a9;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.homeSubmitButton {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  padding: 0;
+  border-radius: 7px;
+  color: #111;
+  background: #f1f1f1;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.homeSubmitButton:hover {
+  background: #fff;
+}
+
+.homeQuickActions {
+  display: grid;
+  justify-items: start;
+  gap: 2px;
+  margin-top: 12px;
+  padding-left: 12px;
+}
+
+.homeQuickActions > button {
+  width: max-content;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  padding: 7px 10px;
+  text-align: left;
+  color: #b7b7b7;
+  background: transparent;
+}
+
+.homeQuickActions > button:hover {
+  color: #e8e8e8;
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.homeQuickIcon {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: #b7b7b7;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.homeQuickActions > button > span:last-child {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.homeQuickActions strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.homeQuickActions strong {
+  font-size: 13px;
+  font-weight: 450;
+}
+
 .chatStream:empty::before {
   content: "选择左侧工作区后开始对话";
   display: block;
@@ -957,6 +1128,142 @@ dd {
   background: #222222;
 }
 
+.executionProgress {
+  max-width: 720px;
+  margin: 10px 0;
+  color: #a8a8ad;
+}
+
+.executionProgress summary {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  border-bottom: 1px solid transparent;
+  padding: 8px 2px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.executionProgress summary::-webkit-details-marker {
+  display: none;
+}
+
+.executionProgress summary::after {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-right: 1.5px solid #77777d;
+  border-bottom: 1.5px solid #77777d;
+  content: "";
+  transform: rotate(45deg) translateY(-2px);
+  transition: transform 140ms ease;
+}
+
+.executionProgress[open] summary {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.executionProgress[open] summary::after {
+  transform: rotate(225deg) translate(-1px, -1px);
+}
+
+.executionProgressState {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #b8b8bd;
+  font-size: 13px;
+}
+
+.executionProgress > summary > time {
+  margin-left: auto;
+  white-space: nowrap;
+  color: #88888e;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.executionPulse {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #8e9fff;
+  box-shadow: 0 0 0 0 rgba(142, 159, 255, 0.35);
+  animation: executionPulse 1.8s ease-out infinite;
+}
+
+@keyframes executionPulse {
+  65%, 100% {
+    box-shadow: 0 0 0 6px rgba(142, 159, 255, 0);
+  }
+}
+
+.executionProgress.waiting_approval .executionPulse,
+.executionProgress.waiting_user .executionPulse {
+  background: #d6a756;
+}
+
+.executionActivityList {
+  display: grid;
+  gap: 0;
+  padding: 8px 2px 3px;
+}
+
+.executionActivity {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  padding: 6px 0;
+}
+
+.executionActivityMarker {
+  width: 5px;
+  height: 5px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: #67676d;
+}
+
+.executionActivity strong {
+  display: block;
+  color: #bdbdc2;
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.executionActivity p {
+  max-width: 100%;
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: #77777d;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.executionActivity time {
+  color: #68686e;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.executionActivityEmpty {
+  padding: 8px 0;
+  color: #77777d;
+  font-size: 12px;
+}
+
 .runSummary {
   max-width: 720px;
   border: 1px solid var(--line-strong);
@@ -1081,6 +1388,66 @@ dd {
 .runNode.waiting,
 .runNode.waiting_approval {
   border-color: rgba(245, 158, 11, 0.32);
+}
+
+.runApprovalPanel {
+  display: grid;
+  gap: 8px;
+  border-left: 2px solid rgba(245, 158, 11, 0.42);
+  padding: 2px 0 2px 10px;
+}
+
+.runApprovalPanel details {
+  min-width: 0;
+}
+
+.runApprovalPanel summary {
+  width: fit-content;
+  cursor: pointer;
+  color: #d8d8dc;
+  font-size: 12px;
+}
+
+.runApprovalOutput {
+  max-height: 320px;
+  overflow: auto;
+  margin-top: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  padding: 10px;
+  background: #181818;
+  font-size: 12px;
+}
+
+.runApprovalOutput > :first-child {
+  margin-top: 0;
+}
+
+.runApprovalOutput > :last-child {
+  margin-bottom: 0;
+}
+
+.runApprovalPanel form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.runApprovalPanel textarea {
+  min-height: 54px;
+  resize: vertical;
+}
+
+.runApprovalPanel button {
+  min-height: 36px;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .runApprovalPanel form {
+    grid-template-columns: 1fr;
+  }
 }
 
 .runDetailPage {
@@ -2166,7 +2533,7 @@ dd {
 .knowledgeTreePane {
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   align-content: start;
   padding: 10px;
 }
@@ -2199,6 +2566,15 @@ dd {
   background: #242424;
 }
 
+.knowledgeTreeSearch {
+  min-height: 30px;
+  margin-bottom: 8px;
+  padding: 5px 8px;
+  border-color: var(--line);
+  background: #181818;
+  font-size: 12px;
+}
+
 .knowledgeTreeList,
 .knowledgeTreeChildren,
 .knowledgeDirectoryList {
@@ -2206,8 +2582,41 @@ dd {
   gap: 4px;
 }
 
+.knowledgeTreeList {
+  min-height: 0;
+  align-content: start;
+  grid-auto-rows: max-content;
+  overflow-y: auto;
+}
+
 .knowledgeTreeGroup {
   min-width: 0;
+}
+
+.knowledgeTreeDomainRow {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 2px;
+}
+
+.knowledgeTreeToggle {
+  width: 24px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: #a8a8a8;
+}
+
+.knowledgeTreeToggle:hover {
+  color: #eeeeee;
+  background: #252525;
+}
+
+.knowledgeTreeToggle.collapsed .projectChevron {
+  transform: rotate(-90deg);
 }
 
 .knowledgeTreeNode,
@@ -2216,7 +2625,7 @@ dd {
   min-width: 0;
   min-height: 30px;
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   border-radius: 7px;
@@ -2231,8 +2640,8 @@ dd {
 }
 
 .knowledgeTreeNode.topic {
-  margin-left: 14px;
-  width: calc(100% - 14px);
+  margin-left: 26px;
+  width: calc(100% - 26px);
   color: #dddddd;
 }
 
@@ -2250,6 +2659,31 @@ dd {
 .knowledgeDirectoryItem small {
   color: #8f8f8f;
   font-size: 11px;
+}
+
+.knowledgeTreeTopicMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.knowledgeTreeTopicMeta i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #707070;
+}
+
+.knowledgeTreeTopicMeta i.ok {
+  background: #34d399;
+}
+
+.knowledgeTreeTopicMeta i.pending {
+  background: #fbbf24;
+}
+
+.knowledgeTreeTopicMeta i.error {
+  background: #f87171;
 }
 
 .knowledgeDetailPane {
@@ -2349,6 +2783,37 @@ dd {
   padding-top: 12px;
 }
 
+.knowledgeDetailSectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.knowledgeDocumentActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.knowledgeDocumentActions > button:not(.knowledgeRevealButton) {
+  min-height: 28px;
+  padding: 4px 9px;
+  border-color: var(--line-strong);
+  background: #242424;
+  font-size: 12px;
+}
+
+.knowledgeDetailSection[data-knowledge-drop-path] {
+  border-radius: 7px;
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+
+.knowledgeDetailSection[data-knowledge-drop-path].dragging {
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
+}
+
 .knowledgeDirectoryItem {
   grid-template-columns: minmax(0, 0.8fr) minmax(0, 1fr) auto;
   border: 1px solid var(--line);
@@ -2357,6 +2822,64 @@ dd {
 
 .knowledgeDirectoryItem.static {
   cursor: default;
+}
+
+.knowledgeDocumentLink {
+  min-width: 0;
+  overflow: hidden;
+  color: #eeeeee;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledgeDocumentLink:hover {
+  color: #ffffff;
+  text-decoration: underline;
+}
+
+.knowledgeDocumentStatus {
+  justify-self: start;
+  border-radius: 5px;
+  padding: 2px 6px;
+  background: #292929;
+  white-space: nowrap;
+}
+
+.knowledgeDocumentStatus.ok {
+  color: #86efc2;
+  background: rgba(16, 185, 129, 0.11);
+}
+
+.knowledgeDocumentStatus.pending {
+  color: #fcd67d;
+  background: rgba(245, 158, 11, 0.11);
+}
+
+.knowledgeRevealButton {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: #a8a8a8;
+}
+
+.knowledgeRevealButton:hover {
+  color: #f1f1f1;
+  background: #303030;
+}
+
+.folderOpenIcon {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
 }
 
 .knowledgeDirectoryItem span {
@@ -2385,10 +2908,73 @@ dd {
   overflow-wrap: anywhere;
 }
 
+.knowledgeIndexSummary {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.knowledgeIndexSummary span {
+  border-radius: 5px;
+  padding: 3px 7px;
+  color: #cfcfcf;
+  background: #292929;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.knowledgeIndexSummary p {
+  color: #9d9d9d;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.knowledgeIndexSummary.ok span {
+  color: #86efc2;
+  background: rgba(16, 185, 129, 0.11);
+}
+
+.knowledgeIndexSummary.pending span {
+  color: #fcd67d;
+  background: rgba(245, 158, 11, 0.11);
+}
+
+.knowledgeIndexSummary.error span {
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.knowledgeTechnicalInfo {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.knowledgeTechnicalInfo summary {
+  width: fit-content;
+  color: #9a9a9a;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.knowledgeTechnicalInfo[open] .knowledgeConfigList {
+  margin-top: 10px;
+}
+
 .knowledgeTopicEmpty,
 .knowledgeEmptyDetail {
   color: #858585;
   font-size: 12px;
+}
+
+.knowledgeDropEmpty {
+  min-height: 68px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--line-strong);
+  border-radius: 7px;
 }
 
 .knowledgeEmptyDetail {
@@ -2738,6 +3324,7 @@ dd {
   .dagGraphPreview {
     min-width: 640px;
   }
+
 }
 
 @media (max-width: 720px) {
@@ -2786,5 +3373,13 @@ dd {
   .knowledgeOverview {
     grid-template-columns: 1fr;
     gap: 14px;
+  }
+
+  .chatStream.homeStream {
+    padding: 40px 16px 64px;
+  }
+
+  .homeQuickActions {
+    grid-template-columns: 1fr;
   }
 }
