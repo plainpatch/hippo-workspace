@@ -1,10 +1,10 @@
 import { config } from "./config.js";
 import { AnythingLlmClient } from "./anythingllm-client.js";
 
-export function createAnythingLlmClient() {
+export function createAnythingLlmClient(options = {}) {
   return new AnythingLlmClient({
-    baseUrl: config.anythingllmBaseUrl,
-    apiKey: config.anythingllmApiKey,
+    baseUrl: options.baseUrl || config.anythingllmBaseUrl,
+    apiKey: options.apiKey || config.anythingllmApiKey,
   });
 }
 

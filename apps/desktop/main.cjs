@@ -17,7 +17,10 @@ if (!gotLock) {
 }
 
 app.on("second-instance", () => {
-  if (!mainWindow) return;
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    if (app.isReady()) createWindow();
+    return;
+  }
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.focus();
 });
@@ -86,6 +89,9 @@ function createWindow() {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: "deny" };
+  });
+  mainWindow.on("closed", () => {
+    mainWindow = null;
   });
 }
 

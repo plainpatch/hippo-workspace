@@ -4,13 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Hippo Agent 工作台</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=20260714-agent-session" />
   </head>
   <body>
     <div class="appShell">
       <aside class="sidebar">
         <div class="systemNav">
-          <button class="sysButton active" id="projectHomeBtn" data-system-view="chat" type="button"><span>▣</span>工作区</button>
+          <button class="sysButton active" id="projectHomeBtn" data-system-view="home" type="button"><span>⌂</span>首页</button>
           <button class="sysButton" id="knowledgeBtn" data-system-view="knowledge" type="button"><span>K</span>知识库</button>
           <button class="sysButton" id="agentsBtn" data-system-view="agents" type="button"><span>A</span>智能体</button>
           <button class="sysButton" id="inboxBtn" data-system-view="inbox" type="button"><span>W</span>待处理</button>
@@ -44,9 +44,7 @@
             </div>
           </div>
           <div class="headerActions">
-            <div id="runtimePills" class="pills"></div>
             <button id="projectConfigBtn" type="button">工作区设置</button>
-            <button id="refreshBtn" type="button">刷新</button>
           </div>
         </header>
 
@@ -56,17 +54,9 @@
           <textarea id="messageInput" name="message" rows="1" placeholder="描述任务；可选加载 Agent" required></textarea>
           <div class="composerBar">
             <div class="composerTools">
-              <button id="attachTextBtn" type="button" title="入库">+ 入库</button>
               <label class="modeSelect">Agent
                 <select name="agentId" id="agentSelect">
                   <option value="">通用助手</option>
-                </select>
-              </label>
-              <label class="modeSelect">上下文
-                <select name="contextStrategy" id="contextStrategySelect">
-                  <option value="runtime">续接</option>
-                  <option value="reset">重置</option>
-                  <option value="manual-summary">摘要</option>
                 </select>
               </label>
               <label class="modeSelect">权限
@@ -77,12 +67,10 @@
                   <option value="danger-full-access">完全访问</option>
                 </select>
               </label>
-              <label class="dryRunToggle"><input name="dryRun" type="checkbox" /> 仅生成请求</label>
               <button id="stopExecutionBtn" class="stopExecutionButton hidden" type="button" title="停止当前运行">停止</button>
             </div>
             <button class="sendButton" type="submit" aria-label="发送">↑</button>
           </div>
-          <textarea id="contextSummaryInput" class="contextSummaryInput hidden" name="contextSummary" rows="2" placeholder="填入压缩后的上文摘要；本轮会开启新的 runtime session"></textarea>
         </form>
       </main>
 
@@ -99,6 +87,16 @@
           <input name="id" type="hidden" />
           <label>工作区名称 <input name="name" required placeholder="例如：文档集成" /></label>
           <label>工作区说明 <textarea name="description" rows="4" placeholder="这个工作区要解决什么问题"></textarea></label>
+          <div class="knowledgePicker">
+            <div>
+              <strong>Hippo 系统工具</strong>
+              <p>向 Codex 加载完整 Hippo MCP，包括智能体、工作区、知识库和运行图管理工具。</p>
+            </div>
+            <label class="checkRow">
+              <input name="hippoMcpEnabled" type="checkbox" />
+              <span>在此工作区加载完整 Hippo MCP</span>
+            </label>
+          </div>
           <div class="knowledgePicker">
             <div>
               <strong>工作区可用 Agent</strong>
@@ -136,7 +134,20 @@
       </aside>
     </div>
 
+    <div id="knowledgeModal" class="knowledgeModal hidden" aria-hidden="true">
+      <section class="knowledgeModalPanel" role="dialog" aria-modal="true" aria-labelledby="knowledgeModalTitle">
+        <header class="knowledgeModalHeader">
+          <div>
+            <h2 id="knowledgeModalTitle">知识库</h2>
+            <p id="knowledgeModalSubtitle"></p>
+          </div>
+          <button id="closeKnowledgeModalBtn" type="button" aria-label="关闭">×</button>
+        </header>
+        <div id="knowledgeModalBody" class="knowledgeModalBody"></div>
+      </section>
+    </div>
+
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=dag-visual-editor" type="module"></script>
+    <script src="/app.js?v=20260714-agent-resume-2" type="module"></script>
   </body>
 </html>

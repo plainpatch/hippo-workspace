@@ -7,20 +7,26 @@ import { AppSettingsService } from "./app-settings.js";
 import { createRagProvider } from "./rag-provider.js";
 import { RuntimeRegistry } from "./runtime-adapter.js";
 
-export function createMcpServer() {
-  const client = createAnythingLlmClient();
-  const appSettings = new AppSettingsService();
-  const settings = appSettings.getSettings();
-  const ragProvider = createRagProvider({ id: settings.ragProviderId, client });
-  const resourceManager = new ResourceManager({ rootPath: settings.resourceRootPath, client: ragProvider });
-  const runtimeRegistry = new RuntimeRegistry({ settings });
-  const agentOrchestrator = new AgentOrchestrator({
-    client,
-    ragProvider,
-    resourceManager,
-    runtimeRegistry,
-    settings,
-  });
+export function createMcpServer(options = {}) {
+  const appSettings = options.appSettings || new AppSettingsService();
+  const settings = options.settings || appSettings.getSettings();
+  let agentOrchestrator = options.agentOrchestrator;
+  if (!agentOrchestrator) {
+    const client = createAnythingLlmClient({
+      baseUrl: settings.ragProviders.anythingllm.baseUrl,
+      apiKey: appSettings.getAnythingLlmCredentials().apiKey,
+    });
+    const ragProvider = createRagProvider({ id: settings.ragProviderId, client });
+    const resourceManager = new ResourceManager({ rootPath: settings.resourceRootPath, client: ragProvider });
+    const runtimeRegistry = new RuntimeRegistry({ settings });
+    agentOrchestrator = new AgentOrchestrator({
+      client,
+      ragProvider,
+      resourceManager,
+      runtimeRegistry,
+      settings,
+    });
+  }
 
   const server = new McpServer({
     name: "hippo-system",
@@ -37,43 +43,12 @@ export function createMcpServer() {
   );
 
   server.registerTool(
-    "hippo_list_projects",
-    {
-      title: "List workspaces",
-      description: "List Hippo workspaces managed under the app system path.",
-    },
-    async () => {
-      return jsonContent(await agentOrchestrator.listProjects());
-    }
-  );
-
-  server.registerTool(
     "hippo_list_workspaces",
     {
       title: "List workspaces",
       description: "List Hippo workspaces managed under the app system path.",
     },
-    async () => jsonContent(await agentOrchestrator.listProjects())
-  );
-
-  server.registerTool(
-    "hippo_create_project",
-    {
-      title: "Create workspace",
-      description:
-        "Create a Hippo workspace with optional global agent references, knowledge library refs, and topic filters.",
-      inputSchema: {
-        name: z.string().min(1),
-        description: z.string().optional(),
-        agentIds: z.array(z.string()).default([]),
-        knowledgeDrawerRefs: z.array(z.string()).default([]),
-        knowledgeTopicRefs: z.array(z.string()).default([]),
-        metadata: z.record(z.string(), z.unknown()).optional(),
-      },
-    },
-    async (args) => {
-      return jsonContent(await agentOrchestrator.createProject(args));
-    }
+    async () => jsonContent(await agentOrchestrator.listWorkspaces())
   );
 
   server.registerTool(
@@ -82,30 +57,17 @@ export function createMcpServer() {
       title: "Create workspace",
       description:
         "Create a Hippo workspace with optional global agent references, knowledge library refs, and topic filters.",
-      inputSchema: {
+      inputSchema: strictInput({
         name: z.string().min(1),
         description: z.string().optional(),
+        hippoMcpEnabled: z.boolean().default(false),
         agentIds: z.array(z.string()).default([]),
-        knowledgeDrawerRefs: z.array(z.string()).default([]),
+        knowledgeDomainRefs: z.array(z.string()).default([]),
         knowledgeTopicRefs: z.array(z.string()).default([]),
         metadata: z.record(z.string(), z.unknown()).optional(),
-      },
+      }),
     },
-    async (args) => jsonContent(await agentOrchestrator.createProject(args))
-  );
-
-  server.registerTool(
-    "hippo_get_project",
-    {
-      title: "Get workspace",
-      description: "Get a Hippo workspace by id.",
-      inputSchema: {
-        projectId: z.string().min(1),
-      },
-    },
-    async ({ projectId }) => {
-      return jsonContent(await agentOrchestrator.getProject(projectId));
-    }
+    async (args) => jsonContent(await agentOrchestrator.createWorkspace(args))
   );
 
   server.registerTool(
@@ -113,31 +75,11 @@ export function createMcpServer() {
     {
       title: "Get workspace",
       description: "Get a Hippo workspace by id.",
-      inputSchema: {
+      inputSchema: strictInput({
         workspaceId: z.string().min(1),
-      },
+      }),
     },
-    async ({ workspaceId }) => jsonContent(await agentOrchestrator.getProject(workspaceId))
-  );
-
-  server.registerTool(
-    "hippo_update_project",
-    {
-      title: "Update workspace",
-      description: "Update workspace metadata, enabled global agents, knowledge library refs, and topic filters.",
-      inputSchema: {
-        projectId: z.string().min(1),
-        name: z.string().min(1).optional(),
-        description: z.string().optional(),
-        agentIds: z.array(z.string()).optional(),
-        knowledgeDrawerRefs: z.array(z.string()).optional(),
-        knowledgeTopicRefs: z.array(z.string()).optional(),
-        metadata: z.record(z.string(), z.unknown()).optional(),
-      },
-    },
-    async ({ projectId, ...payload }) => {
-      return jsonContent(await agentOrchestrator.updateProject(projectId, payload));
-    }
+    async ({ workspaceId }) => jsonContent(await agentOrchestrator.getWorkspace(workspaceId))
   );
 
   server.registerTool(
@@ -145,17 +87,18 @@ export function createMcpServer() {
     {
       title: "Update workspace",
       description: "Update workspace metadata, enabled global agents, knowledge library refs, and topic filters.",
-      inputSchema: {
+      inputSchema: strictInput({
         workspaceId: z.string().min(1),
         name: z.string().min(1).optional(),
         description: z.string().optional(),
+        hippoMcpEnabled: z.boolean().optional(),
         agentIds: z.array(z.string()).optional(),
-        knowledgeDrawerRefs: z.array(z.string()).optional(),
+        knowledgeDomainRefs: z.array(z.string()).optional(),
         knowledgeTopicRefs: z.array(z.string()).optional(),
         metadata: z.record(z.string(), z.unknown()).optional(),
-      },
+      }),
     },
-    async ({ workspaceId, ...payload }) => jsonContent(await agentOrchestrator.updateProject(workspaceId, payload))
+    async ({ workspaceId, ...payload }) => jsonContent(await agentOrchestrator.updateWorkspace(workspaceId, payload))
   );
 
   server.registerTool(
@@ -163,8 +106,19 @@ export function createMcpServer() {
     {
       title: "List agents",
       description: "List global Hippo agent definitions.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async () => jsonContent(await agentOrchestrator.listAgents())
+  );
+
+  server.registerTool(
+    "hippo_get_agent_schema",
+    {
+      title: "Get Agent Blueprint schema",
+      description: "Return the canonical versioned JSON Schema used to create, edit, validate, and persist Hippo Agent blueprints.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async () => jsonContent(agentOrchestrator.getAgentSchema())
   );
 
   server.registerTool(
@@ -172,7 +126,9 @@ export function createMcpServer() {
     {
       title: "Create agent",
       description: "Create a global agent definition with runtime, skills, MCP access, and behavior description.",
-      inputSchema: {
+      inputSchema: strictInput({
+        $schema: z.literal("https://hippo.local/schemas/agent-blueprint-v1.schema.json").default("https://hippo.local/schemas/agent-blueprint-v1.schema.json"),
+        schemaVersion: z.literal(1).default(1),
         type: z.enum(["single", "dag"]).default("single"),
         name: z.string().min(1),
         description: z.string().optional(),
@@ -180,14 +136,14 @@ export function createMcpServer() {
         skills: z.array(skillInputSchema()).default([]),
         mcpServers: z.array(z.string()).default([]),
         runtimeId: z.string().default("codex"),
-        ragDocumentNames: z.array(z.string()).default([]),
         rag: nodeRagInputSchema().optional(),
         rootNodeId: z.string().optional(),
         nodes: z.array(agentNodeInputSchema()).default([]),
         edges: z.array(agentEdgeInputSchema()).default([]),
         executionPolicy: z.record(z.string(), z.unknown()).optional(),
         metadata: z.record(z.string(), z.unknown()).optional(),
-      },
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     async (args) => jsonContent(await agentOrchestrator.createAgent(args))
   );
@@ -197,7 +153,9 @@ export function createMcpServer() {
     {
       title: "Validate agent graph",
       description: "Validate a single or DAG agent prototype without creating runtime state.",
-      inputSchema: {
+      inputSchema: strictInput({
+        $schema: z.literal("https://hippo.local/schemas/agent-blueprint-v1.schema.json").default("https://hippo.local/schemas/agent-blueprint-v1.schema.json"),
+        schemaVersion: z.literal(1).default(1),
         type: z.enum(["single", "dag"]).default("single"),
         name: z.string().min(1).optional(),
         description: z.string().optional(),
@@ -211,7 +169,8 @@ export function createMcpServer() {
         edges: z.array(agentEdgeInputSchema()).default([]),
         executionPolicy: z.record(z.string(), z.unknown()).optional(),
         metadata: z.record(z.string(), z.unknown()).optional(),
-      },
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async (args) => jsonContent(agentOrchestrator.validateAgent(args))
   );
@@ -221,26 +180,52 @@ export function createMcpServer() {
     {
       title: "Get agent",
       description: "Get a global agent definition by id.",
-      inputSchema: {
+      inputSchema: strictInput({
         agentId: z.string().min(1),
-      },
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ agentId }) => jsonContent(await agentOrchestrator.getAgent(agentId))
   );
 
   server.registerTool(
-    "hippo_project_knowledge",
+    "hippo_update_agent",
     {
-      title: "Get workspace knowledge scope",
-      description:
-        "Return the knowledge libraries, topics, and indexed documents a Hippo workspace is authorized to access.",
-      inputSchema: {
-        projectId: z.string().min(1),
-      },
+      title: "Update Agent blueprint",
+      description: "Edit an existing Agent blueprint. expectedVersion is required to prevent overwriting a newer revision.",
+      inputSchema: strictInput({
+        agentId: z.string().min(1),
+        expectedVersion: z.number().int().positive(),
+        $schema: z.literal("https://hippo.local/schemas/agent-blueprint-v1.schema.json").optional(),
+        schemaVersion: z.literal(1).optional(),
+        type: z.enum(["single", "dag"]).optional(),
+        name: z.string().min(1).optional(),
+        description: z.string().optional(),
+        systemPrompt: z.string().optional(),
+        skills: z.array(skillInputSchema()).optional(),
+        mcpServers: z.array(z.string()).optional(),
+        runtimeId: z.string().min(1).optional(),
+        rag: nodeRagInputSchema().optional(),
+        rootNodeId: z.string().optional(),
+        nodes: z.array(agentNodeInputSchema()).optional(),
+        edges: z.array(agentEdgeInputSchema()).optional(),
+        executionPolicy: z.record(z.string(), z.unknown()).optional(),
+        metadata: z.record(z.string(), z.unknown()).optional(),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ projectId }) => {
-      return jsonContent(await agentOrchestrator.getProjectKnowledgeIndex(projectId));
-    }
+    async ({ agentId, ...payload }) => jsonContent(await agentOrchestrator.updateAgent(agentId, payload))
+  );
+
+  server.registerTool(
+    "hippo_delete_agent",
+    {
+      title: "Delete Agent",
+      description: "Delete an Agent definition that is not referenced by a workspace.",
+      inputSchema: strictInput({ agentId: z.string().min(1) }),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ agentId }) => jsonContent(await agentOrchestrator.deleteAgent(agentId))
   );
 
   server.registerTool(
@@ -253,7 +238,7 @@ export function createMcpServer() {
         workspaceId: z.string().min(1),
       },
     },
-    async ({ workspaceId }) => jsonContent(await agentOrchestrator.getProjectKnowledgeIndex(workspaceId))
+    async ({ workspaceId }) => jsonContent(await agentOrchestrator.getWorkspaceKnowledgeIndex(workspaceId))
   );
 
   server.registerTool(
@@ -271,71 +256,21 @@ export function createMcpServer() {
   );
 
   server.registerTool(
-    "hippo_project_rag_plan",
-    {
-      title: "Plan workspace RAG scope",
-      description:
-        "Return the authorized knowledge domains/topics and retrieval protocol so a model can choose which topic-level RAG workspaces to search.",
-      inputSchema: {
-        projectId: z.string().min(1),
-        drawerRefs: z.array(z.string()).default([]),
-        domainRefs: z.array(z.string()).default([]),
-        topicRefs: z.array(z.string()).default([]),
-      },
-    },
-    async ({ projectId, drawerRefs, domainRefs, topicRefs }) =>
-      jsonContent(await agentOrchestrator.getProjectKnowledgePlan(projectId, {
-        drawerRefs,
-        domainRefs,
-        topicRefs,
-      }))
-  );
-
-  server.registerTool(
     "hippo_workspace_rag_plan",
     {
       title: "Plan workspace RAG scope",
       description:
         "Return the authorized knowledge domains/topics and retrieval protocol so a model can choose which topic-level RAG workspaces to search.",
-      inputSchema: {
+      inputSchema: strictInput({
         workspaceId: z.string().min(1),
-        drawerRefs: z.array(z.string()).default([]),
         domainRefs: z.array(z.string()).default([]),
         topicRefs: z.array(z.string()).default([]),
-      },
+      }),
     },
-    async ({ workspaceId, drawerRefs, domainRefs, topicRefs }) =>
-      jsonContent(await agentOrchestrator.getProjectKnowledgePlan(workspaceId, {
-        drawerRefs,
+    async ({ workspaceId, domainRefs, topicRefs }) =>
+      jsonContent(await agentOrchestrator.getWorkspaceKnowledgePlan(workspaceId, {
         domainRefs,
         topicRefs,
-      }))
-  );
-
-  server.registerTool(
-    "hippo_project_rag_search",
-    {
-      title: "Workspace-scoped RAG search",
-      description:
-        "Run RAG retrieval through topic-level RAG workspaces, constrained by the Hippo workspace's knowledge refs.",
-      inputSchema: {
-        projectId: z.string().min(1),
-        query: z.string().min(1),
-        drawerRefs: z.array(z.string()).default([]),
-        domainRefs: z.array(z.string()).default([]),
-        topicRefs: z.array(z.string()).default([]),
-        topN: z.number().int().positive().default(4),
-        scoreThreshold: z.number().min(0).max(1).optional(),
-      },
-    },
-    async ({ projectId, query, drawerRefs, domainRefs, topicRefs, topN, scoreThreshold }) =>
-      jsonContent(await agentOrchestrator.searchProjectKnowledge(projectId, {
-        query,
-        drawerRefs,
-        domainRefs,
-        topicRefs,
-        topN,
-        scoreThreshold,
       }))
   );
 
@@ -345,50 +280,21 @@ export function createMcpServer() {
       title: "Workspace-scoped RAG search",
       description:
         "Run RAG retrieval through topic-level RAG workspaces, constrained by the Hippo workspace's knowledge refs.",
-      inputSchema: {
+      inputSchema: strictInput({
         workspaceId: z.string().min(1),
         query: z.string().min(1),
-        drawerRefs: z.array(z.string()).default([]),
         domainRefs: z.array(z.string()).default([]),
         topicRefs: z.array(z.string()).default([]),
         topN: z.number().int().positive().default(4),
-        scoreThreshold: z.number().min(0).max(1).optional(),
-      },
+      }),
     },
-    async ({ workspaceId, query, drawerRefs, domainRefs, topicRefs, topN, scoreThreshold }) =>
-      jsonContent(await agentOrchestrator.searchProjectKnowledge(workspaceId, {
+    async ({ workspaceId, query, domainRefs, topicRefs, topN }) =>
+      jsonContent(await agentOrchestrator.searchWorkspaceKnowledge(workspaceId, {
         query,
-        drawerRefs,
         domainRefs,
         topicRefs,
         topN,
-        scoreThreshold,
       }))
-  );
-
-  server.registerTool(
-    "hippo_execute_project_task",
-    {
-      title: "Execute workspace task",
-      description:
-        "Execute a task in a Hippo workspace using the selected runtime and an optional workspace-enabled global agent.",
-      inputSchema: {
-        projectId: z.string().min(1),
-        agentId: z.string().optional(),
-        task: z.string().min(1),
-        mode: z.enum(["query", "chat", "automatic"]).optional(),
-        sessionId: z.string().optional(),
-        reset: z.boolean().optional(),
-        dryRun: z.boolean().optional(),
-        context: z.record(z.string(), z.unknown()).optional(),
-        contextStrategy: z.enum(["runtime", "reset", "manual-summary"]).optional(),
-        contextSummary: z.string().optional(),
-        sandboxMode: z.enum(["workspace-write", "read-only", "danger-full-access"]).optional(),
-        knowledgeTags: z.array(z.string()).default([]),
-      },
-    },
-    async ({ projectId, ...payload }) =>
-      jsonContent(await agentOrchestrator.executeAgentTask(projectId, payload))
   );
 
   server.registerTool(
@@ -397,20 +303,15 @@ export function createMcpServer() {
       title: "Execute workspace task",
       description:
         "Execute a task in a Hippo workspace using the selected runtime and an optional workspace-enabled global agent.",
-      inputSchema: {
+      inputSchema: strictInput({
         workspaceId: z.string().min(1),
         agentId: z.string().optional(),
         task: z.string().min(1),
-        mode: z.enum(["query", "chat", "automatic"]).optional(),
         sessionId: z.string().optional(),
-        reset: z.boolean().optional(),
         dryRun: z.boolean().optional(),
         context: z.record(z.string(), z.unknown()).optional(),
-        contextStrategy: z.enum(["runtime", "reset", "manual-summary"]).optional(),
-        contextSummary: z.string().optional(),
         sandboxMode: z.enum(["workspace-write", "read-only", "danger-full-access"]).optional(),
-        knowledgeTags: z.array(z.string()).default([]),
-      },
+      }),
     },
     async ({ workspaceId, ...payload }) =>
       jsonContent(await agentOrchestrator.executeAgentTask(workspaceId, payload))
@@ -441,11 +342,7 @@ export function createMcpServer() {
         task: z.string().min(1),
         sessionId: z.string().optional(),
         context: z.record(z.string(), z.unknown()).optional(),
-        contextStrategy: z.enum(["runtime", "reset", "manual-summary"]).optional(),
-        contextSummary: z.string().optional(),
         sandboxMode: z.enum(["workspace-write", "read-only", "danger-full-access"]).optional(),
-        knowledgeTags: z.array(z.string()).default([]),
-        knowledgeTopicRefs: z.array(z.string()).default([]),
       },
     },
     async ({ workspaceId, ...payload }) =>
@@ -669,9 +566,12 @@ export function createMcpServer() {
 }
 
 export function createRagMcpServer({ workspaceId, topN = 4 } = {}) {
-  const client = createAnythingLlmClient();
   const appSettings = new AppSettingsService();
   const settings = appSettings.getSettings();
+  const client = createAnythingLlmClient({
+    baseUrl: settings.ragProviders.anythingllm.baseUrl,
+    apiKey: appSettings.getAnythingLlmCredentials().apiKey,
+  });
   const ragProvider = createRagProvider({ id: settings.ragProviderId, client });
   const resourceManager = new ResourceManager({ rootPath: settings.resourceRootPath, client: ragProvider });
   const agentOrchestrator = new AgentOrchestrator({
@@ -691,21 +591,38 @@ export function createRagMcpServer({ workspaceId, topN = 4 } = {}) {
       description: "Return the knowledge domains and topics authorized for the current Hippo workspace.",
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
-    async () => jsonContent(await agentOrchestrator.getProjectKnowledgePlan(workspaceId, {}))
+    async () => jsonContent(await agentOrchestrator.getWorkspaceKnowledgePlan(workspaceId, {}))
+  );
+
+  server.registerTool(
+    "hippo_rag_list_documents",
+    {
+      title: "List authorized knowledge documents",
+      description: "List documents under selected authorized domains/topics. Returns a knowledge root path and relative document paths.",
+      inputSchema: strictInput({
+        domainRefs: z.array(z.string().min(1)).default([]),
+        topicRefs: z.array(z.string().min(1)).default([]),
+        suffixes: z.array(z.string().min(1)).default([]),
+        page: z.number().int().positive().default(1),
+        pageSize: z.number().int().min(1).max(100).default(50),
+      }),
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async (args) => jsonContent(await agentOrchestrator.listWorkspaceKnowledgeDocuments(workspaceId, args))
   );
 
   server.registerTool(
     "hippo_rag_search",
     {
       title: "Search authorized workspace knowledge",
-      description: `Search selected authorized knowledge topics. The node retrieval limit is fixed at Top ${retrievalLimit}.`,
-      inputSchema: {
+      description: `Search selected authorized knowledge topics. Each result includes its accessible Hippo knowledge file path when the source can be resolved. The node retrieval limit is fixed at Top ${retrievalLimit}.`,
+      inputSchema: strictInput({
         query: z.string().min(1),
         topicRefs: z.array(z.string()).default([]),
-      },
+      }),
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
-    async ({ query, topicRefs }) => jsonContent(await agentOrchestrator.searchProjectKnowledge(workspaceId, {
+    async ({ query, topicRefs }) => jsonContent(await agentOrchestrator.searchWorkspaceKnowledge(workspaceId, {
       query,
       topicRefs,
       topN: retrievalLimit,
@@ -720,14 +637,13 @@ function skillInputSchema() {
     name: z.string().min(1),
     description: z.string().optional(),
     instructions: z.string().optional(),
-  });
+  }).strict();
 }
 
 function agentNodeInputSchema() {
   return z.object({
     id: z.string().min(1),
     kind: z.enum(["task"]).default("task"),
-    approvalPolicy: z.enum(["none", "auto", "manual"]).optional(),
     resultApprovalPolicy: z.enum(["none", "auto", "manual"]).optional(),
     runtimeApprovalPolicy: z.enum(["inherit", "untrusted", "on-request", "never"]).default("inherit"),
     transitionInstruction: z.string().optional().describe("Plain-language result handling rule shown to RootAgent together with this node's output."),
@@ -741,14 +657,14 @@ function agentNodeInputSchema() {
     mcpServers: z.array(z.string()).default([]),
     input: z.unknown().optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
-  });
+  }).strict();
 }
 
 function nodeRagInputSchema() {
   return z.object({
     enabled: z.boolean().default(false),
-    topN: z.number().int().positive().default(4),
-  });
+    topN: z.number().int().min(1).max(100).default(4),
+  }).strict();
 }
 
 function agentEdgeInputSchema() {
@@ -757,5 +673,9 @@ function agentEdgeInputSchema() {
     from: z.string().min(1),
     to: z.string().min(1),
     metadata: z.record(z.string(), z.unknown()).optional(),
-  });
+  }).strict();
+}
+
+function strictInput(shape) {
+  return z.object(shape).strict();
 }

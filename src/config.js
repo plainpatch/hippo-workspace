@@ -17,6 +17,7 @@ export const config = {
   defaultRuntimeId: process.env.HIPPO_DEFAULT_RUNTIME || "codex",
   ragProviderId: process.env.HIPPO_RAG_PROVIDER || "anythingllm",
   codexCommand: process.env.CODEX_COMMAND || "codex",
+  codexTransport: process.env.CODEX_TRANSPORT || "app-server",
   codexModel: process.env.CODEX_MODEL || "",
   codexSandboxMode: process.env.CODEX_SANDBOX_MODE || "workspace-write",
   codexServiceTier: process.env.CODEX_SERVICE_TIER || "fast",

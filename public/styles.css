@@ -1,7 +1,7 @@
 :root {
   color-scheme: dark;
   --app-bg: #0f0f0f;
-  --sidebar-bg: #171717;
+  --sidebar-bg: #1a1b1b;
   --sidebar-active: #272727;
   --sidebar-hover: #222222;
   --main-bg: #111111;
@@ -108,7 +108,7 @@ dd {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   border-right: 1px solid var(--line);
-  background: #1a1b1b;
+  background: var(--sidebar-bg);
   color: #ebebeb;
 }
 
@@ -116,7 +116,7 @@ dd {
   display: grid;
   gap: 6px;
   padding: 10px 10px 8px;
-  background: #1a1b1b;
+  background: var(--sidebar-bg);
 }
 
 .sysButton {
@@ -162,7 +162,7 @@ dd {
   overflow: auto;
   padding: 12px 8px 9px 15px;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
-  background: linear-gradient(90deg, #474b4e 0%, #474b4e 16%, #43474a 42%, #2a2c2d 70%, #272728 100%);
+  background: var(--sidebar-bg);
 }
 
 .sectionLabel {
@@ -388,7 +388,12 @@ dd {
 }
 
 .conversationItem.active {
+  background: rgba(255, 255, 255, 0.11);
   color: #e4e5e5;
+}
+
+.conversationItem.active:hover {
+  background: rgba(255, 255, 255, 0.15);
 }
 
 .conversationItem span {
@@ -485,7 +490,7 @@ dd {
   align-items: center;
   padding: 10px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
-  background: #171717;
+  background: var(--sidebar-bg);
 }
 
 .accountButton {
@@ -591,6 +596,10 @@ dd {
   font-size: 12px;
 }
 
+.projectTitle p:empty {
+  display: none;
+}
+
 .headerActions,
 .pills,
 .composerTools {
@@ -657,6 +666,177 @@ dd {
   padding: 10px 14px 12px;
 }
 
+.chatWorkspace.homeMode {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.chatWorkspace.homeMode .chatHeader,
+.chatWorkspace.homeMode > .composer {
+  display: none;
+}
+
+.chatStream.homeStream {
+  display: grid;
+  place-items: center;
+  padding: 36px clamp(22px, 6vw, 84px) 72px;
+}
+
+.homePage {
+  width: min(100%, 720px);
+  display: grid;
+  gap: 14px;
+}
+
+.homeBrand {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 20px;
+}
+
+.homeLogo {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  color: #111;
+  background: #ececec;
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.homeBrand > span {
+  color: #dedede;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.homePromptForm {
+  min-height: 112px;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 26px;
+  background: #242424;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18);
+}
+
+.homePromptForm:focus-within {
+  border-color: rgba(255, 255, 255, 0.18);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.04), 0 8px 28px rgba(0, 0, 0, 0.18);
+}
+
+.homePromptForm textarea {
+  min-height: 58px;
+  border: 0;
+  padding: 18px 22px 4px;
+  resize: none;
+  background: transparent;
+  box-shadow: none;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.homePromptForm textarea:focus {
+  border: 0;
+  box-shadow: none;
+}
+
+.homePromptBar {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 10px 10px 18px;
+}
+
+.homeWorkspaceHint {
+  min-width: 0;
+  overflow: hidden;
+  color: #a9a9a9;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.homeSubmitButton {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  padding: 0;
+  border-radius: 7px;
+  color: #111;
+  background: #f1f1f1;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.homeSubmitButton:hover {
+  background: #fff;
+}
+
+.homeQuickActions {
+  display: grid;
+  justify-items: start;
+  gap: 2px;
+  margin-top: 12px;
+  padding-left: 12px;
+}
+
+.homeQuickActions > button {
+  width: max-content;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 46px;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  padding: 7px 10px;
+  text-align: left;
+  color: #b7b7b7;
+  background: transparent;
+}
+
+.homeQuickActions > button:hover {
+  color: #e8e8e8;
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.homeQuickIcon {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: #b7b7b7;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.homeQuickActions > button > span:last-child {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.homeQuickActions strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.homeQuickActions strong {
+  font-size: 13px;
+  font-weight: 450;
+}
+
 .chatStream:empty::before {
   content: "选择左侧工作区后开始对话";
   display: block;
@@ -696,6 +876,90 @@ dd {
   gap: 8px;
 }
 
+.runtimeRequestList {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.runtimeRequest {
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+  border: 1px solid rgba(245, 158, 11, 0.38);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.07);
+}
+
+.runtimeRequest code {
+  overflow-wrap: anywhere;
+  color: #f4f4f5;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.runtimeRequest small {
+  color: #a1a1aa;
+}
+
+.runtimeRequest label {
+  display: grid;
+  gap: 5px;
+  color: #f4f4f5;
+  font-size: 13px;
+}
+
+.runtimeRequest label span {
+  color: #a1a1aa;
+  line-height: 1.45;
+}
+
+.runtimeRequest input,
+.runtimeRequest select,
+.runtimeRequest textarea {
+  width: 100%;
+  min-height: 36px;
+}
+
+.runtimeRequest select[multiple] {
+  min-height: 84px;
+}
+
+.runtimeCheckbox {
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+}
+
+.runtimeCheckbox input {
+  width: 16px;
+  min-height: 16px;
+  margin-top: 2px;
+}
+
+.runtimeRequestLink {
+  color: #93c5fd;
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.runtimeRequestLink:hover {
+  text-decoration: underline;
+}
+
+.runtimeRequestActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.runtimeRequestActions button {
+  min-height: 32px;
+  padding: 0 10px;
+}
+
+.runtimeRequestActions .danger {
+  color: #fca5a5;
+}
+
 .messageMeta {
   color: var(--muted);
   font-size: 12px;
@@ -709,12 +973,295 @@ dd {
   overflow-wrap: anywhere;
 }
 
+.messageText > :first-child {
+  margin-top: 0;
+}
+
+.messageText > :last-child {
+  margin-bottom: 0;
+}
+
+.messageText p {
+  margin: 0 0 11px;
+}
+
+.messageText h1,
+.messageText h2,
+.messageText h3,
+.messageText h4 {
+  margin: 22px 0 9px;
+  color: #fafafa;
+  line-height: 1.35;
+  letter-spacing: 0;
+}
+
+.messageText h1 {
+  font-size: 22px;
+}
+
+.messageText h2 {
+  font-size: 19px;
+}
+
+.messageText h3,
+.messageText h4 {
+  font-size: 16px;
+}
+
+.messageText ul,
+.messageText ol {
+  margin: 7px 0 12px;
+  padding-left: 24px;
+}
+
+.messageText li {
+  margin: 3px 0;
+}
+
+.messageText blockquote {
+  margin: 12px 0;
+  padding: 2px 0 2px 13px;
+  border-left: 3px solid #71717a;
+  color: #c7c7cc;
+}
+
+.messageText a {
+  color: #8ab4f8;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.messageText code {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 5px;
+  padding: 1px 5px;
+  color: #e8e8ea;
+  background: #27272a;
+  font: 0.9em/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.messageCodeBlock {
+  max-width: 100%;
+  margin: 12px 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 8px;
+  background: #151515;
+}
+
+.messageCodeHeader {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 10px 0 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  color: #a1a1aa;
+  background: #202020;
+  font: 12px/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.messageCodeHeader button {
+  min-height: 26px;
+  padding: 0 7px;
+  color: #d4d4d8;
+  font-size: 12px;
+}
+
+.messageCodeBlock pre {
+  max-width: 100%;
+  margin: 0;
+  overflow: auto;
+  padding: 14px;
+  tab-size: 2;
+}
+
+.messageCodeBlock pre code {
+  display: block;
+  min-width: max-content;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  color: #e4e4e7;
+  background: transparent;
+  font-size: 13px;
+  line-height: 1.62;
+  white-space: pre;
+}
+
+.messageText table {
+  display: block;
+  max-width: 100%;
+  margin: 12px 0;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.messageText th,
+.messageText td {
+  min-width: 110px;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  text-align: left;
+  vertical-align: top;
+}
+
+.messageText th {
+  color: #fafafa;
+  background: #232323;
+}
+
+.messageText hr {
+  height: 1px;
+  margin: 18px 0;
+  border: 0;
+  background: rgba(255, 255, 255, 0.12);
+}
+
 .message.user .messageText {
   display: inline-block;
   max-width: 100%;
   border-radius: 14px;
   padding: 9px 12px;
   background: #222222;
+}
+
+.executionProgress {
+  max-width: 720px;
+  margin: 10px 0;
+  color: #a8a8ad;
+}
+
+.executionProgress summary {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  border-bottom: 1px solid transparent;
+  padding: 8px 2px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.executionProgress summary::-webkit-details-marker {
+  display: none;
+}
+
+.executionProgress summary::after {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-right: 1.5px solid #77777d;
+  border-bottom: 1.5px solid #77777d;
+  content: "";
+  transform: rotate(45deg) translateY(-2px);
+  transition: transform 140ms ease;
+}
+
+.executionProgress[open] summary {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.executionProgress[open] summary::after {
+  transform: rotate(225deg) translate(-1px, -1px);
+}
+
+.executionProgressState {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #b8b8bd;
+  font-size: 13px;
+}
+
+.executionProgress > summary > time {
+  margin-left: auto;
+  white-space: nowrap;
+  color: #88888e;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.executionPulse {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #8e9fff;
+  box-shadow: 0 0 0 0 rgba(142, 159, 255, 0.35);
+  animation: executionPulse 1.8s ease-out infinite;
+}
+
+@keyframes executionPulse {
+  65%, 100% {
+    box-shadow: 0 0 0 6px rgba(142, 159, 255, 0);
+  }
+}
+
+.executionProgress.waiting_approval .executionPulse,
+.executionProgress.waiting_user .executionPulse {
+  background: #d6a756;
+}
+
+.executionActivityList {
+  display: grid;
+  gap: 0;
+  padding: 8px 2px 3px;
+}
+
+.executionActivity {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  padding: 6px 0;
+}
+
+.executionActivityMarker {
+  width: 5px;
+  height: 5px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: #67676d;
+}
+
+.executionActivity strong {
+  display: block;
+  color: #bdbdc2;
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.executionActivity p {
+  max-width: 100%;
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: #77777d;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.executionActivity time {
+  color: #68686e;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.executionActivityEmpty {
+  padding: 8px 0;
+  color: #77777d;
+  font-size: 12px;
 }
 
 .runSummary {
@@ -841,6 +1388,66 @@ dd {
 .runNode.waiting,
 .runNode.waiting_approval {
   border-color: rgba(245, 158, 11, 0.32);
+}
+
+.runApprovalPanel {
+  display: grid;
+  gap: 8px;
+  border-left: 2px solid rgba(245, 158, 11, 0.42);
+  padding: 2px 0 2px 10px;
+}
+
+.runApprovalPanel details {
+  min-width: 0;
+}
+
+.runApprovalPanel summary {
+  width: fit-content;
+  cursor: pointer;
+  color: #d8d8dc;
+  font-size: 12px;
+}
+
+.runApprovalOutput {
+  max-height: 320px;
+  overflow: auto;
+  margin-top: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  padding: 10px;
+  background: #181818;
+  font-size: 12px;
+}
+
+.runApprovalOutput > :first-child {
+  margin-top: 0;
+}
+
+.runApprovalOutput > :last-child {
+  margin-bottom: 0;
+}
+
+.runApprovalPanel form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.runApprovalPanel textarea {
+  min-height: 54px;
+  resize: vertical;
+}
+
+.runApprovalPanel button {
+  min-height: 36px;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .runApprovalPanel form {
+    grid-template-columns: 1fr;
+  }
 }
 
 .runDetailPage {
@@ -1097,28 +1704,6 @@ dd {
   background: #1e1e1e;
 }
 
-.contextSummaryInput {
-  width: 100%;
-  min-height: 48px;
-  max-height: 96px;
-  margin-top: 10px;
-  padding: 9px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 10px;
-  background: #1e1e1e;
-  color: #f4f4f5;
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.dryRunToggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-}
-
-.dryRunToggle input,
 .checkRow input {
   width: 15px;
   height: 15px;
@@ -1954,8 +2539,7 @@ dd {
 }
 
 .knowledgeTreeHeader,
-.knowledgeDetailHeader,
-.knowledgeMetaHeader {
+.knowledgeDetailHeader {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -1982,24 +2566,12 @@ dd {
   background: #242424;
 }
 
-.knowledgeQuickForm,
-.knowledgeInlineForm,
-.knowledgeMetaForm {
-  min-width: 0;
-  display: grid;
-  gap: 10px;
-}
-
-.knowledgeQuickForm {
-  margin-bottom: 10px;
-}
-
-.knowledgeQuickForm label,
-.knowledgeInlineForm label,
-.knowledgeMetaFields label {
-  display: grid;
-  gap: 5px;
-  color: #bdbdbd;
+.knowledgeTreeSearch {
+  min-height: 30px;
+  margin-bottom: 8px;
+  padding: 5px 8px;
+  border-color: var(--line);
+  background: #181818;
   font-size: 12px;
 }
 
@@ -2010,8 +2582,41 @@ dd {
   gap: 4px;
 }
 
+.knowledgeTreeList {
+  min-height: 0;
+  align-content: start;
+  grid-auto-rows: max-content;
+  overflow-y: auto;
+}
+
 .knowledgeTreeGroup {
   min-width: 0;
+}
+
+.knowledgeTreeDomainRow {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 2px;
+}
+
+.knowledgeTreeToggle {
+  width: 24px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: #a8a8a8;
+}
+
+.knowledgeTreeToggle:hover {
+  color: #eeeeee;
+  background: #252525;
+}
+
+.knowledgeTreeToggle.collapsed .projectChevron {
+  transform: rotate(-90deg);
 }
 
 .knowledgeTreeNode,
@@ -2020,7 +2625,7 @@ dd {
   min-width: 0;
   min-height: 30px;
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   border-radius: 7px;
@@ -2035,8 +2640,8 @@ dd {
 }
 
 .knowledgeTreeNode.topic {
-  margin-left: 14px;
-  width: calc(100% - 14px);
+  margin-left: 26px;
+  width: calc(100% - 26px);
   color: #dddddd;
 }
 
@@ -2054,6 +2659,31 @@ dd {
 .knowledgeDirectoryItem small {
   color: #8f8f8f;
   font-size: 11px;
+}
+
+.knowledgeTreeTopicMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.knowledgeTreeTopicMeta i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #707070;
+}
+
+.knowledgeTreeTopicMeta i.ok {
+  background: #34d399;
+}
+
+.knowledgeTreeTopicMeta i.pending {
+  background: #fbbf24;
+}
+
+.knowledgeTreeTopicMeta i.error {
+  background: #f87171;
 }
 
 .knowledgeDetailPane {
@@ -2099,6 +2729,53 @@ dd {
   opacity: 0.64;
 }
 
+.knowledgeOverview {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 24px;
+  padding: 4px 0 2px;
+}
+
+.knowledgeDescription {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.knowledgeDescription span {
+  color: #8f8f8f;
+  font-size: 12px;
+}
+
+.knowledgeDescription p {
+  max-width: 680px;
+  color: #dddddd;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.knowledgeStats {
+  display: flex;
+  gap: 18px;
+  color: #9a9a9a;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.knowledgeStats span {
+  display: grid;
+  gap: 2px;
+}
+
+.knowledgeStats strong {
+  color: #eeeeee;
+  font-size: 18px;
+  font-weight: 650;
+}
+
 .knowledgeDetailSection {
   display: grid;
   gap: 8px;
@@ -2106,50 +2783,35 @@ dd {
   padding-top: 12px;
 }
 
-.knowledgeMetaHeader strong {
-  color: #eeeeee;
-  font-size: 14px;
-  font-weight: 650;
+.knowledgeDetailSectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.knowledgeMetaHeader small {
-  flex: 0 0 auto;
-  color: #909090;
-  font-size: 12px;
-  white-space: nowrap;
+.knowledgeDocumentActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
-.knowledgeMetaFields {
-  display: grid;
-  grid-template-columns: minmax(120px, 0.7fr) minmax(180px, 1.3fr) auto;
-  gap: 8px;
-  align-items: end;
-}
-
-.knowledgeMetaFields label {
-  display: grid;
-  gap: 5px;
-  color: #bdbdbd;
-  font-size: 12px;
-}
-
-.knowledgeMetaFields input,
-.knowledgeMetaFields textarea {
-  min-height: 34px;
-}
-
-.knowledgeMetaFields button {
-  min-height: 34px;
-  padding: 6px 10px;
+.knowledgeDocumentActions > button:not(.knowledgeRevealButton) {
+  min-height: 28px;
+  padding: 4px 9px;
   border-color: var(--line-strong);
   background: #242424;
+  font-size: 12px;
 }
 
-.knowledgeInlineForm {
-  grid-template-columns: minmax(140px, 0.6fr) minmax(220px, 1fr) auto;
-  align-items: end;
-  border-top: 1px solid var(--line);
-  padding-top: 12px;
+.knowledgeDetailSection[data-knowledge-drop-path] {
+  border-radius: 7px;
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+
+.knowledgeDetailSection[data-knowledge-drop-path].dragging {
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
 }
 
 .knowledgeDirectoryItem {
@@ -2160,6 +2822,64 @@ dd {
 
 .knowledgeDirectoryItem.static {
   cursor: default;
+}
+
+.knowledgeDocumentLink {
+  min-width: 0;
+  overflow: hidden;
+  color: #eeeeee;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledgeDocumentLink:hover {
+  color: #ffffff;
+  text-decoration: underline;
+}
+
+.knowledgeDocumentStatus {
+  justify-self: start;
+  border-radius: 5px;
+  padding: 2px 6px;
+  background: #292929;
+  white-space: nowrap;
+}
+
+.knowledgeDocumentStatus.ok {
+  color: #86efc2;
+  background: rgba(16, 185, 129, 0.11);
+}
+
+.knowledgeDocumentStatus.pending {
+  color: #fcd67d;
+  background: rgba(245, 158, 11, 0.11);
+}
+
+.knowledgeRevealButton {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: #a8a8a8;
+}
+
+.knowledgeRevealButton:hover {
+  color: #f1f1f1;
+  background: #303030;
+}
+
+.folderOpenIcon {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
 }
 
 .knowledgeDirectoryItem span {
@@ -2188,15 +2908,184 @@ dd {
   overflow-wrap: anywhere;
 }
 
+.knowledgeIndexSummary {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.knowledgeIndexSummary span {
+  border-radius: 5px;
+  padding: 3px 7px;
+  color: #cfcfcf;
+  background: #292929;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.knowledgeIndexSummary p {
+  color: #9d9d9d;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.knowledgeIndexSummary.ok span {
+  color: #86efc2;
+  background: rgba(16, 185, 129, 0.11);
+}
+
+.knowledgeIndexSummary.pending span {
+  color: #fcd67d;
+  background: rgba(245, 158, 11, 0.11);
+}
+
+.knowledgeIndexSummary.error span {
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.knowledgeTechnicalInfo {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.knowledgeTechnicalInfo summary {
+  width: fit-content;
+  color: #9a9a9a;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.knowledgeTechnicalInfo[open] .knowledgeConfigList {
+  margin-top: 10px;
+}
+
 .knowledgeTopicEmpty,
 .knowledgeEmptyDetail {
   color: #858585;
   font-size: 12px;
 }
 
+.knowledgeDropEmpty {
+  min-height: 68px;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--line-strong);
+  border-radius: 7px;
+}
+
 .knowledgeEmptyDetail {
   display: grid;
   gap: 6px;
+}
+
+.knowledgeModal {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.68);
+}
+
+.knowledgeModalPanel {
+  width: min(520px, 100%);
+  max-height: min(680px, calc(100vh - 40px));
+  overflow: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #1b1b1b;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.46);
+}
+
+.knowledgeModalHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--line);
+  padding: 16px 18px;
+}
+
+.knowledgeModalHeader > div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.knowledgeModalHeader h2 {
+  color: #f1f1f1;
+  font-size: 16px;
+}
+
+.knowledgeModalHeader p {
+  color: #929292;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.knowledgeModalHeader > button {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  color: #bdbdbd;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.knowledgeModalHeader > button:hover {
+  color: #ffffff;
+  background: #292929;
+}
+
+.knowledgeModalBody {
+  padding: 18px;
+}
+
+.knowledgeModalForm {
+  display: grid;
+  gap: 14px;
+}
+
+.knowledgeModalForm label {
+  display: grid;
+  gap: 7px;
+  color: #d0d0d0;
+  font-size: 12px;
+}
+
+.knowledgeModalForm input,
+.knowledgeModalForm textarea {
+  background: #202020;
+}
+
+.knowledgeModalActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  margin-top: 2px;
+  padding-top: 14px;
+}
+
+.knowledgeModalActions button {
+  min-height: 34px;
+  padding: 6px 12px;
+  border-color: var(--line-strong);
+  background: #242424;
+}
+
+.knowledgeModalActions .primary {
+  color: #111111;
+  background: #f4f4f5;
 }
 
 .settingsPanel {
@@ -2226,6 +3115,71 @@ dd {
   line-height: 1.25;
 }
 
+.settingsSectionHeading {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.settingsSectionHeading > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.settingsStatus {
+  max-width: 220px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 3px 8px;
+  color: var(--muted);
+  background: #191919;
+  font-size: 11px;
+}
+
+.settingsStatus.ok {
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #8ee6c3;
+}
+
+.settingsStatus.error {
+  border-color: rgba(239, 68, 68, 0.42);
+  color: #fca5a5;
+}
+
+.settingsSummary {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr);
+  gap: 7px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 10px 12px;
+  background: #191919;
+  font-size: 12px;
+}
+
+.settingsSummary dt {
+  color: var(--muted);
+}
+
+.settingsSummary dd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #e5e5e5;
+}
+
+.settingsSummary code {
+  font: inherit;
+}
+
 .settingsSection label {
   display: grid;
   gap: 7px;
@@ -2246,6 +3200,31 @@ dd {
 .settingsSection small {
   color: var(--muted);
   line-height: 1.45;
+}
+
+.settingsCredentialMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settingsActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settingsActions button {
+  min-height: 32px;
+  padding: 5px 10px;
+  border-color: var(--line-strong);
+  background: #1a1a1a;
+}
+
+.settingsActions .danger {
+  color: #fca5a5;
 }
 
 .kv {
@@ -2298,14 +3277,14 @@ dd {
   }
 
   .chatHeader {
-    align-items: flex-start;
-    flex-direction: column;
-    height: auto;
-    padding: 12px 16px;
+    align-items: center;
+    flex-direction: row;
+    height: 54px;
+    padding: 0 16px;
   }
 
   .chatWorkspace {
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-rows: 54px minmax(0, 1fr) auto;
   }
 
   .composer {
@@ -2321,8 +3300,6 @@ dd {
     max-height: 280px;
   }
 
-  .knowledgeInlineForm,
-  .knowledgeMetaFields,
   .knowledgeDirectoryItem,
   .dagVisualEditor,
   .agentCanvasLayout,
@@ -2347,6 +3324,7 @@ dd {
   .dagGraphPreview {
     min-width: 640px;
   }
+
 }
 
 @media (max-width: 720px) {
@@ -2374,8 +3352,7 @@ dd {
     width: calc(100vw - 24px);
   }
 
-  .composerBar,
-  .headerActions {
+  .composerBar {
     align-items: stretch;
     flex-direction: column;
     width: 100%;
@@ -2389,8 +3366,20 @@ dd {
     grid-template-columns: 1fr;
   }
 
-  .knowledgeForms,
-  .knowledgeMetaFields {
+  .knowledgeForms {
+    grid-template-columns: 1fr;
+  }
+
+  .knowledgeOverview {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .chatStream.homeStream {
+    padding: 40px 16px 64px;
+  }
+
+  .homeQuickActions {
     grid-template-columns: 1fr;
   }
 }

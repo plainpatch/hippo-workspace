@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hippo Agent Builder"
+  short_description: "Design and edit versioned Hippo Agent blueprints"
+  default_prompt: "Design or improve a Hippo Agent blueprint from my requirements, validate it, and let me review it before publishing."

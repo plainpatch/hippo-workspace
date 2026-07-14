@@ -6,18 +6,18 @@ Hippo is an Agent App shell and orchestration layer over agent runtimes. It shou
 
 The app must support multiple runtimes through adapters. The current implementation target is Codex, with Claude, Hermes, and other runtimes left as adapter extensions.
 
-Hippo owns an app system path. New workspaces are created under the app-managed `projects/` directory, not arbitrary user-selected filesystem roots. Runtime, app home, workspace path, knowledge path, and RAG provider are app settings.
+Hippo owns an app system path. New workspaces are created under the app-managed `workspaces/` directory, not arbitrary user-selected filesystem roots. Runtime, app home, workspace path, knowledge path, and RAG provider are app settings.
 
 Agents are global definitions. A workspace references the global agents it enables, and a conversation inside that workspace can switch between those enabled agents. Conversation history belongs to the workspace; individual messages may record which agent was used.
 
 AnythingLLM is only a RAG provider dependency. It must not be the agent conversation runtime. The app should keep RAG behind a `RagProvider` abstraction so AnythingLLM can be replaced later.
 
-The knowledge base is app-system-level. It uses a constrained drawer model:
+The knowledge base is app-system-level. It uses a constrained two-level model:
 
-- primary drawer: domain and authorization boundary
-- secondary drawer: topic/type filter mapped to a topic-level RAG workspace
+- domain: workspace authorization boundary
+- topic: domain subdivision mapped to a topic-level RAG workspace
 
-Workspaces reference primary drawers. RAG and system MCP search must only retrieve from drawers referenced by the current workspace. Secondary drawers can narrow retrieval but cannot grant access.
+Workspaces reference domains and optionally select topics. RAG and system MCP search must only retrieve from domains referenced by the current workspace; topic selection can narrow retrieval but cannot grant access.
 
 ## Current Code Drift
 
@@ -36,15 +36,15 @@ Workspaces reference primary drawers. RAG and system MCP search must only retrie
 - Add `RuntimeAdapter` and register Codex as the first runtime.
 - Add `RagProvider` and keep AnythingLLM behind it.
 - Keep global agents independent from workspaces.
-- Add workspace `agentIds`, `knowledgeDrawerRefs`, and `knowledgeTopicRefs`.
+- Add workspace `agentIds`, `knowledgeDomainRefs`, and `knowledgeTopicRefs`.
 - Make workspace knowledge authorization primary-drawer-scoped.
 - Expose workspace-scoped MCP search APIs.
-- Remove legacy `/api/agent-workspaces` compatibility and expose `/api/workspaces`, retaining `/api/projects` only as a compatibility alias while older clients migrate.
+- Expose workspaces only through `/api/workspaces`; pre-beta project aliases are intentionally unsupported.
 
-### Phase 2: Domain Rename and Migration
+### Phase 2: Canonical Workspace Model
 
-- Finish removing remaining internal migration names from store and service code.
-- Add explicit store migrations from version 1 to version 2.
+- Keep only `workspaces` and `workspaceId` in the pre-beta store and service protocol.
+- Reject obsolete fields instead of migrating or aliasing them.
 - Persist workspace-scoped conversations.
 - Record selected agent per message.
 - Keep Agent-level knowledge authorization out of UI, MCP, and store writes.
@@ -58,8 +58,8 @@ Workspaces reference primary drawers. RAG and system MCP search must only retrie
 
 ### Phase 4: Knowledge Management
 
-- Add first-class drawer metadata editing.
-- Add secondary tag filtering controls in chat and MCP.
+- Add first-class domain/topic metadata editing.
+- Add topic filtering controls in chat and MCP.
 - Add RAG provider replacement tests.
 - Decide whether AnythingLLM remains a provider or is replaced by an internal index.
 
