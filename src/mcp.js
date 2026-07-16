@@ -6,6 +6,8 @@ import { ResourceManager } from "./resource-manager.js";
 import { AppSettingsService } from "./app-settings.js";
 import { createRagProvider } from "./rag-provider.js";
 import { RuntimeRegistry } from "./runtime-adapter.js";
+import { ContextStore } from "./context-store.js";
+import { SqliteStateStore } from "./storage/sqlite-state-store.js";
 
 export function createMcpServer(options = {}) {
   const appSettings = options.appSettings || new AppSettingsService();
@@ -17,13 +19,23 @@ export function createMcpServer(options = {}) {
       apiKey: appSettings.getAnythingLlmCredentials().apiKey,
     });
     const ragProvider = createRagProvider({ id: settings.ragProviderId, client });
-    const resourceManager = new ResourceManager({ rootPath: settings.resourceRootPath, client: ragProvider });
+    const stateStore = new SqliteStateStore({
+      databasePath: settings.metadataDbPath,
+      resourceRootPath: settings.resourceRootPath,
+    });
+    const resourceManager = new ResourceManager({
+      rootPath: settings.resourceRootPath,
+      client: ragProvider,
+      metadataRepository: stateStore.repository,
+    });
     const runtimeRegistry = new RuntimeRegistry({ settings });
     agentOrchestrator = new AgentOrchestrator({
       client,
       ragProvider,
       resourceManager,
       runtimeRegistry,
+      contextStore: new ContextStore({ repository: stateStore.repository }),
+      stateStore,
       settings,
     });
   }
@@ -129,7 +141,7 @@ export function createMcpServer(options = {}) {
       inputSchema: strictInput({
         $schema: z.literal("https://hippo.local/schemas/agent-blueprint-v1.schema.json").default("https://hippo.local/schemas/agent-blueprint-v1.schema.json"),
         schemaVersion: z.literal(1).default(1),
-        type: z.enum(["single", "dag"]).default("single"),
+        type: z.enum(["single", "blueprint"]).default("single"),
         name: z.string().min(1),
         description: z.string().optional(),
         systemPrompt: z.string().optional(),
@@ -152,11 +164,11 @@ export function createMcpServer(options = {}) {
     "hippo_validate_agent_graph",
     {
       title: "Validate agent graph",
-      description: "Validate a single or DAG agent prototype without creating runtime state.",
+      description: "Validate a single or Blueprint agent prototype without creating runtime state.",
       inputSchema: strictInput({
         $schema: z.literal("https://hippo.local/schemas/agent-blueprint-v1.schema.json").default("https://hippo.local/schemas/agent-blueprint-v1.schema.json"),
         schemaVersion: z.literal(1).default(1),
-        type: z.enum(["single", "dag"]).default("single"),
+        type: z.enum(["single", "blueprint"]).default("single"),
         name: z.string().min(1).optional(),
         description: z.string().optional(),
         systemPrompt: z.string().optional(),
@@ -198,7 +210,7 @@ export function createMcpServer(options = {}) {
         expectedVersion: z.number().int().positive(),
         $schema: z.literal("https://hippo.local/schemas/agent-blueprint-v1.schema.json").optional(),
         schemaVersion: z.literal(1).optional(),
-        type: z.enum(["single", "dag"]).optional(),
+        type: z.enum(["single", "blueprint"]).optional(),
         name: z.string().min(1).optional(),
         description: z.string().optional(),
         systemPrompt: z.string().optional(),
@@ -386,7 +398,22 @@ export function createMcpServer(options = {}) {
         workspaceId: z.string().min(1),
         runId: z.string().min(1),
         nodeId: z.string().min(1),
-        input: z.unknown().optional(),
+        input: z.object({
+          nodeTask: z.string().min(1).describe("Concrete subtask assigned to this node without replacing the original user request."),
+          relevantContext: z.unknown().optional().describe("Only upstream inputs and outputs relevant to this node."),
+          contextRefs: z.array(z.object({
+            ref: z.string().regex(/^ctx:\/\//),
+            title: z.string().min(1),
+            summary: z.string().default(""),
+            reason: z.string().default(""),
+          }).strict()).default([]).describe("Versioned session context references authorized for this node."),
+          requirements: z.array(z.string().min(1)).default([]).describe("Original-request constraints that this node must preserve."),
+          expectedArtifacts: z.array(z.object({
+            type: z.string().min(1),
+            count: z.number().int().positive().optional(),
+            description: z.string().optional(),
+          }).strict()).default([]).describe("Real deliverables this node must produce; plans and placeholders do not satisfy this contract."),
+        }).strict(),
         parentNodeRunId: z.string().optional(),
         reason: z.string().optional(),
       },
@@ -482,7 +509,7 @@ export function createMcpServer(options = {}) {
     "hippo_resume_node_run",
     {
       title: "Resume waiting node run",
-      description: "Resume a waiting DAG node by providing human/tool output, then advance the graph.",
+      description: "Resume a waiting Blueprint node by providing human/tool output, then advance the graph.",
       inputSchema: {
         workspaceId: z.string().min(1),
         runId: z.string().min(1),
@@ -565,6 +592,86 @@ export function createMcpServer(options = {}) {
   return server;
 }
 
+export function createGraphMcpServer({ workspaceId, runId, agentOrchestrator } = {}) {
+  if (!workspaceId || !runId || !agentOrchestrator) {
+    throw new Error("Graph MCP requires workspaceId, runId, and agentOrchestrator.");
+  }
+  const server = new McpServer({
+    name: "hippo-graph",
+    version: "0.1.0",
+  });
+
+  server.registerTool(
+    "hippo_get_agent_run",
+    {
+      title: "Get current graph run",
+      description: "Read the graph run bound to this Root coordinator, including node states and outputs.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async () => jsonContent(await agentOrchestrator.getAgentRun(workspaceId, runId))
+  );
+
+  server.registerTool(
+    "hippo_dispatch_graph_node",
+    {
+      title: "Dispatch graph node",
+      description: "Execute one worker node with a task envelope assembled by the Root coordinator.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: strictInput({
+        nodeId: z.string().min(1),
+        input: graphDispatchInputSchema(),
+        parentNodeRunId: z.string().min(1).optional(),
+        reason: z.string().optional(),
+      }),
+    },
+    async (payload) => jsonContent(await agentOrchestrator.dispatchGraphNode(workspaceId, runId, payload))
+  );
+
+  server.registerTool(
+    "hippo_request_graph_user",
+    {
+      title: "Request user input",
+      description: "Pause the bound graph run and ask the user one necessary question.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: strictInput({
+        question: z.string().min(1),
+        reason: z.string().optional(),
+      }),
+    },
+    async (payload) => jsonContent(await agentOrchestrator.requestGraphRunUser(workspaceId, runId, payload))
+  );
+
+  server.registerTool(
+    "hippo_complete_graph_run",
+    {
+      title: "Complete graph run",
+      description: "Complete the bound graph run and assemble its final user-facing output.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: strictInput({
+        output: z.unknown().optional(),
+        reason: z.string().optional(),
+      }),
+    },
+    async (payload) => jsonContent(await agentOrchestrator.completeGraphRun(workspaceId, runId, payload))
+  );
+
+  server.registerTool(
+    "hippo_fail_graph_run",
+    {
+      title: "Fail graph run",
+      description: "Fail the bound graph run when it cannot satisfy the original request.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: strictInput({
+        output: z.unknown().optional(),
+        reason: z.string().min(1),
+      }),
+    },
+    async (payload) => jsonContent(await agentOrchestrator.failGraphRun(workspaceId, runId, payload))
+  );
+
+  return server;
+}
+
 export function createRagMcpServer({ workspaceId, topN = 4 } = {}) {
   const appSettings = new AppSettingsService();
   const settings = appSettings.getSettings();
@@ -573,12 +680,22 @@ export function createRagMcpServer({ workspaceId, topN = 4 } = {}) {
     apiKey: appSettings.getAnythingLlmCredentials().apiKey,
   });
   const ragProvider = createRagProvider({ id: settings.ragProviderId, client });
-  const resourceManager = new ResourceManager({ rootPath: settings.resourceRootPath, client: ragProvider });
+  const stateStore = new SqliteStateStore({
+    databasePath: settings.metadataDbPath,
+    resourceRootPath: settings.resourceRootPath,
+  });
+  const resourceManager = new ResourceManager({
+    rootPath: settings.resourceRootPath,
+    client: ragProvider,
+    metadataRepository: stateStore.repository,
+  });
   const agentOrchestrator = new AgentOrchestrator({
     client,
     ragProvider,
     resourceManager,
     runtimeRegistry: new RuntimeRegistry({ settings }),
+    contextStore: new ContextStore({ repository: stateStore.repository }),
+    stateStore,
     settings,
   });
   const retrievalLimit = Math.max(1, Number(topN) || 4);
@@ -632,6 +749,176 @@ export function createRagMcpServer({ workspaceId, topN = 4 } = {}) {
   return server;
 }
 
+export function createContextMcpServer({
+  workspaceId,
+  sessionId,
+  runId = "",
+  nodeRunId = "",
+  role = "root",
+  agentOrchestrator,
+  contextStore,
+} = {}) {
+  if (!agentOrchestrator) throw new Error("Context MCP requires an AgentOrchestrator instance.");
+  contextStore ||= agentOrchestrator.contextStore;
+  if (!contextStore) throw new Error("Context MCP requires a ContextStore instance.");
+  const server = new McpServer({ name: "hippo-context", version: "0.1.0" });
+
+  server.registerTool(
+    "hippo_context_write",
+    {
+      title: "Write session context",
+      description: "Write a versioned context item under the current Hippo workspace and session. Returns a stable ctx:// reference. Long node results should be written here and passed by reference.",
+      inputSchema: strictInput({
+        ref: z.string().optional().describe("Existing ctx:// reference to update. Omit to create a new item."),
+        title: z.string().min(1),
+        summary: z.string().max(2000).default(""),
+        content: z.string().min(1),
+        contentType: z.enum(["text/markdown", "text/plain", "application/json"]).default("text/markdown"),
+        tags: z.array(z.string().min(1)).max(50).default([]),
+        expectedVersion: z.number().int().nonnegative().optional(),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async (input) => {
+      const scope = await resolveContextMcpScope({ workspaceId, sessionId, runId, nodeRunId, role, agentOrchestrator });
+      if (input.ref) await assertContextWriteAllowed(contextStore, scope, input.ref);
+      return jsonContent(await contextStore.write({
+        workspacePath: scope.workspace.localWorkspacePath,
+        sessionId,
+        ...input,
+        source: {
+          role: scope.role,
+          runId: scope.runId,
+          nodeId: scope.nodeId,
+          agentId: scope.agentId,
+        },
+      }));
+    }
+  );
+
+  server.registerTool(
+    "hippo_context_read",
+    {
+      title: "Read session context",
+      description: "Resolve an authorized ctx:// reference and read only the requested range or Markdown sections.",
+      inputSchema: strictInput({
+        ref: z.string().min(1),
+        offset: z.number().int().nonnegative().default(0),
+        limit: z.number().int().min(1).max(100000).default(20000),
+        headings: z.array(z.string().min(1)).max(50).default([]),
+      }),
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    async (input) => {
+      const scope = await resolveContextMcpScope({ workspaceId, sessionId, runId, nodeRunId, role, agentOrchestrator });
+      await assertContextReadAllowed(contextStore, scope, input.ref);
+      return jsonContent(await contextStore.read({ workspacePath: scope.workspace.localWorkspacePath, sessionId, ...input }));
+    }
+  );
+
+  server.registerTool(
+    "hippo_context_list",
+    {
+      title: "List session context",
+      description: "List context references visible to the current Root or worker node without loading their full content.",
+      inputSchema: strictInput({
+        tags: z.array(z.string().min(1)).max(50).default([]),
+        page: z.number().int().positive().default(1),
+        pageSize: z.number().int().min(1).max(100).default(50),
+      }),
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    async (input) => {
+      const scope = await resolveContextMcpScope({ workspaceId, sessionId, runId, nodeRunId, role, agentOrchestrator });
+      return jsonContent(await contextStore.list({
+        workspacePath: scope.workspace.localWorkspacePath,
+        sessionId,
+        ...input,
+        ...(scope.role === "node" ? { refs: scope.allowedRefs } : {}),
+      }));
+    }
+  );
+
+  server.registerTool(
+    "hippo_context_search",
+    {
+      title: "Search session context",
+      description: "Search titles, summaries, tags, and content within the current authorized context scope. Read the referenced source before making a critical decision.",
+      inputSchema: strictInput({
+        query: z.string().min(1),
+        tags: z.array(z.string().min(1)).max(50).default([]),
+        page: z.number().int().positive().default(1),
+        pageSize: z.number().int().min(1).max(100).default(20),
+      }),
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    async (input) => {
+      const scope = await resolveContextMcpScope({ workspaceId, sessionId, runId, nodeRunId, role, agentOrchestrator });
+      return jsonContent(await contextStore.search({
+        workspacePath: scope.workspace.localWorkspacePath,
+        sessionId,
+        ...input,
+        ...(scope.role === "node" ? { refs: scope.allowedRefs } : {}),
+      }));
+    }
+  );
+
+  return server;
+}
+
+async function resolveContextMcpScope({ workspaceId, sessionId, runId, nodeRunId, role, agentOrchestrator }) {
+  const { workspace } = await agentOrchestrator.getWorkspace(workspaceId);
+  if (!workspace.localWorkspacePath) throw new Error("Workspace has no local path.");
+  if (!sessionId) throw new Error("Context sessionId is required.");
+  if (role !== "node") {
+    let agentId = "";
+    if (runId) {
+      const { run } = await agentOrchestrator.getAgentRun(workspaceId, runId);
+      if (run.rootSessionId !== sessionId) throw new Error("Context session does not match the Agent Run.");
+      agentId = run.agentId || "";
+    }
+    return { workspace, sessionId, role: "root", runId, nodeId: "root", agentId, allowedRefs: undefined };
+  }
+  if (!runId || !nodeRunId) throw new Error("Node context scope requires runId and nodeRunId.");
+  const { run, nodeRun } = await agentOrchestrator.getNodeRun(workspaceId, runId, nodeRunId);
+  if (run.rootSessionId !== sessionId) throw new Error("Context session does not match the Agent Run.");
+  const grantedRefs = Array.isArray(nodeRun.input?.contextRefs) ? nodeRun.input.contextRefs : [];
+  const own = (await contextStoreForNodeItems(workspace, sessionId, runId, nodeRunId, agentOrchestrator, nodeRun)).items || [];
+  return {
+    workspace,
+    sessionId,
+    role: "node",
+    runId,
+    nodeId: nodeRunId,
+    agentId: run.agentId || "",
+    allowedRefs: [...grantedRefs, ...own.map((item) => item.ref)],
+  };
+}
+
+async function contextStoreForNodeItems(workspace, sessionId, runId, nodeRunId, agentOrchestrator, nodeRun) {
+  const store = agentOrchestrator.contextStore;
+  if (!store) return { items: [] };
+  return store.list({ workspacePath: workspace.localWorkspacePath, sessionId, sourceRunId: runId, sourceNodeId: nodeRunId, pageSize: 100 });
+}
+
+async function assertContextReadAllowed(contextStore, scope, ref) {
+  if (scope.role !== "node") return contextStore.assertReadable({ workspacePath: scope.workspace.localWorkspacePath, sessionId: scope.sessionId, ref });
+  return contextStore.assertReadable({
+    workspacePath: scope.workspace.localWorkspacePath,
+    sessionId: scope.sessionId,
+    ref,
+    allowedRefs: scope.allowedRefs,
+  });
+}
+
+async function assertContextWriteAllowed(contextStore, scope, ref) {
+  if (scope.role !== "node") return contextStore.assertReadable({ workspacePath: scope.workspace.localWorkspacePath, sessionId: scope.sessionId, ref });
+  const current = await contextStore.read({ workspacePath: scope.workspace.localWorkspacePath, sessionId: scope.sessionId, ref, limit: 1 });
+  if (current.source?.runId !== scope.runId || current.source?.nodeId !== scope.nodeId) {
+    throw new Error("Worker nodes can only update context items they created.");
+  }
+}
+
 function skillInputSchema() {
   return z.object({
     name: z.string().min(1),
@@ -664,6 +951,25 @@ function nodeRagInputSchema() {
   return z.object({
     enabled: z.boolean().default(false),
     topN: z.number().int().min(1).max(100).default(4),
+  }).strict();
+}
+
+function graphDispatchInputSchema() {
+  return z.object({
+    nodeTask: z.string().min(1).describe("Concrete subtask assigned to this node."),
+    relevantContext: z.unknown().optional().describe("Only the upstream facts and outputs needed by this node."),
+    contextRefs: z.array(z.object({
+      ref: z.string().regex(/^ctx:\/\//),
+      title: z.string().min(1),
+      summary: z.string().default(""),
+      reason: z.string().default(""),
+    }).strict()).default([]),
+    requirements: z.array(z.string().min(1)).default([]),
+    expectedArtifacts: z.array(z.object({
+      type: z.string().min(1),
+      count: z.number().int().positive().optional(),
+      description: z.string().optional(),
+    }).strict()).default([]),
   }).strict();
 }
 

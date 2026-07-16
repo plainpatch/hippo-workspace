@@ -27,7 +27,7 @@ export class AppSettingsService {
       workspacesPath: path.join(resourceRootPath, "workspaces"),
       knowledgePath: path.join(resourceRootPath, "knowledge"),
       settingsPath: this.settingsPath,
-      agentStorePath: this.initial.agentStorePath,
+      metadataDbPath: process.env.HIPPO_DATABASE_PATH || path.join(resourceRootPath, "metadata", "hippo.sqlite3"),
       defaultRuntimeId: this.initial.defaultRuntimeId,
       ragProviderId: this.initial.ragProviderId,
       runtimes: {

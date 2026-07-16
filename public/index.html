@@ -44,6 +44,9 @@
             </div>
           </div>
           <div class="headerActions">
+            <button id="workspaceRevealBtn" class="headerIconButton hidden" type="button" title="打开工作区文件夹" aria-label="打开工作区文件夹">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5V6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v1.5"></path><path d="M3.5 9.5h18l-2 9a2 2 0 0 1-2 1.5h-11a2 2 0 0 1-2-1.5l-1-9Z"></path></svg>
+            </button>
             <button id="projectConfigBtn" type="button">工作区设置</button>
           </div>
         </header>
@@ -51,9 +54,19 @@
         <section id="chatStream" class="chatStream" aria-live="polite"></section>
 
         <form id="composerForm" class="composer">
-          <textarea id="messageInput" name="message" rows="1" placeholder="描述任务；可选加载 Agent" required></textarea>
+          <div id="composerAttachmentTray" class="composerAttachmentTray hidden"></div>
+          <textarea id="messageInput" name="message" rows="1" placeholder="描述任务；可添加文件、文件夹或粘贴图片"></textarea>
           <div class="composerBar">
             <div class="composerTools">
+              <div class="attachmentMenuWrap">
+                <button id="attachmentMenuBtn" class="attachmentMenuButton" type="button" aria-label="添加附件" title="添加附件">+</button>
+                <div id="attachmentMenu" class="attachmentMenu hidden">
+                  <button type="button" data-attachment-action="file">添加文件</button>
+                  <button type="button" data-attachment-action="folder">添加文件夹</button>
+                </div>
+                <input id="attachmentFileInput" class="hidden" type="file" multiple />
+                <input id="attachmentFolderInput" class="hidden" type="file" webkitdirectory directory multiple />
+              </div>
               <label class="modeSelect">Agent
                 <select name="agentId" id="agentSelect">
                   <option value="">通用助手</option>

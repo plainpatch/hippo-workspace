@@ -1,9 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { config } from "./config.js";
 import { RuntimeRegistry } from "./runtime-adapter.js";
+import { ContextStore } from "./context-store.js";
+import { SqliteStateStore } from "./storage/sqlite-state-store.js";
 import {
   AGENT_BLUEPRINT_SCHEMA_ID,
   AGENT_BLUEPRINT_SCHEMA_VERSION,
@@ -83,6 +85,15 @@ const messageSchema = z.object({
   agentRunSummary: z.record(z.string(), z.unknown()).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   createdAt: z.string().optional(),
+  attachments: z.array(z.object({
+    id: z.string().min(1),
+    kind: z.enum(["file", "folder", "image"]),
+    name: z.string().min(1),
+    path: z.string().min(1),
+    mimeType: z.string().optional(),
+    size: z.number().nonnegative().optional(),
+    childCount: z.number().int().nonnegative().optional(),
+  }).strict()).default([]),
 }).strict();
 
 const createConversationSchema = z.object({
@@ -98,10 +109,14 @@ const updateConversationSchema = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
 }).strict();
 
+const branchConversationSchema = z.object({
+  messageIndex: z.number().int().nonnegative(),
+}).strict();
+
 const createAgentSchema = z.object({
   $schema: z.literal(AGENT_BLUEPRINT_SCHEMA_ID).default(AGENT_BLUEPRINT_SCHEMA_ID),
   schemaVersion: z.literal(AGENT_BLUEPRINT_SCHEMA_VERSION).default(AGENT_BLUEPRINT_SCHEMA_VERSION),
-  type: z.enum(["single", "dag"]).default("single"),
+  type: z.enum(["single", "blueprint"]).default("single"),
   name: z.string().min(1),
   description: z.string().optional(),
   systemPrompt: z.string().optional(),
@@ -119,7 +134,7 @@ const createAgentSchema = z.object({
 const updateAgentSchema = z.object({
   $schema: z.literal(AGENT_BLUEPRINT_SCHEMA_ID).optional(),
   schemaVersion: z.literal(AGENT_BLUEPRINT_SCHEMA_VERSION).optional(),
-  type: z.enum(["single", "dag"]).optional(),
+  type: z.enum(["single", "blueprint"]).optional(),
   name: z.string().min(1).optional(),
   description: z.string().optional(),
   systemPrompt: z.string().optional(),
@@ -143,6 +158,15 @@ const executeAgentTaskSchema = z.object({
   dryRun: z.boolean().optional(),
   context: z.record(z.string(), z.unknown()).optional(),
   sandboxMode: z.enum(["workspace-write", "read-only", "danger-full-access"]).optional(),
+  attachments: z.array(z.object({
+    id: z.string().min(1),
+    kind: z.enum(["file", "folder", "image"]),
+    name: z.string().min(1),
+    path: z.string().min(1),
+    mimeType: z.string().optional(),
+    size: z.number().nonnegative().optional(),
+    childCount: z.number().int().nonnegative().optional(),
+  }).strict()).max(200).default([]),
 }).strict();
 
 const workspaceRagPlanSchema = z.object({
@@ -172,9 +196,30 @@ const resumeNodeRunSchema = z.object({
   output: z.unknown().optional(),
 }).strict();
 
+const expectedArtifactSchema = z.object({
+  type: z.string().min(1),
+  count: z.number().int().positive().optional(),
+  description: z.string().optional(),
+}).strict();
+
+const contextReferenceSchema = z.object({
+  ref: z.string().regex(/^ctx:\/\//),
+  title: z.string().min(1),
+  summary: z.string().default(""),
+  reason: z.string().default(""),
+}).strict();
+
+const graphNodeDispatchInputSchema = z.object({
+  nodeTask: z.string().min(1),
+  relevantContext: z.unknown().optional(),
+  contextRefs: z.array(contextReferenceSchema).default([]),
+  requirements: z.array(z.string().min(1)).default([]),
+  expectedArtifacts: z.array(expectedArtifactSchema).default([]),
+}).strict();
+
 const dispatchGraphNodeSchema = z.object({
   nodeId: z.string().min(1),
-  input: z.unknown().optional(),
+  input: graphNodeDispatchInputSchema,
   parentNodeRunId: z.string().min(1).optional(),
   reason: z.string().optional(),
 }).strict();
@@ -202,16 +247,25 @@ export class AgentOrchestrator {
     ragProvider,
     resourceManager,
     runtimeRegistry,
+    contextStore,
     settings = {},
-    storePath = config.agentStorePath,
+    databasePath,
+    stateStore,
   }) {
     this.client = client;
     this.ragProvider = ragProvider || client;
     this.resourceManager = resourceManager;
     this.runtimeRegistry = runtimeRegistry || new RuntimeRegistry({ settings });
     this.settings = settings;
-    this.storePath = storePath;
+    const resolvedDatabasePath = databasePath || settings.metadataDbPath || config.metadataDbPath;
+    this.stateStore = stateStore || new SqliteStateStore({
+      databasePath: resolvedDatabasePath,
+      resourceRootPath: settings.resourceRootPath || path.dirname(resolvedDatabasePath),
+    });
+    this.contextStore = contextStore || new ContextStore({ repository: this.stateStore.repository });
     this.storeLock = Promise.resolve();
+    this.graphRunEventHandlers = new Map();
+    this.graphRunExecutions = new Map();
   }
 
   async listWorkspaces() {
@@ -394,12 +448,13 @@ export class AgentOrchestrator {
     return { workspace };
   }
 
-  async listConversations(workspaceId) {
+  async listConversations(workspaceId, options = {}) {
     const store = await this.readStore();
     this.findWorkspace(store, workspaceId);
     const conversations = store.conversations
       .filter((conversation) => conversation.workspaceId === workspaceId)
-      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
+      .map((conversation) => options.summary ? summarizeConversation(conversation) : conversation);
     return { conversations };
   }
 
@@ -473,20 +528,114 @@ export class AgentOrchestrator {
     });
   }
 
-  async deleteConversation(workspaceId, conversationId) {
-    return this.withStoreLock(async () => {
+  async branchConversation(workspaceId, conversationId, input = {}) {
+    const payload = branchConversationSchema.parse(input);
+    const branched = await this.withStoreLock(async () => {
       const store = await this.readStore();
       this.findWorkspace(store, workspaceId);
+      const index = store.conversations.findIndex((item) =>
+        item.workspaceId === workspaceId && item.id === conversationId
+      );
+      if (index === -1) {
+        throw new AgentOrchestratorError(`Conversation ${conversationId} was not found.`, 404);
+      }
+      const current = store.conversations[index];
+      const target = current.messages?.[payload.messageIndex];
+      if (!target || target.role !== "user") {
+        throw new AgentOrchestratorError("Only an existing user message can be edited and resent.", 400);
+      }
+
+      const messages = normalizeMessages(current.messages.slice(0, payload.messageIndex));
+      const retainedRunIds = new Set(messages.map((message) => message.runId).filter(Boolean));
+      const removedRuns = store.agentRuns.filter((run) =>
+        run.workspaceId === workspaceId
+        && run.rootSessionId === conversationId
+        && !retainedRunIds.has(run.id)
+      );
+      for (const run of removedRuns) {
+        const runtimeRunIds = new Set([
+          run.rootCoordinator?.runtimeRunId,
+          ...Object.values(run.nodeRuns || {}).map((nodeRun) => nodeRun.runtimeRunId),
+        ].filter(Boolean));
+        for (const runtimeRunId of runtimeRunIds) this.cancelRuntimeRun(runtimeRunId);
+      }
+      store.agentRuns = store.agentRuns.filter((run) => !removedRuns.includes(run));
+
+      const now = new Date().toISOString();
+      const conversation = normalizeConversation({
+        ...current,
+        title: deriveConversationTitle(messages) || "新对话",
+        messages,
+        runtimeSessions: {},
+        runIds: [...retainedRunIds],
+        metadata: { ...(current.metadata || {}), runtimeSessions: {} },
+        updatedAt: now,
+      });
+      store.conversations[index] = conversation;
+      await this.writeStore(store);
+      const runtimeSessions = [
+        ...Object.values(normalizeRuntimeSessions(current.runtimeSessions)),
+        ...removedRuns.flatMap((run) => [
+          run.rootCoordinator?.runtimeSession,
+          ...Object.values(run.nodeRuns || {}).map((nodeRun) => nodeRun.runtimeSession),
+        ]),
+      ].filter((session) => session?.sessionId);
+      return { conversation, runtimeSessions };
+    });
+    await Promise.allSettled(
+      dedupeBy(branched.runtimeSessions, (session) => `${session.provider || "codex"}:${session.sessionId}`)
+        .map((session) => this.runtimeRegistry.deleteSession?.(session) || Promise.resolve({ deleted: false }))
+    );
+    return { conversation: branched.conversation };
+  }
+
+  async deleteConversation(workspaceId, conversationId) {
+    const cleanup = await this.withStoreLock(async () => {
+      const store = await this.readStore();
+      const workspace = this.findWorkspace(store, workspaceId);
+      const deletedConversation = store.conversations.find((item) =>
+        item.workspaceId === workspaceId && item.id === conversationId
+      );
       const next = store.conversations.filter((item) =>
         !(item.workspaceId === workspaceId && item.id === conversationId)
       );
       if (next.length === store.conversations.length) {
         throw new AgentOrchestratorError(`Conversation ${conversationId} was not found.`, 404);
       }
+      const deletedRuns = store.agentRuns.filter((run) =>
+        run.workspaceId === workspaceId && run.rootSessionId === conversationId
+      );
+      for (const run of deletedRuns) {
+        const runtimeRunIds = new Set([
+          run.rootCoordinator?.runtimeRunId,
+          ...Object.values(run.nodeRuns || {}).map((nodeRun) => nodeRun.runtimeRunId),
+        ].filter(Boolean));
+        for (const runtimeRunId of runtimeRunIds) this.cancelRuntimeRun(runtimeRunId);
+      }
       store.conversations = next;
+      store.agentRuns = store.agentRuns.filter((run) =>
+        !(run.workspaceId === workspaceId && run.rootSessionId === conversationId)
+      );
       await this.writeStore(store);
-      return { deleted: true, id: conversationId };
+      const runtimeSessions = [
+        ...Object.values(normalizeRuntimeSessions(deletedConversation.runtimeSessions)),
+        ...deletedRuns.flatMap((run) => [
+          run.rootCoordinator?.runtimeSession,
+          ...Object.values(run.nodeRuns || {}).map((nodeRun) => nodeRun.runtimeSession),
+        ]),
+      ].filter((session) => session?.sessionId);
+      return { workspace, deletedConversation, remainingConversations: next, runtimeSessions };
     });
+    await Promise.allSettled([
+      removeUnreferencedAttachmentBatches(cleanup.workspace, cleanup.deletedConversation, cleanup.remainingConversations),
+      this.contextStore.deleteSession({
+        workspacePath: cleanup.workspace.localWorkspacePath,
+        sessionId: conversationId,
+      }),
+      ...dedupeBy(cleanup.runtimeSessions, (session) => `${session.provider || "codex"}:${session.sessionId}`)
+        .map((session) => this.runtimeRegistry.deleteSession?.(session) || Promise.resolve({ deleted: false })),
+    ]);
+    return { deleted: true, id: conversationId };
   }
 
   async listAgentRuns(workspaceId, filters = {}) {
@@ -495,7 +644,8 @@ export class AgentOrchestrator {
     const runs = store.agentRuns
       .filter((run) => run.workspaceId === workspaceId)
       .filter((run) => !filters.rootSessionId || run.rootSessionId === filters.rootSessionId)
-      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+      .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
+      .map((run) => filters.summary ? summarizeAgentRunForList(run) : run);
     return { runs };
   }
 
@@ -612,11 +762,11 @@ export class AgentOrchestrator {
   async createGraphRun(id, input) {
     const prepared = await this.prepareAgentTask(id, input);
     const { payload, project, agent, request, retrieval, rootSession } = prepared;
-    if (agent?.type !== "dag") {
-      throw new AgentOrchestratorError("Graph runs require a DAG agent.", 400);
+    if (agent?.type !== "blueprint") {
+      throw new AgentOrchestratorError("Graph runs require a Blueprint agent.", 400);
     }
     const agentRun = await this.createAgentRun(project, rootSession, agent, request, {
-      input: { task: payload.task, context: payload.context || {} },
+      input: await this.prepareBlueprintRunInput(project, payload, rootSession, request.runId),
       retrieval,
       managed: false,
     });
@@ -626,8 +776,8 @@ export class AgentOrchestrator {
   async advanceGraphRun(workspaceId, runId, onEvent) {
     const { workspace: project } = await this.getWorkspace(workspaceId);
     const { run } = await this.getAgentRun(workspaceId, runId);
-    if (run.agentSnapshot?.type !== "dag") {
-      throw new AgentOrchestratorError("Only DAG agent runs can be advanced.", 400);
+    if (run.agentSnapshot?.type !== "blueprint") {
+      throw new AgentOrchestratorError("Only Blueprint agent runs can be advanced.", 400);
     }
     const request = run.request || {
       runtimeId: run.agentSnapshot.runtimeId || config.defaultRuntimeId,
@@ -642,10 +792,11 @@ export class AgentOrchestrator {
   }
 
   async dispatchGraphNode(workspaceId, runId, input = {}, onEvent) {
+    const eventHandler = onEvent || this.graphRunEventHandlers.get(runId);
     const payload = dispatchGraphNodeSchema.parse(input);
     const { workspace: project } = await this.getWorkspace(workspaceId);
     const { run } = await this.getAgentRun(workspaceId, runId);
-    if (run.agentSnapshot?.type !== "dag") {
+    if (run.agentSnapshot?.type !== "blueprint") {
       throw new AgentOrchestratorError("Only graph runs can dispatch nodes.", 400);
     }
     if (payload.nodeId === run.agentSnapshot.rootNodeId) {
@@ -694,7 +845,7 @@ export class AgentOrchestrator {
       sessionId: run.rootSessionId,
       runtimeOptions: {},
     };
-    const result = await this.executeDagNode(project, run.agentSnapshot, request, runId, nodeRun.id, onEvent)
+    const result = await this.executeBlueprintNode(project, run.agentSnapshot, request, runId, nodeRun.id, eventHandler)
       .catch(() => undefined);
     return { workspace: project, ...(await this.getAgentRun(workspaceId, runId)), nodeRunId: nodeRun.id, result };
   }
@@ -708,7 +859,13 @@ export class AgentOrchestrator {
     if (!nodeRun) throw new AgentOrchestratorError("Node run was not found.", 404);
     return this.dispatchGraphNode(workspaceId, runId, {
       nodeId: nodeRun.prototypeNodeId || nodeRun.nodeId,
-      input: nodeRun.input?.dispatchInput ?? nodeRun.input,
+      input: {
+        nodeTask: nodeRun.input?.nodeTask,
+        relevantContext: nodeRun.input?.relevantContext,
+        contextRefs: nodeRun.input?.contextRefs || [],
+        requirements: nodeRun.input?.requirements || [],
+        expectedArtifacts: nodeRun.input?.expectedArtifacts || [],
+      },
       parentNodeRunId: nodeRun.id,
       reason: "Root coordinator requested a retry.",
     });
@@ -790,7 +947,7 @@ export class AgentOrchestrator {
       runId,
       text: completedRun.run.status === "waiting_user"
         ? completedRun.run.output?.question || "RootAgent 正在等待用户输入。"
-        : stringifyDagOutput(completedRun.run.output),
+        : stringifyBlueprintOutput(completedRun.run.output),
       output: completedRun.run.output,
     };
     onEvent?.({ type: "done", workspace: project, agent: run.agentSnapshot, request, result, agentRun: completedRun.run });
@@ -799,18 +956,32 @@ export class AgentOrchestrator {
 
   async completeGraphRun(workspaceId, runId, input = {}) {
     const payload = resolveGraphRunSchema.parse(input);
+    const { workspace } = await this.getWorkspace(workspaceId);
     const { run } = await this.getAgentRun(workspaceId, runId);
     assertGraphRunMutable(run);
-    return this.completeDagRun(workspaceId, runId, {
+    const rawOutput = payload.output === undefined ? collectBlueprintOutput(run) : payload.output;
+    const output = await this.attachBlueprintDisplayText(workspace, run, rawOutput);
+    return this.completeBlueprintRun(workspaceId, runId, {
       status: "completed",
-      output: payload.output === undefined ? collectDagOutput(run) : payload.output,
+      output,
     });
+  }
+
+  async attachBlueprintDisplayText(workspace, run, output) {
+    if (!output || typeof output !== "object" || Array.isArray(output)) return output;
+    const displayText = await buildBlueprintDisplayText({
+      workspace,
+      run,
+      output,
+      contextStore: this.contextStore,
+    });
+    return displayText ? { ...output, displayText } : output;
   }
 
   async failGraphRun(workspaceId, runId, input = {}) {
     const payload = resolveGraphRunSchema.parse(input);
     assertGraphRunMutable((await this.getAgentRun(workspaceId, runId)).run);
-    return this.completeDagRun(workspaceId, runId, {
+    return this.completeBlueprintRun(workspaceId, runId, {
       status: "failed",
       output: payload.output,
       error: { message: payload.reason || "Root coordinator marked the run as failed." },
@@ -908,8 +1079,8 @@ export class AgentOrchestrator {
   async executeAgentTask(id, input) {
     const prepared = await this.prepareAgentTask(id, input);
     const { payload, project, agent, request, retrieval, rootSession } = prepared;
-    if (agent?.type === "dag") {
-      return this.executeDagAgentTask(prepared);
+    if (agent?.type === "blueprint") {
+      return this.executeBlueprintAgentTask(prepared);
     }
     const agentRun = await this.createAgentRun(project, rootSession, agent, request, {
       input: { task: payload.task, context: payload.context || {} },
@@ -935,6 +1106,7 @@ export class AgentOrchestrator {
         rootSession,
         runId: request.runId,
         runtimeOptions: request.runtimeOptions,
+        attachments: request.attachments,
       });
       await this.persistRuntimeSession(project.id, payload.sessionId, result.runtimeSession, agent?.id, result.runId);
       const completedRun = await this.completeAgentRun(project.id, agentRun.id, {
@@ -958,8 +1130,8 @@ export class AgentOrchestrator {
   async streamAgentTask(id, input, onEvent) {
     const prepared = await this.prepareAgentTask(id, input);
     const { payload, project, agent, request, retrieval, rootSession } = prepared;
-    if (agent?.type === "dag") {
-      return this.executeDagAgentTask(prepared, onEvent);
+    if (agent?.type === "blueprint") {
+      return this.executeBlueprintAgentTask(prepared, onEvent);
     }
     const agentRun = await this.createAgentRun(project, rootSession, agent, request, {
       input: { task: payload.task, context: payload.context || {} },
@@ -1039,6 +1211,7 @@ export class AgentOrchestrator {
             rootSession,
             runId: request.runId,
             runtimeOptions: request.runtimeOptions,
+            attachments: request.attachments,
             onEvent: tracedEvent,
           })
         : await runtime.execute({
@@ -1048,6 +1221,7 @@ export class AgentOrchestrator {
             rootSession,
             runId: request.runId,
             runtimeOptions: request.runtimeOptions,
+            attachments: request.attachments,
           });
 
       await this.persistRuntimeSession(project.id, payload.sessionId, result.runtimeSession, agent?.id, result.runId);
@@ -1056,7 +1230,7 @@ export class AgentOrchestrator {
         output: result,
         nodeOutput: result,
         runtimeSession: result.runtimeSession,
-        trace: result.events || [],
+        trace: [],
       });
       onEvent?.({ type: "done", workspace: project, agent, request, retrieval, result, agentRun: completedRun.run });
       return { workspace: project, agent, request, retrieval, result, agentRun: completedRun.run };
@@ -1069,7 +1243,7 @@ export class AgentOrchestrator {
     }
   }
 
-  async executeDagAgentTask(prepared, onEvent) {
+  async executeBlueprintAgentTask(prepared, onEvent) {
     const { payload, project, agent, request, retrieval, rootSession } = prepared;
     if (rootSession?.id) {
       const waitingRun = (await this.listAgentRuns(project.id, { rootSessionId: rootSession.id })).runs
@@ -1079,16 +1253,16 @@ export class AgentOrchestrator {
       }
     }
     const agentRun = await this.createAgentRun(project, rootSession, agent, request, {
-      input: { task: payload.task, context: payload.context || {} },
+      input: await this.prepareBlueprintRunInput(project, payload, rootSession, request.runId),
       retrieval,
     });
     onEvent?.({ type: "prepared", workspace: project, agent, request, retrieval, agentRun });
 
     if (payload.dryRun) {
-      const completedRun = await this.completeDagDryRun(project.id, agentRun.id, request);
+      const completedRun = await this.completeBlueprintDryRun(project.id, agentRun.id, request);
       const result = {
         dryRun: true,
-        text: `已生成 DAG 运行图：${Object.keys(completedRun.run.nodeRuns || {}).length} 个节点。`,
+        text: `已生成蓝图运行图：${Object.keys(completedRun.run.nodeRuns || {}).length} 个节点。`,
       };
       onEvent?.({ type: "done", workspace: project, agent, request, retrieval, result, agentRun: completedRun.run });
       return { workspace: project, agent, request, retrieval, result, dryRun: true, agentRun: completedRun.run };
@@ -1101,14 +1275,14 @@ export class AgentOrchestrator {
         runId: agentRun.id,
         text: completedRun.run.status === "waiting_user"
           ? completedRun.run.output?.question || "RootAgent 正在等待用户输入。"
-          : stringifyDagOutput(completedRun.run.output),
+          : stringifyBlueprintOutput(completedRun.run.output),
         output: completedRun.run.output,
       };
       onEvent?.({ type: "done", workspace: project, agent, request, retrieval, result, agentRun: completedRun.run });
       return { workspace: project, agent, request, retrieval, result, agentRun: completedRun.run };
     } catch (error) {
       const status = error.status === 499 || error.details?.cancelled ? "cancelled" : "failed";
-      await this.completeDagRun(project.id, agentRun.id, {
+      await this.completeBlueprintRun(project.id, agentRun.id, {
         status,
         error: serializeError(error),
       }).catch(() => {});
@@ -1138,13 +1312,15 @@ export class AgentOrchestrator {
     const baseRuntimeOptions = project.hippoMcpEnabled
       ? withHippoSystemToolRuntimeOptions(buildRuntimeOptions(payload))
       : buildRuntimeOptions(payload);
-    const runtimeOptions = agent?.type === "dag"
+    const runtimeOptions = agent?.type === "blueprint"
       ? baseRuntimeOptions
       : withRagToolRuntimeOptions(baseRuntimeOptions, project.id, rag);
+    const attachments = await resolveWorkspaceAttachments(project, payload.attachments);
     const message = buildAgentMessage(project, agent, payload.task, payload.context, {
       runtimeId: agent?.runtimeId || this.settings.defaultRuntimeId || config.defaultRuntimeId,
       rag,
       runtimeOptions,
+      attachments,
     });
     const request = {
       runtimeId: agent?.runtimeId || this.settings.defaultRuntimeId || config.defaultRuntimeId,
@@ -1154,8 +1330,50 @@ export class AgentOrchestrator {
       message,
       sessionId: payload.sessionId,
       runtimeOptions,
+      attachments,
     };
     return { payload, project, agent, request, retrieval, rootSession };
+  }
+
+  async prepareBlueprintRunInput(project, payload, rootSession, currentRunId) {
+    if (!rootSession?.id) return { task: payload.task, context: payload.context || {}, conversationContext: [] };
+    const messages = buildConversationHistory(rootSession, currentRunId);
+    const conversationContext = [];
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index];
+      const identity = [message.runId, message.createdAt, message.role, index, message.text].filter(Boolean).join("\n");
+      const contextId = `message-${createHash("sha256").update(identity).digest("hex").slice(0, 24)}`;
+      const title = `${message.role === "user" ? "用户消息" : "助手消息"}${message.createdAt ? ` · ${message.createdAt}` : ""}`;
+      const summary = summarizeContextText(message.text);
+      const written = await this.contextStore.write({
+        workspacePath: project.localWorkspacePath,
+        sessionId: rootSession.id,
+        contextId,
+        title,
+        summary,
+        content: formatConversationContextContent(message),
+        contentType: "text/markdown",
+        tags: ["conversation", message.role],
+        source: {
+          role: "conversation",
+          runId: message.runId || "conversation",
+          nodeId: `message-${message.role}`,
+        },
+      });
+      conversationContext.push({
+        ref: written.ref,
+        title,
+        summary,
+        role: message.role,
+        createdAt: message.createdAt,
+        attachments: message.attachments,
+      });
+    }
+    return {
+      task: payload.task,
+      context: payload.context || {},
+      conversationContext,
+    };
   }
 
   async ensureExecutionConversation(workspaceId, sessionId, payload = {}) {
@@ -1182,7 +1400,7 @@ export class AgentOrchestrator {
     return this.runtimeRegistry.resolveRequest(runId, requestId, result);
   }
 
-  async steerAgentRun(workspaceId, runId, input) {
+  async steerAgentRun(workspaceId, runId, input, attachments = []) {
     const { run } = await this.getAgentRun(workspaceId, runId);
     const runtimeRunId = run.rootCoordinator?.status === "running"
       ? run.rootCoordinator.runtimeRunId
@@ -1193,7 +1411,10 @@ export class AgentOrchestrator {
       throw new AgentOrchestratorError("This run has no active Codex turn to steer.", 409);
     }
     return {
-      ...(await this.runtimeRegistry.steerRun(runtimeRunId, input)),
+      ...(await this.runtimeRegistry.steerRun(runtimeRunId, input, await resolveWorkspaceAttachments(
+        (await this.getWorkspace(workspaceId)).workspace,
+        attachments
+      ))),
       agentRunId: runId,
     };
   }
@@ -1265,7 +1486,7 @@ export class AgentOrchestrator {
         error: undefined,
         request,
         nodeRuns,
-        rootCoordinator: agentSnapshot.type === "dag" ? {
+        rootCoordinator: agentSnapshot.type === "blueprint" ? {
           prototypeNodeId: agentSnapshot.rootNodeId,
           status: "pending",
           decisionCount: 0,
@@ -1290,6 +1511,7 @@ export class AgentOrchestrator {
         if (conversationIndex !== -1) {
           store.conversations[conversationIndex] = normalizeConversation({
             ...store.conversations[conversationIndex],
+            activeAgentId: agent?.id || store.conversations[conversationIndex].activeAgentId || "",
             runIds: dedupe([...(store.conversations[conversationIndex].runIds || []), run.id]),
             updatedAt: now,
           });
@@ -1360,7 +1582,7 @@ export class AgentOrchestrator {
     });
   }
 
-  async completeDagDryRun(workspaceId, runId, request) {
+  async completeBlueprintDryRun(workspaceId, runId, request) {
     return this.updateAgentRun(workspaceId, runId, (run, now) => {
       run.status = "completed";
       run.output = {
@@ -1380,14 +1602,27 @@ export class AgentOrchestrator {
   }
 
   async coordinateGraphRun(project, agent, request, runId, onEvent) {
+    const active = this.graphRunExecutions.get(runId);
+    if (active) return active;
+    const execution = this.runGraphCoordinator(project, agent, request, runId, onEvent)
+      .finally(() => {
+        if (this.graphRunExecutions.get(runId) === execution) this.graphRunExecutions.delete(runId);
+      });
+    this.graphRunExecutions.set(runId, execution);
+    return execution;
+  }
+
+  async runGraphCoordinator(project, agent, request, runId, onEvent) {
     const maxDecisions = Math.max(1, Number(agent.executionPolicy?.maxDecisions || 50));
-    while (true) {
+    this.graphRunEventHandlers.set(runId, onEvent);
+    try {
+      while (true) {
       const { run } = await this.getAgentRun(project.id, runId);
       if (["completed", "failed", "cancelled", "waiting_user", "waiting_approval"].includes(run.status)) {
         return { run };
       }
       if ((run.rootCoordinator?.decisionCount || 0) >= maxDecisions) {
-        return this.completeDagRun(project.id, runId, {
+        return this.completeBlueprintRun(project.id, runId, {
           status: "failed",
           error: { message: `Root coordinator exceeded the ${maxDecisions} decision limit.` },
         });
@@ -1398,21 +1633,26 @@ export class AgentOrchestrator {
       const runtimeId = rootNode.runtimeId || run.agentSnapshot.runtimeId || request.runtimeId;
       const runtime = this.runtimeRegistry.getRuntime(runtimeId);
       const rootSession = await this.getRootRuntimeSession(project.id, run);
+      const shouldForkRootSession = !run.rootCoordinator?.runtimeSession?.sessionId
+        && Boolean(rootSession?.runtimeSessions?.codex?.sessionId);
       const coordinatorRunId = `${runId}:root:${(run.rootCoordinator?.decisionCount || 0) + 1}`;
       const runtimeApprovalPolicy = resolveNodeRuntimeApprovalPolicy(
         rootNode.runtimeApprovalPolicy,
         request.runtimeOptions?.runtimeApprovalPolicy
       );
-      const coordinatorRuntimeOptions = withRagToolRuntimeOptions({
+      const coordinatorRuntimeOptions = withGraphToolRuntimeOptions(withContextToolRuntimeOptions(withRagToolRuntimeOptions({
         ...request.runtimeOptions,
         runtimeApprovalPolicy,
-      }, project.id, rootNode.rag);
-      const prompt = buildRootCoordinatorPrompt(project, run, rootNode, {
-        nativeGraphTools: runtimeId === "codex" && project.hippoMcpEnabled,
-      });
+      }, project.id, rootNode.rag), {
+        workspaceId: project.id,
+        sessionId: run.rootSessionId,
+        runId,
+        role: "root",
+      }), { workspaceId: project.id, runId });
+      const prompt = buildRootCoordinatorPrompt(project, run, rootNode);
       const rootAgent = buildRootCoordinatorAgent(run.agentSnapshot, rootNode);
 
-      await this.updateAgentRun(project.id, runId, (current, now) => {
+      const started = await this.updateAgentRun(project.id, runId, (current, now) => {
         current.status = "coordinating";
         current.rootCoordinator.status = "running";
         current.rootCoordinator.runtimeRunId = coordinatorRunId;
@@ -1423,7 +1663,6 @@ export class AgentOrchestrator {
       onEvent?.({ type: "root_coordinator_started", runId, coordinatorRunId });
 
       let result;
-      let decision;
       try {
         const executeRuntime = runtime.stream?.bind(runtime) || runtime.execute.bind(runtime);
         result = await executeRuntime({
@@ -1431,12 +1670,14 @@ export class AgentOrchestrator {
           agent: rootAgent,
           prompt,
           rootSession,
+          forkSession: shouldForkRootSession,
           runId: coordinatorRunId,
           runtimeOptions: {
             ...coordinatorRuntimeOptions,
             ignoreUserConfig: true,
           },
-          onEvent: (event) => this.handleDagRuntimeEvent({
+          attachments: run.rootCoordinator.decisionCount ? [] : request.attachments,
+          onEvent: (event) => this.handleBlueprintRuntimeEvent({
             project,
             runId,
             runtimeRunId: coordinatorRunId,
@@ -1446,87 +1687,60 @@ export class AgentOrchestrator {
           }),
         });
       } catch (error) {
-        return this.completeDagRun(project.id, runId, {
+        return this.completeBlueprintRun(project.id, runId, {
           status: "failed",
           error: serializeError(error),
         });
       }
 
-      await this.persistRuntimeSession(project.id, run.rootSessionId, result.runtimeSession, run.agentId, runId);
-      const afterNativeTools = (await this.getAgentRun(project.id, runId)).run;
-      if (["completed", "failed", "cancelled", "waiting_user", "waiting_approval"].includes(afterNativeTools.status)) {
-        const updated = await this.updateAgentRun(project.id, runId, (current, now) => {
-          current.rootCoordinator.decisionCount += 1;
-          current.rootCoordinator.runtimeSession = result.runtimeSession;
-          current.rootCoordinator.runtimeRunId = "";
-          current.rootCoordinator.lastDecision = { action: "mcp_tool_managed" };
-          current.rootCoordinator.updatedAt = now;
-          for (const event of result.events || []) {
-            current.trace.push(createTrace(event.type || "root_runtime_event", event, now));
-          }
-          current.trace.push(createTrace("root_coordinator_tool_managed", { runtimeSession: result.runtimeSession }, now));
-          return current;
-        });
-        return updated;
-      }
-
-      decision = parseRootCoordinatorDecision(result.text);
-      await this.updateAgentRun(project.id, runId, (current, now) => {
-        current.status = "coordinating";
-        current.rootCoordinator.status = "ready";
+      const afterTools = (await this.getAgentRun(project.id, runId)).run;
+      const graphMutation = afterTools.trace.slice(started.run.trace.length).some((trace) => [
+          "graph_node_dispatched",
+          "graph_run_user_requested",
+        ].includes(trace.type));
+      const graphTerminal = ["completed", "failed", "cancelled", "waiting_user"].includes(afterTools.status)
+        || (afterTools.status === "waiting_approval"
+          && Object.values(afterTools.nodeRuns || {}).some((nodeRun) => nodeRun.status === "waiting_approval"));
+      const graphAdvanced = graphTerminal || graphMutation;
+      const updated = await this.updateAgentRun(project.id, runId, (current, now) => {
+        if (!graphTerminal) current.status = "coordinating";
+        current.rootCoordinator.status = graphTerminal ? current.rootCoordinator.status : "ready";
         current.rootCoordinator.decisionCount += 1;
         current.rootCoordinator.runtimeSession = result.runtimeSession;
         current.rootCoordinator.runtimeRunId = "";
-        current.rootCoordinator.lastDecision = decision;
+        current.rootCoordinator.noProgressCount = graphAdvanced ? 0 : current.rootCoordinator.noProgressCount + 1;
+        current.rootCoordinator.lastDecision = {
+          action: graphAdvanced ? "graph_tool_managed" : "no_graph_tool_invoked",
+          ...(graphAdvanced || !result.text ? {} : { response: result.text.slice(0, 1000) }),
+        };
         current.rootCoordinator.updatedAt = now;
-        for (const event of result.events || []) {
-          current.trace.push(createTrace(event.type || "root_runtime_event", event, now));
-        }
-        current.trace.push(createTrace("root_coordinator_decision", { decision, runtimeSession: result.runtimeSession }, now));
+        current.trace.push(createTrace(graphAdvanced ? "root_coordinator_tool_managed" : "root_coordinator_no_progress", {
+          runtimeSession: result.runtimeSession,
+        }, now));
         return current;
       });
-      onEvent?.({ type: "root_coordinator_decision", runId, decision });
-
-      if (decision.action === "dispatch" || decision.action === "retry") {
-        await this.dispatchGraphNode(project.id, runId, {
-          nodeId: decision.nodeId,
-          input: decision.input,
-          parentNodeRunId: decision.parentNodeRunId,
-          reason: decision.reason,
-        }, onEvent);
-        continue;
-      }
-      if (decision.action === "dispatch_many") {
-        const nodes = Array.isArray(decision.nodes) ? decision.nodes : [];
-        if (!nodes.length) throw new AgentOrchestratorError("dispatch_many requires at least one node.", 400);
-        await Promise.all(nodes.map((item) => this.dispatchGraphNode(project.id, runId, {
-          nodeId: item.nodeId,
-          input: item.input,
-          parentNodeRunId: item.parentNodeRunId,
-          reason: item.reason || decision.reason,
-        }, onEvent)));
-        continue;
-      }
-      if (decision.action === "request_user") {
-        return this.requestGraphRunUser(project.id, runId, {
-          question: decision.question,
-          reason: decision.reason,
+      onEvent?.({ type: graphAdvanced ? "root_coordinator_tool_managed" : "root_coordinator_no_progress", runId });
+      if (graphTerminal) return updated;
+      if (updated.run.rootCoordinator.noProgressCount >= 2) {
+        return this.completeBlueprintRun(project.id, runId, {
+          status: "failed",
+          error: { message: "Root coordinator finished twice without invoking a graph scheduling tool." },
         });
       }
-      if (decision.action === "complete") {
-        return this.completeGraphRun(project.id, runId, { output: decision.output, reason: decision.reason });
       }
-      if (decision.action === "fail") {
-        return this.failGraphRun(project.id, runId, { output: decision.output, reason: decision.reason });
-      }
-      return this.completeDagRun(project.id, runId, {
-        status: "failed",
-        error: { message: `Unsupported Root coordinator action: ${decision.action}` },
-      });
+    } finally {
+      if (this.graphRunEventHandlers.get(runId) === onEvent) this.graphRunEventHandlers.delete(runId);
     }
   }
 
   async getRootRuntimeSession(workspaceId, run) {
+    const runtimeSession = run.rootCoordinator?.runtimeSession;
+    if (runtimeSession?.sessionId) {
+      return {
+        id: run.rootSessionId || `root:${run.id}`,
+        runtimeSessions: { [runtimeSession.provider || "codex"]: runtimeSession },
+      };
+    }
     if (run.rootSessionId) {
       try {
         return (await this.getConversation(workspaceId, run.rootSessionId)).conversation;
@@ -1534,14 +1748,10 @@ export class AgentOrchestrator {
         if (error.status !== 404) throw error;
       }
     }
-    const runtimeSession = run.rootCoordinator?.runtimeSession;
-    return runtimeSession ? {
-      id: run.rootSessionId || `root:${run.id}`,
-      runtimeSessions: { [runtimeSession.provider || "codex"]: runtimeSession },
-    } : undefined;
+    return undefined;
   }
 
-  async handleDagRuntimeEvent({ project, runId, runtimeRunId, nodeRunId = "", coordinator = false, event, onEvent }) {
+  async handleBlueprintRuntimeEvent({ project, runId, runtimeRunId, nodeRunId = "", coordinator = false, event, onEvent }) {
     const runtimeEvent = {
       ...event,
       runId: event.runId || runtimeRunId,
@@ -1551,16 +1761,17 @@ export class AgentOrchestrator {
       nodeRunId: nodeRunId || undefined,
     };
     const publishedEvent = event.type === "stdout" || event.type === "stderr"
-      ? { ...runtimeEvent, type: "dag_runtime_output", stream: event.type }
+      ? { ...runtimeEvent, type: "blueprint_runtime_output", stream: event.type }
       : runtimeEvent;
-    if (["runtime_request", "runtime_request_resolved"].includes(event.type)) {
+    if (shouldPersistBlueprintRuntimeEvent(event)) {
+      const persistedEvent = compactRuntimeEvent(publishedEvent);
       const waiting = event.type === "runtime_request";
       await this.updateAgentRun(project.id, runId, (run, now) => {
-        if (coordinator) {
+        if (coordinator && ["runtime_request", "runtime_request_resolved"].includes(event.type)) {
           run.status = waiting ? "waiting_approval" : "coordinating";
           run.rootCoordinator.status = waiting ? "waiting_approval" : "running";
           run.rootCoordinator.updatedAt = now;
-        } else {
+        } else if (!coordinator && ["runtime_request", "runtime_request_resolved"].includes(event.type)) {
           const nodeRun = run.nodeRuns[nodeRunId];
           run.status = waiting ? "waiting_approval" : "running";
           if (nodeRun) {
@@ -1568,7 +1779,18 @@ export class AgentOrchestrator {
             nodeRun.updatedAt = now;
           }
         }
-        const trace = createTrace(event.type, publishedEvent, now);
+        if (event.eventType === "runtime_session_started" && event.sessionId) {
+          const runtimeSession = {
+            provider: event.runtimeId || "codex",
+            sessionId: event.sessionId,
+            workspacePath: project.localWorkspacePath || "",
+            status: "active",
+            updatedAt: now,
+          };
+          if (coordinator) run.rootCoordinator.runtimeSession = runtimeSession;
+          else if (nodeRunId && run.nodeRuns[nodeRunId]) run.nodeRuns[nodeRunId].runtimeSession = runtimeSession;
+        }
+        const trace = createTrace(event.type, persistedEvent, now);
         run.trace.push(trace);
         if (nodeRunId && run.nodeRuns[nodeRunId]) run.nodeRuns[nodeRunId].trace.push(trace);
         return run;
@@ -1577,24 +1799,34 @@ export class AgentOrchestrator {
     onEvent?.(publishedEvent);
   }
 
-  async executeDagNode(project, agent, request, runId, nodeRunId, onEvent) {
+  async executeBlueprintNode(project, agent, request, runId, nodeRunId, onEvent) {
     const { run, nodeRun } = await this.getNodeRun(project.id, runId, nodeRunId);
     const nodeDef = run.agentSnapshot.nodes.find((node) => node.id === nodeRun.nodeId);
-    if (!nodeDef) throw new AgentOrchestratorError(`DAG node ${nodeRun.nodeId} was not found in snapshot.`, 500);
+    if (!nodeDef) throw new AgentOrchestratorError(`Blueprint node ${nodeRun.nodeId} was not found in snapshot.`, 500);
     const nodeRuntimeId = nodeDef.runtimeId || run.agentSnapshot.runtimeId || request.runtimeId;
     const runtime = this.runtimeRegistry.getRuntime(nodeRuntimeId);
     const runtimeRunId = `${nodeRun.id}:${randomUUID()}`;
     const nodeAgent = buildNodeAgent(run.agentSnapshot, nodeDef, agent);
     const nodeInput = buildNodeInput(run, nodeRun, request);
-    const prompt = buildDagNodePrompt(project, run, nodeDef, nodeInput);
+    const artifactBaseline = await snapshotExpectedWorkspaceArtifacts(
+      project.localWorkspacePath,
+      nodeInput.expectedArtifacts
+    );
+    const prompt = buildBlueprintNodePrompt(project, run, nodeDef, nodeInput);
     const runtimeApprovalPolicy = resolveNodeRuntimeApprovalPolicy(
       nodeDef.runtimeApprovalPolicy,
       request.runtimeOptions?.runtimeApprovalPolicy
     );
-    const nodeRuntimeOptions = withRagToolRuntimeOptions({
+    const nodeRuntimeOptions = withContextToolRuntimeOptions(withRagToolRuntimeOptions({
       ...request.runtimeOptions,
       runtimeApprovalPolicy,
-    }, project.id, nodeDef.rag);
+    }, project.id, nodeDef.rag), {
+      workspaceId: project.id,
+      sessionId: run.rootSessionId,
+      runId,
+      nodeRunId,
+      role: "node",
+    });
 
     await this.updateAgentRun(project.id, runId, (current, now) => {
       const currentNode = current.nodeRuns[nodeRunId];
@@ -1608,7 +1840,36 @@ export class AgentOrchestrator {
       currentNode.trace.push(trace);
       return current;
     });
-    onEvent?.({ type: "dag_node_started", runId, nodeRunId, nodeId: nodeRun.nodeId, runtimeRunId });
+    onEvent?.({ type: "blueprint_node_started", runId, nodeRunId, nodeId: nodeRun.nodeId, runtimeRunId });
+
+    let liveArtifacts = [];
+    let completedFromArtifacts = false;
+    const artifactMonitor = monitorExpectedWorkspaceArtifacts({
+      workspacePath: project.localWorkspacePath,
+      expectedArtifacts: nodeInput.expectedArtifacts,
+      baseline: artifactBaseline,
+      onUpdate: async (artifacts, stableAndComplete) => {
+        liveArtifacts = await this.persistDiscoveredNodeArtifacts({
+          project,
+          run,
+          nodeRun,
+          nodeDef,
+          artifacts,
+        });
+        onEvent?.({
+          type: "blueprint_node_artifacts_updated",
+          runId,
+          nodeRunId,
+          nodeId: nodeRun.nodeId,
+          artifacts: liveArtifacts,
+          complete: stableAndComplete,
+        });
+        if (stableAndComplete) {
+          completedFromArtifacts = true;
+          this.cancelRuntimeRun(runtimeRunId);
+        }
+      },
+    });
 
     try {
       const executeRuntime = runtime.stream?.bind(runtime) || runtime.execute.bind(runtime);
@@ -1622,7 +1883,8 @@ export class AgentOrchestrator {
         runtimeOptions: {
           ...nodeRuntimeOptions,
         },
-        onEvent: (event) => this.handleDagRuntimeEvent({
+        attachments: request.attachments,
+        onEvent: (event) => this.handleBlueprintRuntimeEvent({
           project,
           runId,
           runtimeRunId,
@@ -1631,54 +1893,121 @@ export class AgentOrchestrator {
           onEvent,
         }),
       });
+      await artifactMonitor.stop();
+      const discoveredArtifacts = await this.discoverAndPersistNodeArtifacts({
+        project,
+        run,
+        nodeRun,
+        nodeDef,
+        expectedArtifacts: nodeInput.expectedArtifacts,
+        baseline: artifactBaseline,
+      });
+      const persistedResult = await this.externalizeLongNodeResult(project, run, nodeRun, nodeDef, {
+        ...result,
+        events: (result.events || []).map(compactRuntimeEvent),
+        artifacts: mergeArtifacts(result.artifacts, mergeArtifacts(liveArtifacts, discoveredArtifacts)),
+      });
       const resultApprovalPolicy = normalizeResultApprovalPolicy(nodeDef.resultApprovalPolicy);
       const updated = await this.updateAgentRun(project.id, runId, (current, now) => {
         const currentNode = current.nodeRuns[nodeRunId];
         currentNode.status = resultApprovalPolicy === "manual" ? "waiting_approval" : "completed";
-        currentNode.output = result;
-        currentNode.runtimeSession = result.runtimeSession;
+        currentNode.output = persistedResult;
+        currentNode.runtimeSession = persistedResult.runtimeSession;
         currentNode.runtimeRunId = "";
         currentNode.updatedAt = now;
         const trace = createTrace(resultApprovalPolicy === "manual" ? "node_run_approval_waiting" : "node_run_completed", {
           nodeRunId,
           nodeId: currentNode.nodeId,
           runtimeRunId,
-          runtimeSession: result.runtimeSession,
+          runtimeSession: persistedResult.runtimeSession,
           resultApprovalPolicy,
           runtimeApprovalPolicy,
         }, now);
         current.trace.push(trace);
         currentNode.trace.push(trace);
-        for (const event of result.events || []) {
-          const eventTrace = createTrace(event.type || "runtime_event", event, now);
-          current.trace.push(eventTrace);
-          currentNode.trace.push(eventTrace);
-        }
         current.status = graphRunStatusAfterNodeUpdate(current);
         return current;
       });
       onEvent?.({
-        type: resultApprovalPolicy === "manual" ? "dag_node_waiting" : "dag_node_completed",
+        type: resultApprovalPolicy === "manual" ? "blueprint_node_waiting" : "blueprint_node_completed",
         runId,
         nodeRunId,
         nodeId: nodeRun.nodeId,
-        result,
+        result: persistedResult,
         prompt: resultApprovalPolicy === "manual" ? `${nodeDef.name || nodeRun.nodeId} 等待结果审核` : undefined,
       });
       return updated;
     } catch (error) {
+      await artifactMonitor.stop();
+      const discoveredArtifacts = await this.discoverAndPersistNodeArtifacts({
+        project,
+        run,
+        nodeRun,
+        nodeDef,
+        expectedArtifacts: nodeInput.expectedArtifacts,
+        baseline: artifactBaseline,
+      });
+      const recoveredArtifacts = mergeArtifacts(liveArtifacts, discoveredArtifacts);
+      if (
+        (completedFromArtifacts || isRuntimeTimeout(error))
+        && expectedArtifactsSatisfied(nodeInput.expectedArtifacts, recoveredArtifacts)
+      ) {
+        const resultApprovalPolicy = normalizeResultApprovalPolicy(nodeDef.resultApprovalPolicy);
+        const recoveredResult = {
+          text: completedFromArtifacts
+            ? "本节点的预期产物已稳定写入工作区，Hippo 已结束后续冗余处理，请由 Root 协调者继续验收。"
+            : "Codex 运行超时，但 Hippo 已恢复本节点生成的预期产物，请由 Root 协调者继续验收。",
+          artifacts: recoveredArtifacts,
+          completedFromArtifacts,
+          recoveredAfterTimeout: !completedFromArtifacts,
+          warning: completedFromArtifacts ? undefined : serializeError(error),
+        };
+        const updated = await this.updateAgentRun(project.id, runId, (current, now) => {
+          const currentNode = current.nodeRuns[nodeRunId];
+          currentNode.status = resultApprovalPolicy === "manual" ? "waiting_approval" : "completed";
+          currentNode.output = recoveredResult;
+          currentNode.error = undefined;
+          currentNode.runtimeRunId = "";
+          currentNode.updatedAt = now;
+          current.status = graphRunStatusAfterNodeUpdate(current);
+          const trace = createTrace("node_run_artifacts_recovered", {
+            nodeRunId,
+            nodeId: currentNode.nodeId,
+            artifactCount: recoveredArtifacts.length,
+            completionSource: completedFromArtifacts ? "artifacts" : "timeout_recovery",
+            timeout: completedFromArtifacts ? undefined : serializeError(error),
+            resultApprovalPolicy,
+          }, now);
+          current.trace.push(trace);
+          currentNode.trace.push(trace);
+          return current;
+        });
+        onEvent?.({
+          type: resultApprovalPolicy === "manual" ? "blueprint_node_waiting" : "blueprint_node_completed",
+          runId,
+          nodeRunId,
+          nodeId: nodeRun.nodeId,
+          result: recoveredResult,
+          completedFromArtifacts,
+          recoveredAfterTimeout: !completedFromArtifacts,
+        });
+        return updated;
+      }
       const status = error.status === 499 || error.details?.cancelled ? "cancelled" : "failed";
       await this.updateAgentRun(project.id, runId, (current, now) => {
         const currentNode = current.nodeRuns[nodeRunId];
         currentNode.status = status;
         currentNode.error = serializeError(error);
+        currentNode.runtimeRunId = "";
         currentNode.updatedAt = now;
         current.status = graphRunStatusAfterNodeUpdate(current);
-        current.trace.push(createTrace(`node_run_${status}`, {
+        const trace = createTrace(`node_run_${status}`, {
           nodeRunId,
           nodeId: currentNode.nodeId,
           error: currentNode.error,
-        }, now));
+        }, now);
+        current.trace.push(trace);
+        currentNode.trace.push(trace);
         return current;
       });
       onEvent?.({ type: status, runId, nodeRunId, nodeId: nodeRun.nodeId, error: error.message });
@@ -1686,9 +2015,83 @@ export class AgentOrchestrator {
     }
   }
 
-  async completeDagRun(workspaceId, runId, { status, output, error } = {}) {
-    return this.updateAgentRun(workspaceId, runId, (run, now) => {
+  async discoverAndPersistNodeArtifacts({ project, run, nodeRun, nodeDef, expectedArtifacts, baseline }) {
+    const artifacts = await discoverWorkspaceArtifacts(
+      project.localWorkspacePath,
+      expectedArtifacts,
+      baseline
+    );
+    return this.persistDiscoveredNodeArtifacts({ project, run, nodeRun, nodeDef, artifacts });
+  }
+
+  async persistDiscoveredNodeArtifacts({ project, run, nodeRun, nodeDef, artifacts }) {
+    if (!artifacts.length) return [];
+    this.stateStore.repository.saveArtifacts(artifacts.map((artifact) => ({
+      workspaceId: project.id,
+      conversationId: run.rootSessionId || "",
+      runId: run.id,
+      nodeRunId: nodeRun.id,
+      relativePath: artifact.relativePath,
+      artifactType: artifact.type,
+      mimeType: artifact.mimeType,
+      contentHash: artifact.contentHash,
+      sizeBytes: artifact.size,
+      metadata: {
+        source: "runtime",
+        nodeId: nodeDef.id,
+        attempt: nodeRun.attempt,
+      },
+    })));
+    return artifacts;
+  }
+
+  async externalizeLongNodeResult(project, run, nodeRun, nodeDef, result) {
+    const text = typeof result?.text === "string" ? result.text : "";
+    if (!run.rootSessionId || text.length <= 12000 || extractContextRefs(text).length) return result;
+    const summary = summarizeContextText(text);
+    const contextId = `node-output-${createHash("sha256").update(nodeRun.id).digest("hex").slice(0, 24)}`;
+    const written = await this.contextStore.write({
+      workspacePath: project.localWorkspacePath,
+      sessionId: run.rootSessionId,
+      contextId,
+      title: `${nodeDef.name || nodeRun.nodeId} 输出`,
+      summary,
+      content: text,
+      contentType: "text/markdown",
+      tags: ["node-output", nodeRun.nodeId],
+      source: { role: "node", runId: run.id, nodeId: nodeRun.id, agentId: run.agentId },
+    });
+    return {
+      ...result,
+      contextRefs: [{ ref: written.ref, title: written.title, summary, reason: "节点完整输出" }],
+      contextSummary: summary,
+    };
+  }
+
+  async completeBlueprintRun(workspaceId, runId, { status, output, error } = {}) {
+    const runtimeRunIds = [];
+    const updated = await this.updateAgentRun(workspaceId, runId, (run, now) => {
       assertGraphRunMutable(run);
+      const activeWorkers = Object.values(run.nodeRuns || {}).filter((nodeRun) =>
+        (nodeRun.prototypeNodeId || nodeRun.nodeId) !== run.agentSnapshot.rootNodeId
+        && ["pending", "ready", "running", "waiting_approval"].includes(nodeRun.status)
+      );
+      if (status === "completed" && activeWorkers.length) {
+        throw new AgentOrchestratorError(
+          `Run ${runId} cannot complete while ${activeWorkers.length} worker node(s) are active.`,
+          409,
+          { activeNodeRunIds: activeWorkers.map((nodeRun) => nodeRun.id) }
+        );
+      }
+      if (["failed", "cancelled"].includes(status)) {
+        for (const nodeRun of activeWorkers) {
+          if (nodeRun.runtimeRunId) runtimeRunIds.push(nodeRun.runtimeRunId);
+          nodeRun.status = status === "cancelled" ? "cancelled" : "failed";
+          nodeRun.runtimeRunId = "";
+          nodeRun.error = error || nodeRun.error;
+          nodeRun.updatedAt = now;
+        }
+      }
       run.status = status;
       run.output = output || run.output;
       run.error = error;
@@ -1696,9 +2099,11 @@ export class AgentOrchestrator {
         run.rootCoordinator.status = status;
         run.rootCoordinator.updatedAt = now;
       }
-      run.trace.push(createTrace(`dag_run_${status}`, { runId, status, error }, now));
+      run.trace.push(createTrace(`blueprint_run_${status}`, { runId, status, error }, now));
       return run;
     });
+    for (const runtimeRunId of runtimeRunIds) this.cancelRuntimeRun(runtimeRunId);
+    return updated;
   }
 
   async persistRuntimeSession(workspaceId, conversationId, runtimeSession, agentId = "", runId = "") {
@@ -1828,27 +2233,11 @@ export class AgentOrchestrator {
   }
 
   async readStore() {
-    try {
-      const content = await fs.readFile(this.storePath, "utf8");
-      const store = JSON.parse(content);
-      return {
-        version: 1,
-        workspaces: normalizeWorkspaces(store.workspaces),
-        agents: normalizeAgents(store.agents),
-        conversations: normalizeConversations(store.conversations),
-        agentRuns: normalizeAgentRuns(store.agentRuns),
-      };
-    } catch (error) {
-      if (error.code === "ENOENT") return { version: 1, workspaces: [], agents: [], conversations: [], agentRuns: [] };
-      throw error;
-    }
+    return normalizeStore(await this.stateStore.read());
   }
 
   async writeStore(store) {
-    await fs.mkdir(path.dirname(this.storePath), { recursive: true });
-    const temporaryPath = `${this.storePath}.${process.pid}.${randomUUID()}.tmp`;
-    await fs.writeFile(temporaryPath, `${JSON.stringify(store, null, 2)}\n`);
-    await fs.rename(temporaryPath, this.storePath);
+    await this.stateStore.write(normalizeStore(store));
   }
 
   async withStoreLock(operation) {
@@ -1870,6 +2259,187 @@ export class AgentOrchestrator {
     if (!workspace) throw new AgentOrchestratorError(`Workspace ${workspaceId} was not found.`, 404);
     return workspace;
   }
+}
+
+function shouldPersistBlueprintRuntimeEvent(event) {
+  if (["runtime_request", "runtime_request_resolved", "stderr"].includes(event.type)) return true;
+  if (event.type !== "runtime_event") return false;
+  return [
+    "runtime_session_started",
+    "turn_started",
+    "turn_completed",
+    "item_started",
+    "item_completed",
+    "error",
+  ].includes(event.eventType);
+}
+
+const ARTIFACT_EXTENSION_TYPES = new Map([
+  [".png", ["image", "image/png"]],
+  [".jpg", ["image", "image/jpeg"]],
+  [".jpeg", ["image", "image/jpeg"]],
+  [".webp", ["image", "image/webp"]],
+  [".gif", ["image", "image/gif"]],
+  [".avif", ["image", "image/avif"]],
+  [".svg", ["image", "image/svg+xml"]],
+]);
+
+const ARTIFACT_SCAN_EXCLUDED_DIRECTORIES = new Set([".git", ".hippo", "node_modules"]);
+
+async function snapshotExpectedWorkspaceArtifacts(workspacePath, expectedArtifacts) {
+  if (!workspacePath || !Array.isArray(expectedArtifacts) || !expectedArtifacts.length) return new Map();
+  return scanWorkspaceArtifacts(workspacePath, expectedArtifacts);
+}
+
+async function discoverWorkspaceArtifacts(workspacePath, expectedArtifacts, baseline = new Map()) {
+  if (!workspacePath || !Array.isArray(expectedArtifacts) || !expectedArtifacts.length) return [];
+  const current = await scanWorkspaceArtifacts(workspacePath, expectedArtifacts);
+  const changed = [];
+  for (const [relativePath, metadata] of current) {
+    const previous = baseline.get(relativePath);
+    if (previous && previous.size === metadata.size && previous.mtimeMs === metadata.mtimeMs) continue;
+    const content = await fs.readFile(metadata.absolutePath);
+    changed.push({
+      type: metadata.type,
+      path: metadata.absolutePath,
+      relativePath,
+      mimeType: metadata.mimeType,
+      size: metadata.size,
+      contentHash: `sha256:${createHash("sha256").update(content).digest("hex")}`,
+    });
+  }
+  return changed.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+}
+
+function monitorExpectedWorkspaceArtifacts({
+  workspacePath,
+  expectedArtifacts,
+  baseline,
+  onUpdate,
+  intervalMs = 1000,
+}) {
+  if (!workspacePath || !Array.isArray(expectedArtifacts) || !expectedArtifacts.length) {
+    return { stop: async () => {} };
+  }
+  let stopped = false;
+  let timer;
+  let lastFingerprint = "";
+  let resolveDone;
+  const done = new Promise((resolve) => { resolveDone = resolve; });
+  const finish = () => {
+    if (stopped) return;
+    stopped = true;
+    clearTimeout(timer);
+    resolveDone();
+  };
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const artifacts = await discoverWorkspaceArtifacts(workspacePath, expectedArtifacts, baseline);
+      const fingerprint = artifacts
+        .map((artifact) => `${artifact.relativePath}:${artifact.size}:${artifact.contentHash}`)
+        .join("|");
+      const stableAndComplete = Boolean(fingerprint)
+        && fingerprint === lastFingerprint
+        && expectedArtifactsSatisfied(expectedArtifacts, artifacts);
+      if (fingerprint && (fingerprint !== lastFingerprint || stableAndComplete)) {
+        await onUpdate?.(artifacts, stableAndComplete);
+      }
+      lastFingerprint = fingerprint;
+      if (stableAndComplete) return finish();
+    } catch {
+      // Artifact discovery is advisory; runtime execution remains authoritative on scan errors.
+    }
+    timer = setTimeout(tick, intervalMs);
+  };
+  timer = setTimeout(tick, intervalMs);
+  return {
+    stop: async () => {
+      finish();
+      await done;
+    },
+  };
+}
+
+async function scanWorkspaceArtifacts(workspacePath, expectedArtifacts) {
+  const root = path.resolve(workspacePath);
+  const expectedTypes = new Set(expectedArtifacts.map((item) => String(item.type || "").toLowerCase()));
+  const includeAnyFile = expectedTypes.has("file") || expectedTypes.has("artifact");
+  const files = new Map();
+  const visit = async (directory) => {
+    let entries;
+    try {
+      entries = await fs.readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if (error.code === "ENOENT") return;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (!ARTIFACT_SCAN_EXCLUDED_DIRECTORIES.has(entry.name)) await visit(path.join(directory, entry.name));
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const absolutePath = path.join(directory, entry.name);
+      const extensionInfo = ARTIFACT_EXTENSION_TYPES.get(path.extname(entry.name).toLowerCase());
+      const type = extensionInfo?.[0] || "file";
+      if (!includeAnyFile && !expectedTypes.has(type)) continue;
+      const stat = await fs.stat(absolutePath);
+      const relativePath = path.relative(root, absolutePath).split(path.sep).join("/");
+      files.set(relativePath, {
+        absolutePath,
+        type,
+        mimeType: extensionInfo?.[1] || "application/octet-stream",
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+      });
+    }
+  };
+  await visit(root);
+  return files;
+}
+
+function expectedArtifactsSatisfied(expectedArtifacts, artifacts) {
+  if (!Array.isArray(expectedArtifacts) || !expectedArtifacts.length) return false;
+  return expectedArtifacts.every((expected) => {
+    const type = String(expected.type || "").toLowerCase();
+    const count = Math.max(1, Number(expected.count) || 1);
+    return artifacts.filter((artifact) => type === "file" || type === "artifact" || artifact.type === type).length >= count;
+  });
+}
+
+function mergeArtifacts(runtimeArtifacts, discoveredArtifacts) {
+  const merged = new Map();
+  for (const artifact of [...(Array.isArray(runtimeArtifacts) ? runtimeArtifacts : []), ...discoveredArtifacts]) {
+    const key = artifact.relativePath || artifact.path || JSON.stringify(artifact);
+    merged.set(key, artifact);
+  }
+  return [...merged.values()];
+}
+
+function isRuntimeTimeout(error) {
+  return error?.status === 504 || /timed?\s*out|timeout/i.test(String(error?.message || ""));
+}
+
+function compactRuntimeEvent(event) {
+  return compactRuntimeValue(event, 0);
+}
+
+function compactRuntimeValue(value, depth) {
+  if (typeof value === "string") {
+    return value.length > 8000 ? `${value.slice(0, 8000)}\n...[truncated ${value.length - 8000} characters]` : value;
+  }
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= 6) return "[truncated nested value]";
+  if (Array.isArray(value)) {
+    const items = value.slice(0, 50).map((item) => compactRuntimeValue(item, depth + 1));
+    if (value.length > 50) items.push(`[truncated ${value.length - 50} items]`);
+    return items;
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    compactRuntimeValue(item, depth + 1),
+  ]));
 }
 
 export class AgentOrchestratorError extends Error {
@@ -1901,6 +2471,7 @@ export function buildAgentMessage(project, agent, task, context = undefined, opt
     options.runtimeOptions?.sandboxMode ? `本轮 Codex sandbox 权限：${options.runtimeOptions.sandboxMode}` : "",
     project.localWorkspacePath ? `本地工作区目录：\n${project.localWorkspacePath}` : "",
     context ? `运行时上下文：\n${JSON.stringify(context, null, 2)}` : "",
+    options.attachments?.length ? `本轮附件（路径均位于当前工作区）：\n${options.attachments.map((item) => `- ${item.kind}: ${item.name}\n  ${item.absolutePath}`).join("\n")}` : "",
     `任务：\n${task}`,
   ];
   return sections.filter(Boolean).join("\n\n");
@@ -1940,6 +2511,73 @@ function normalizeMessages(messages) {
       ? message.metadata
       : undefined,
     createdAt: message.createdAt || new Date().toISOString(),
+    attachments: normalizeStoredAttachments(message.attachments),
+  }));
+}
+
+function normalizeStoredAttachments(attachments) {
+  if (!Array.isArray(attachments)) return [];
+  return attachments.filter((item) => item && typeof item === "object").map((item) => ({
+    id: String(item.id || ""),
+    kind: ["file", "folder", "image"].includes(item.kind) ? item.kind : "file",
+    name: String(item.name || path.posix.basename(String(item.path || "attachment"))),
+    path: String(item.path || ""),
+    mimeType: String(item.mimeType || ""),
+    size: Math.max(0, Number(item.size) || 0),
+    childCount: Math.max(0, Number(item.childCount) || 0),
+  })).filter((item) => item.id && item.path);
+}
+
+async function removeUnreferencedAttachmentBatches(workspace, deletedConversation, remainingConversations) {
+  if (!workspace?.localWorkspacePath || !deletedConversation) return;
+  const deletedBatches = attachmentBatchPaths(deletedConversation.messages);
+  const referencedBatches = new Set(
+    remainingConversations
+      .filter((conversation) => conversation.workspaceId === workspace.id)
+      .flatMap((conversation) => attachmentBatchPaths(conversation.messages))
+  );
+  for (const batchPath of deletedBatches) {
+    if (referencedBatches.has(batchPath)) continue;
+    const absolutePath = path.resolve(workspace.localWorkspacePath, ...batchPath.split("/"));
+    const relative = path.relative(path.resolve(workspace.localWorkspacePath), absolutePath);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
+    await fs.rm(absolutePath, { recursive: true, force: true });
+  }
+}
+
+function attachmentBatchPaths(messages) {
+  const batches = new Set();
+  for (const message of Array.isArray(messages) ? messages : []) {
+    for (const attachment of normalizeStoredAttachments(message.attachments)) {
+      const match = attachment.path.match(/^\.hippo\/attachments\/[^/]+/);
+      if (match) batches.add(match[0]);
+    }
+  }
+  return [...batches];
+}
+
+async function resolveWorkspaceAttachments(project, attachments) {
+  const workspaceRoot = path.resolve(project.localWorkspacePath || "");
+  if (!project.localWorkspacePath || !Array.isArray(attachments)) return [];
+  const realRoot = await fs.realpath(workspaceRoot);
+  return Promise.all(normalizeStoredAttachments(attachments).map(async (item) => {
+    const target = path.resolve(workspaceRoot, item.path);
+    const relative = path.relative(workspaceRoot, target);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      throw new AgentOrchestratorError(`附件路径不在工作区内：${item.path}`, 403);
+    }
+    let absolutePath;
+    try {
+      absolutePath = await fs.realpath(target);
+    } catch (error) {
+      if (error.code === "ENOENT") throw new AgentOrchestratorError(`附件不存在：${item.path}`, 404);
+      throw error;
+    }
+    const realRelative = path.relative(realRoot, absolutePath);
+    if (realRelative.startsWith("..") || path.isAbsolute(realRelative)) {
+      throw new AgentOrchestratorError(`附件路径不在工作区内：${item.path}`, 403);
+    }
+    return { ...item, path: relative.split(path.sep).join("/"), absolutePath };
   }));
 }
 
@@ -1979,12 +2617,40 @@ function withRagToolRuntimeOptions(runtimeOptions, workspaceId, ragValue) {
   };
 }
 
+function withContextToolRuntimeOptions(runtimeOptions, { workspaceId, sessionId, runId, nodeRunId = "", role = "root" } = {}) {
+  if (!workspaceId || !sessionId || !runId) return runtimeOptions;
+  const query = new URLSearchParams({ workspaceId, sessionId, runId, role });
+  if (nodeRunId) query.set("nodeRunId", nodeRunId);
+  return {
+    ...runtimeOptions,
+    mcpServerUrls: {
+      ...(runtimeOptions?.mcpServerUrls || {}),
+      hippo_context: `http://127.0.0.1:${config.wrapperPort}/mcp/context?${query}`,
+    },
+  };
+}
+
+function withGraphToolRuntimeOptions(runtimeOptions, { workspaceId, runId } = {}) {
+  const query = new URLSearchParams({ workspaceId, runId });
+  return {
+    ...runtimeOptions,
+    mcpServerUrls: {
+      ...(runtimeOptions?.mcpServerUrls || {}),
+      hippo_graph: `http://127.0.0.1:${config.wrapperPort}/mcp/graph?${query}`,
+    },
+  };
+}
+
 function stripEmptyObject(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== ""));
 }
 
 function dedupe(items) {
   return [...new Set(items.filter(Boolean))];
+}
+
+function dedupeBy(items, keyOf) {
+  return [...new Map(items.map((item) => [keyOf(item), item])).values()];
 }
 
 function definedOnly(value) {
@@ -2167,8 +2833,8 @@ function normalizeAgents(agents) {
 
 function normalizeAgent(agent) {
   const current = agent || {};
-  const type = current.type === "dag" ? "dag" : "single";
-  const nodes = type === "dag" ? normalizeAgentNodes(current.nodes) : [];
+  const type = current.type === "blueprint" ? "blueprint" : "single";
+  const nodes = type === "blueprint" ? normalizeAgentNodes(current.nodes) : [];
   return definedOnly({
     $schema: AGENT_BLUEPRINT_SCHEMA_ID,
     schemaVersion: AGENT_BLUEPRINT_SCHEMA_VERSION,
@@ -2182,9 +2848,9 @@ function normalizeAgent(agent) {
     mcpServers: dedupe(Array.isArray(current.mcpServers) ? current.mcpServers : []),
     runtimeId: current.runtimeId || config.defaultRuntimeId,
     rag: normalizeNodeRag(current.rag),
-    rootNodeId: type === "dag" ? current.rootNodeId || nodes[0]?.id || "" : "",
+    rootNodeId: type === "blueprint" ? current.rootNodeId || nodes[0]?.id || "" : "",
     nodes,
-    edges: type === "dag" ? normalizeAgentEdges(current.edges) : [],
+    edges: type === "blueprint" ? normalizeAgentEdges(current.edges) : [],
     executionPolicy: normalizeExecutionPolicy(current.executionPolicy),
     metadata: current.metadata || {},
     createdAt: current.createdAt,
@@ -2270,33 +2936,33 @@ function validateAgentPrototype(agent) {
       errors: schemaResult.errors,
     });
   }
-  if (normalized.type !== "dag") return normalized;
+  if (normalized.type !== "blueprint") return normalized;
   if (!normalized.nodes.length) {
-    throw new AgentOrchestratorError("DAG agent requires at least one node.", 400);
+    throw new AgentOrchestratorError("Blueprint agent requires at least one node.", 400);
   }
   const nodeIds = new Set();
   for (const node of normalized.nodes) {
     if (nodeIds.has(node.id)) {
-      throw new AgentOrchestratorError(`DAG agent has duplicate node id: ${node.id}.`, 400);
+      throw new AgentOrchestratorError(`Blueprint agent has duplicate node id: ${node.id}.`, 400);
     }
     nodeIds.add(node.id);
   }
   if (!normalized.rootNodeId || !nodeIds.has(normalized.rootNodeId)) {
-    throw new AgentOrchestratorError("DAG agent rootNodeId must reference an existing node.", 400);
+    throw new AgentOrchestratorError("Blueprint agent rootNodeId must reference an existing node.", 400);
   }
   if (normalized.rootNodeId !== "root") {
-    throw new AgentOrchestratorError("DAG agent rootNodeId must be root.", 400);
+    throw new AgentOrchestratorError("Blueprint agent rootNodeId must be root.", 400);
   }
   const edgeIds = new Set();
   for (const edge of normalized.edges) {
     if (!nodeIds.has(edge.from) || !nodeIds.has(edge.to)) {
-      throw new AgentOrchestratorError(`DAG edge ${edge.id} references an unknown node.`, 400);
+      throw new AgentOrchestratorError(`Blueprint edge ${edge.id} references an unknown node.`, 400);
     }
     if (edge.from === edge.to) {
-      throw new AgentOrchestratorError(`DAG edge ${edge.id} cannot point to the same node.`, 400);
+      throw new AgentOrchestratorError(`Blueprint edge ${edge.id} cannot point to the same node.`, 400);
     }
     if (edgeIds.has(edge.id)) {
-      throw new AgentOrchestratorError(`DAG has duplicate edge id: ${edge.id}.`, 400);
+      throw new AgentOrchestratorError(`Blueprint has duplicate edge id: ${edge.id}.`, 400);
     }
     edgeIds.add(edge.id);
   }
@@ -2304,7 +2970,7 @@ function validateAgentPrototype(agent) {
   for (const edge of normalized.edges) {
     const key = `${edge.from}->${edge.to}`;
     if (edgeKeys.has(key)) {
-      throw new AgentOrchestratorError(`DAG has duplicate edge: ${key}.`, 400);
+      throw new AgentOrchestratorError(`Blueprint has duplicate edge: ${key}.`, 400);
     }
     edgeKeys.add(key);
   }
@@ -2319,7 +2985,7 @@ function assertAcyclic(nodes, edges) {
   const visiting = new Set();
   const visited = new Set();
   const visit = (nodeId) => {
-    if (visiting.has(nodeId)) throw new AgentOrchestratorError(`DAG contains a cycle at node ${nodeId}.`, 400);
+    if (visiting.has(nodeId)) throw new AgentOrchestratorError(`Blueprint contains a cycle at node ${nodeId}.`, 400);
     if (visited.has(nodeId)) return;
     visiting.add(nodeId);
     for (const next of outgoing.get(nodeId) || []) visit(next);
@@ -2342,7 +3008,7 @@ function assertReachableFromRoot(nodes, edges, rootNodeId) {
   const unreachable = nodes.map((node) => node.id).filter((nodeId) => !reachable.has(nodeId));
   if (unreachable.length) {
     throw new AgentOrchestratorError(
-      `DAG contains nodes that are unreachable from root: ${unreachable.join(", ")}.`,
+      `Blueprint contains nodes that are unreachable from root: ${unreachable.join(", ")}.`,
       400,
       { unreachableNodeIds: unreachable }
     );
@@ -2376,7 +3042,7 @@ function snapshotAgentDefinition(agent) {
 }
 
 function createNodeRuns({ runId, request, agentSnapshot, input, now }) {
-  if (agentSnapshot.type !== "dag") {
+  if (agentSnapshot.type !== "blueprint") {
     const nodeRun = createNodeRun({
       runId,
       request,
@@ -2406,7 +3072,7 @@ function createNodeRun({
   now,
 }) {
   return {
-    id: `${runId}:${nodeId || "root"}${agentSnapshot.type === "dag" ? `:${attempt}` : ""}`,
+    id: `${runId}:${nodeId || "root"}${agentSnapshot.type === "blueprint" ? `:${attempt}` : ""}`,
     type: "node",
     runId,
     nodeId: nodeId || "root",
@@ -2441,7 +3107,7 @@ function graphRunStatusAfterNodeUpdate(run) {
 }
 
 function findDurableResultApprovalNode(run) {
-  if (!run?.agentSnapshot || run.agentSnapshot.type !== "dag") return undefined;
+  if (!run?.agentSnapshot || run.agentSnapshot.type !== "blueprint") return undefined;
   return Object.values(run.nodeRuns || {}).find((nodeRun) => {
     if (!nodeRun.output || nodeRun.approval?.resumed) return false;
     if (!["waiting_approval", "failed"].includes(nodeRun.status)) return false;
@@ -2460,10 +3126,10 @@ function buildNodeAgent(agentSnapshot, nodeDef, fallbackAgent) {
   return {
     ...(fallbackAgent || {}),
     id: nodeDef.agentId || agentSnapshot.id || fallbackAgent?.id || "",
-    name: nodeDef.name || agentSnapshot.name || fallbackAgent?.name || "DAG Node",
+    name: nodeDef.name || agentSnapshot.name || fallbackAgent?.name || "Blueprint Node",
     description: nodeDef.description || agentSnapshot.description || "",
     systemPrompt: [agentSnapshot.systemPrompt, nodeDef.systemPrompt].filter(Boolean).join("\n\n"),
-    skills: nodeDef.skills?.length ? nodeDef.skills : agentSnapshot.skills || [],
+    skills: resolveNodeSkills(agentSnapshot, nodeDef),
     mcpServers: nodeDef.mcpServers?.length ? nodeDef.mcpServers : agentSnapshot.mcpServers || [],
     runtimeId: nodeDef.runtimeId || agentSnapshot.runtimeId || fallbackAgent?.runtimeId || config.defaultRuntimeId,
     rag: normalizeNodeRag(nodeDef.rag),
@@ -2480,20 +3146,28 @@ function buildRootCoordinatorAgent(agentSnapshot, rootNode) {
       rootNode.systemPrompt,
       "你是 RootAgent，唯一负责读取运行图、判断节点结果并决定下一步调度。不要执行普通工作节点的职责。",
     ].filter(Boolean).join("\n\n"),
-    skills: rootNode.skills?.length ? rootNode.skills : agentSnapshot.skills || [],
+    skills: resolveNodeSkills(agentSnapshot, rootNode),
     mcpServers: rootNode.mcpServers?.length ? rootNode.mcpServers : agentSnapshot.mcpServers || [],
     runtimeId: rootNode.runtimeId || agentSnapshot.runtimeId || config.defaultRuntimeId,
   };
 }
 
-function buildRootCoordinatorPrompt(project, run, rootNode, { nativeGraphTools = false } = {}) {
+function buildRootCoordinatorPrompt(project, run, rootNode) {
   const prototype = {
     rootNodeId: run.agentSnapshot.rootNodeId,
     nodes: run.agentSnapshot.nodes.map((node) => ({
       id: node.id,
       name: node.name,
       interfaceDescription: node.description,
+      workerInstructions: node.systemPrompt || "",
+      staticInput: node.input,
+      availableSkills: resolveNodeSkills(run.agentSnapshot, node).map((skill) => ({
+        name: skill.name,
+        description: skill.description || "",
+      })),
       rag: normalizeNodeRag(node.rag),
+      resultApprovalPolicy: normalizeResultApprovalPolicy(node.resultApprovalPolicy),
+      runtimeApprovalPolicy: normalizeRuntimeApprovalPolicy(node.runtimeApprovalPolicy),
       transitionInstruction: node.transitionInstruction || "",
     })),
     edges: run.agentSnapshot.edges.map((edge) => ({ from: edge.from, to: edge.to })),
@@ -2519,58 +3193,42 @@ function buildRootCoordinatorPrompt(project, run, rootNode, { nativeGraphTools =
     run.agentSnapshot.systemPrompt ? `Agent 全局指令：\n${run.agentSnapshot.systemPrompt}` : "",
     rootNode.systemPrompt ? `RootAgent 指令：\n${rootNode.systemPrompt}` : "",
     `Run ID: ${run.id}`,
-    `原始任务：\n${run.input?.task || ""}`,
+    `不可变的原始用户请求：\n${JSON.stringify(buildOriginalRequest(run), null, 2)}`,
+    run.rootCoordinator?.decisionCount === 0 && run.input?.conversationContext?.length
+      ? `同一 Hippo 会话的上下文目录（正文未展开）：\n${JSON.stringify(run.input.conversationContext, null, 2)}`
+      : run.rootCoordinator?.decisionCount === 0
+        ? "同一 Hippo 会话中没有可用的前序上下文引用。"
+        : "前序会话上下文目录已在本 Run 首次决策时对齐；继续使用当前 Root Codex session，必要时通过 hippo_context_read/search 获取长内容。",
     `Agent 图原型：\n${JSON.stringify(prototype, null, 2)}`,
     `当前 Runtime Graph：\n${JSON.stringify(runtimeGraph, null, 2)}`,
     "Runtime Graph 中 approval.resumed=true 表示用户已经确认该节点结果；应直接按照确认值和流转规则继续，不得再次请求同一项确认。",
     run.userResponses?.length ? `用户后续回复：\n${JSON.stringify(run.userResponses, null, 2)}` : "当前没有用户后续回复。",
     rootNode.transitionInstruction ? `Root 结果处置规则：\n${rootNode.transitionInstruction}` : "Root 未配置额外结果处置规则，按默认拓扑开始调度。",
+    "先结合 Root Codex session 和会话上下文目录解析当前请求中的指代，例如“这篇”“上一个”“继续”“按刚才的方案”。摘要只用于定位；需要正文或关键事实时调用 hippo_context_read，无法确定引用时调用 hippo_context_search/list。已有唯一明确对象时不得再次要求用户提供；存在多个合理对象且无法消歧时才请求确认。",
+    "派发前先理解目标节点的接口描述、工作指令、静态输入、可用 Skill、RAG 和审批策略，再确定该节点应接收什么输入、应返回什么输出。不要把完整会话历史原样复制给工作节点；只注入完成该节点职责所需的事实、正文、路径、上游结果和约束。",
+    "每次派发节点时，必须以不可变的原始用户请求为基线，并在 input 中提供完整执行信封：nodeTask 是当前节点应完成的具体子任务；relevantContext 只包含当前节点需要的会话历史、上游内容和已知交付路径；requirements 保留原始请求中与当前节点相关且不可丢失的约束；expectedArtifacts 描述必须实际产出的文件、图片或其他交付物。不得用摘要、方案、提示词或占位符替代原始请求要求的真实产物。",
+    "派发 input 的固定结构为：{\"nodeTask\":\"具体子任务\",\"relevantContext\":{},\"contextRefs\":[{\"ref\":\"ctx://...\",\"title\":\"标题\",\"summary\":\"摘要\",\"reason\":\"与节点任务的关系\"}],\"requirements\":[\"不可丢失的约束\"],\"expectedArtifacts\":[{\"type\":\"image|file|text|其他类型\",\"count\":1,\"description\":\"验收说明\"}]}。长正文和长节点结果应通过 contextRefs 传递，不得复制进 relevantContext。若节点需要某项 Skill，应优先选择 availableSkills 中具备该能力的节点，并在 nodeTask 中明确要求调用对应的 $skill-name。",
+    "节点完成后，必须同时对照原始用户请求、requirements 和 expectedArtifacts 检查结果。真实产物缺失时不得完成 Run，应返工、调度其他合适节点或向用户说明失败。",
     normalizeNodeRag(rootNode.rag).enabled
       ? `Root 节点已启用独立 RAG 工具。可使用 hippo_rag_scope、hippo_rag_list_documents 和 hippo_rag_search，Top N 固定为 ${normalizeNodeRag(rootNode.rag).topN}；不要默认检索。`
       : "Root 节点未配置 RAG 工具。",
-    `调用 Hippo MCP Graph Tool 推进运行：hippo_get_agent_run、hippo_dispatch_graph_node、hippo_request_graph_user、hippo_complete_graph_run、hippo_fail_graph_run。所有工具参数中的 workspaceId 使用 ${project.id}，runId 使用 ${run.id}。你可以连续调用节点，直到 Run 完成、失败、等待审批或等待用户。`,
-    nativeGraphTools
-      ? "当前 Codex runtime 已注入并验证 Hippo MCP。必须调用上述 Graph Tool，禁止声称工具不可用，禁止直接输出 JSON 降级命令。"
-      : `如果当前 runtime 无法调用 Hippo MCP，则根据节点输入、输出、状态和 transitionInstruction 只输出一个 JSON 对象作为降级命令，不要使用 Markdown。\n可用动作：\n` +
-      `{"action":"dispatch","nodeId":"节点ID","input":{},"parentNodeRunId":"可选","reason":"原因"}\n` +
-      `{"action":"dispatch_many","nodes":[{"nodeId":"节点ID","input":{}}],"reason":"原因"}\n` +
-      `{"action":"retry","nodeId":"节点ID","input":{},"parentNodeRunId":"失败的NodeRun ID","reason":"原因"}\n` +
-      `{"action":"request_user","question":"需要用户回答的问题","reason":"原因"}\n` +
-      `{"action":"complete","output":{},"reason":"完成原因"}\n` +
-      `{"action":"fail","reason":"失败原因"}`,
+    "当前 Codex turn 已注入仅属于本 Run 的 Hippo Graph Tool：hippo_get_agent_run、hippo_dispatch_graph_node、hippo_request_graph_user、hippo_complete_graph_run、hippo_fail_graph_run。工具已绑定当前 workspace 和 run，不需要也不得自行拼接系统 ID。",
+    "必须通过 Graph Tool 推进运行。可以在同一 turn 中连续调度节点，直到 Run 完成、失败、等待审批或等待用户。禁止用普通文本或 JSON 模拟工具调用；如果工具参数校验失败，应根据工具错误修正参数后再次调用。",
   ].join("\n\n");
-}
-
-function parseRootCoordinatorDecision(text) {
-  const source = String(text || "").trim();
-  const fenced = source.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
-  const candidate = fenced || source.slice(source.indexOf("{"), source.lastIndexOf("}") + 1);
-  let decision;
-  try {
-    decision = JSON.parse(candidate);
-  } catch (error) {
-    throw new AgentOrchestratorError("Root coordinator did not return a valid JSON decision.", 502, {
-      response: source,
-      parseError: error.message,
-    });
-  }
-  const actions = ["dispatch", "dispatch_many", "retry", "request_user", "complete", "fail"];
-  if (!decision || !actions.includes(decision.action)) {
-    throw new AgentOrchestratorError("Root coordinator returned an unsupported decision.", 502, decision);
-  }
-  if (["dispatch", "retry"].includes(decision.action) && !decision.nodeId) {
-    throw new AgentOrchestratorError(`${decision.action} requires nodeId.`, 502, decision);
-  }
-  if (decision.action === "request_user" && !decision.question) {
-    throw new AgentOrchestratorError("request_user requires question.", 502, decision);
-  }
-  return decision;
 }
 
 function buildNodeInput(run, nodeRun, request) {
   const parent = nodeRun.parentNodeRunId ? run.nodeRuns?.[nodeRun.parentNodeRunId] : undefined;
+  const dispatch = graphNodeDispatchInputSchema.parse(nodeRun.input);
+  const nodeDef = run.agentSnapshot.nodes.find((node) => node.id === (nodeRun.prototypeNodeId || nodeRun.nodeId));
   return {
-    task: run.input?.task || "",
+    originalRequest: buildOriginalRequest(run),
+    nodeTask: dispatch.nodeTask,
+    relevantContext: dispatch.relevantContext,
+    contextRefs: dispatch.contextRefs,
+    requirements: dispatch.requirements,
+    expectedArtifacts: dispatch.expectedArtifacts,
+    availableSkills: resolveNodeSkills(run.agentSnapshot, nodeDef),
     request: {
       runId: request.runId,
       mode: request.mode,
@@ -2578,7 +3236,6 @@ function buildNodeInput(run, nodeRun, request) {
     },
     nodeId: nodeRun.nodeId,
     attempt: nodeRun.attempt,
-    dispatchInput: nodeRun.input,
     parent: parent ? {
       nodeRunId: parent.id,
       nodeId: parent.prototypeNodeId || parent.nodeId,
@@ -2586,13 +3243,12 @@ function buildNodeInput(run, nodeRun, request) {
       output: summarizeNodeOutput(parent.output),
       error: parent.error,
     } : undefined,
-    originalInput: run.input,
   };
 }
 
-function buildDagNodePrompt(project, run, nodeDef, nodeInput) {
+function buildBlueprintNodePrompt(project, run, nodeDef, nodeInput) {
   const sections = [
-    `你正在 Hippo 工作区「${project.name}」中执行 DAG Agent 节点。`,
+    `你正在 Hippo 工作区「${project.name}」中执行蓝图智能体节点。`,
     `Agent Run: ${run.id}`,
     `节点: ${nodeDef.name || nodeDef.id} (${nodeDef.id})`,
     run.agentSnapshot.systemPrompt ? `Agent 全局指令：\n${run.agentSnapshot.systemPrompt}` : "",
@@ -2601,16 +3257,81 @@ function buildDagNodePrompt(project, run, nodeDef, nodeInput) {
     normalizeNodeRag(nodeDef.rag).enabled
       ? `当前节点已启用 RAG 工具。可使用 hippo_rag_scope、hippo_rag_list_documents 和 hippo_rag_search，Top N 固定为 ${normalizeNodeRag(nodeDef.rag).topN}；不要默认检索。`
       : "当前节点未配置 RAG 工具。",
-    `原始任务：\n${run.input?.task || ""}`,
-    nodeInput.dispatchInput !== undefined ? `RootAgent 派发输入：\n${JSON.stringify(nodeInput.dispatchInput, null, 2)}` : "RootAgent 未提供额外派发输入。",
+    `不可变的原始用户请求：\n${JSON.stringify(nodeInput.originalRequest, null, 2)}`,
+    `RootAgent 分配的当前节点任务：\n${nodeInput.nodeTask}`,
+    nodeInput.relevantContext !== undefined
+      ? `与当前节点相关的上下文：\n${JSON.stringify(nodeInput.relevantContext, null, 2)}`
+      : "RootAgent 未提供额外相关上下文。",
+    nodeInput.contextRefs.length
+      ? `RootAgent 授权当前节点读取的上下文引用：\n${JSON.stringify(nodeInput.contextRefs, null, 2)}\n摘要只用于定位；需要原文时调用 hippo_context_read，不要要求 Root 重复粘贴长内容。`
+      : "当前节点没有获授权的上下文引用。",
+    nodeInput.requirements.length
+      ? `当前节点不可丢失的要求：\n${nodeInput.requirements.map((item) => `- ${item}`).join("\n")}`
+      : "当前节点没有额外约束，但仍须服从原始用户请求。",
+    nodeInput.expectedArtifacts.length
+      ? `当前节点必须实际产出的交付物：\n${JSON.stringify(nodeInput.expectedArtifacts, null, 2)}`
+      : "当前节点未声明必须生成的文件类交付物。",
+    nodeInput.availableSkills.length
+      ? `当前节点可使用的 Skill：\n${nodeInput.availableSkills.map(formatSkill).join("\n")}\n当节点任务要求使用其中某项能力时，必须按 $skill-name 调用，不得只输出调用方案或提示词。`
+      : "当前节点未显式配置 Skill。",
     nodeInput.parent ? `触发本次执行的父 NodeRun：\n${JSON.stringify(nodeInput.parent, null, 2)}` : "当前执行没有指定父 NodeRun。",
     nodeDef.input !== undefined ? `节点静态输入：\n${JSON.stringify(nodeDef.input, null, 2)}` : "",
-    `请只完成当前节点职责，并输出可供下游节点使用的结果。`,
+    "原始用户请求是不可变的目标基线；RootAgent 的节点任务只限定你负责的子任务，不能覆盖或削弱与当前节点相关的原始要求。",
+    "当输出较长、需要被后续节点复用或包含完整正文时，调用 hippo_context_write 保存全文，并在最终回复中只返回简短摘要和 ctx:// 引用。不要把大段内容复制给 RootAgent。",
+    "请只完成当前节点职责，并输出可供下游节点使用的结果。若声明了 expectedArtifacts，必须生成真实产物并返回可访问路径；仅返回描述、方案、提示词或占位符不算完成。",
   ];
   return sections.filter(Boolean).join("\n\n");
 }
 
-function collectDagOutput(run) {
+function buildOriginalRequest(run) {
+  return {
+    task: run.input?.task || "",
+    context: run.input?.context || {},
+    attachments: (run.request?.attachments || []).map((attachment) => ({
+      kind: attachment.kind,
+      name: attachment.name,
+      path: attachment.path,
+      mimeType: attachment.mimeType || "",
+    })),
+  };
+}
+
+function buildConversationHistory(conversation, currentRunId) {
+  const messages = Array.isArray(conversation?.messages) ? conversation.messages : [];
+  return messages
+    .filter((message) => message?.text && message.runId !== currentRunId)
+    .map((message) => ({
+      role: message.role,
+      runId: message.runId || "",
+      text: String(message.text),
+      attachments: normalizeStoredAttachments(message.attachments).map((attachment) => ({
+        kind: attachment.kind,
+        name: attachment.name,
+        path: attachment.path,
+        mimeType: attachment.mimeType || "",
+      })),
+      createdAt: message.createdAt,
+    }));
+}
+
+function summarizeContextText(text) {
+  const compact = String(text || "").replace(/\s+/g, " ").trim();
+  return compact.length <= 500 ? compact : `${compact.slice(0, 497)}...`;
+}
+
+function formatConversationContextContent(message) {
+  const attachments = message.attachments?.length
+    ? `\n\n## 附件\n${message.attachments.map((item) => `- ${item.kind}: ${item.name} (${item.path})`).join("\n")}`
+    : "";
+  return `# ${message.role === "user" ? "用户消息" : "助手消息"}\n\n${message.text}${attachments}\n`;
+}
+
+function resolveNodeSkills(agentSnapshot, nodeDef) {
+  if (!nodeDef) return [];
+  return nodeDef.skills?.length ? nodeDef.skills : agentSnapshot.skills || [];
+}
+
+function collectBlueprintOutput(run) {
   const terminal = Object.values(run.nodeRuns || {})
     .filter((nodeRun) => !(nodeRun.downstreamNodeIds || []).length)
     .sort((a, b) => a.nodeId.localeCompare(b.nodeId));
@@ -2629,14 +3350,94 @@ function collectDagOutput(run) {
 
 function summarizeNodeOutput(output) {
   if (!output) return output;
+  if (output.contextRefs?.length) {
+    return {
+      summary: output.contextSummary || summarizeContextText(output.text || ""),
+      contextRefs: output.contextRefs,
+      artifacts: Array.isArray(output.artifacts) ? output.artifacts : undefined,
+    };
+  }
+  if (typeof output.text === "string" && Array.isArray(output.artifacts) && output.artifacts.length) {
+    return {
+      text: output.text,
+      artifacts: output.artifacts,
+      recoveredAfterTimeout: output.recoveredAfterTimeout === true || undefined,
+      warning: output.warning,
+    };
+  }
   if (typeof output.text === "string") return output.text;
   if (output.output) return output.output;
   return output;
 }
 
-function stringifyDagOutput(output) {
+function extractContextRefs(text) {
+  return [...String(text || "").matchAll(/ctx:\/\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+@\d+/g)].map((match) => match[0]);
+}
+
+function stringifyBlueprintOutput(output) {
   if (!output) return "";
-  return JSON.stringify(output, null, 2);
+  if (typeof output === "string") return output;
+  return output.displayText || structuredBlueprintOutputFallback(output);
+}
+
+async function buildBlueprintDisplayText({ workspace, run, output, contextStore }) {
+  let primary = directBlueprintOutputText(output);
+  const finalRef = output.finalContent?.ref;
+  if (finalRef && run.rootSessionId && workspace.localWorkspacePath) {
+    try {
+      const context = await contextStore.read({
+        workspacePath: workspace.localWorkspacePath,
+        sessionId: run.rootSessionId,
+        ref: finalRef,
+        limit: 100000,
+      });
+      if (context.content?.trim()) primary = context.content.trim();
+    } catch {
+      // Keep the structured fallback if the referenced context cannot be read.
+    }
+  }
+
+  const sections = [primary];
+  const images = Array.isArray(output.images) ? output.images : [];
+  if (images.length) {
+    const imageSections = images.map((image, index) => {
+      const title = String(image.title || `配图 ${index + 1}`);
+      const relativePath = String(image.relativePath || "").trim();
+      if (!relativePath) return `### ${title}\n\n${image.path || ""}`;
+      const url = `/workspace-files/${encodeURIComponent(workspace.id)}?path=${encodeURIComponent(relativePath)}`;
+      return `### ${title}\n\n![${escapeMarkdownLabel(title)}](${url})\n\n[打开原图](${url})`;
+    });
+    sections.push(`## 配图\n\n${imageSections.join("\n\n")}`);
+  }
+  if (output.publishingNote) sections.push(`> ${String(output.publishingNote)}`);
+  return sections.filter(Boolean).join("\n\n").trim();
+}
+
+function directBlueprintOutputText(output) {
+  if (!output || typeof output !== "object") return typeof output === "string" ? output : "";
+  const candidates = [
+    output.displayText,
+    output.finalContent?.content,
+    output.finalContent?.body,
+    output.finalContent?.text,
+    output.body,
+    output.content,
+    output.result,
+    output.summary,
+    output.message,
+    output.text,
+  ];
+  return candidates.find((value) => typeof value === "string" && value.trim())?.trim() || "";
+}
+
+function structuredBlueprintOutputFallback(output) {
+  const primary = directBlueprintOutputText(output);
+  if (primary) return primary;
+  return "任务已完成。可在执行详情中查看结构化结果。";
+}
+
+function escapeMarkdownLabel(value) {
+  return String(value).replace(/[\[\]]/g, "\\$&");
 }
 
 function normalizeAgentRuns(runs) {
@@ -2719,11 +3520,12 @@ function assertGraphRunMutable(run) {
 }
 
 function normalizeRootCoordinator(value, agentSnapshot, now) {
-  if (agentSnapshot?.type !== "dag") return undefined;
+  if (agentSnapshot?.type !== "blueprint") return undefined;
   return {
     prototypeNodeId: value?.prototypeNodeId || agentSnapshot.rootNodeId || "root",
     status: value?.status || "pending",
     decisionCount: Math.max(0, Number(value?.decisionCount) || 0),
+    noProgressCount: Math.max(0, Number(value?.noProgressCount) || 0),
     runtimeSession: value?.runtimeSession,
     runtimeRunId: value?.runtimeRunId || "",
     lastDecision: value?.lastDecision,
@@ -2766,6 +3568,78 @@ function normalizeConversations(conversations) {
   return conversations.map(normalizeConversation);
 }
 
+function normalizeStore(store = {}) {
+  return {
+    version: 1,
+    workspaces: normalizeWorkspaces(store.workspaces),
+    agents: normalizeAgents(store.agents),
+    conversations: normalizeConversations(store.conversations),
+    agentRuns: normalizeAgentRuns(store.agentRuns),
+  };
+}
+
+function summarizeAgentRunForList(run) {
+  const nodeRuns = Object.fromEntries(Object.entries(run.nodeRuns || {}).map(([key, node]) => [key, {
+    id: node.id,
+    nodeId: node.nodeId,
+    kind: node.kind,
+    status: node.status,
+    runtimeSession: node.runtimeSession?.sessionId ? { sessionId: node.runtimeSession.sessionId } : undefined,
+    output: node.status === "waiting_approval" ? { text: runOutputPreview(node.output) } : undefined,
+    error: node.error,
+    createdAt: node.createdAt,
+    updatedAt: node.updatedAt,
+    startedAt: traceEventTimestamp(node.trace, "node_run_started"),
+  }]));
+  return {
+    id: run.id,
+    workspaceId: run.workspaceId,
+    rootSessionId: run.rootSessionId,
+    agentId: run.agentId,
+    status: run.status,
+    managed: run.managed,
+    output: run.output,
+    error: run.error,
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+    agentSnapshot: {
+      id: run.agentSnapshot?.id,
+      name: run.agentSnapshot?.name,
+      type: run.agentSnapshot?.type,
+    },
+    rootCoordinator: run.rootCoordinator ? {
+      status: run.rootCoordinator.status,
+      decisionCount: run.rootCoordinator.decisionCount,
+      runtimeSession: run.rootCoordinator.runtimeSession?.sessionId
+        ? { sessionId: run.rootCoordinator.runtimeSession.sessionId }
+        : undefined,
+      createdAt: run.rootCoordinator.createdAt,
+      updatedAt: run.rootCoordinator.updatedAt,
+      startedAt: traceEventTimestamp(run.trace, "root_coordinator_started"),
+    } : undefined,
+    nodeRuns,
+  };
+}
+
+function traceEventTimestamp(trace, type) {
+  return [...(Array.isArray(trace) ? trace : [])].reverse().find((event) => event.type === type)?.createdAt || "";
+}
+
+function runOutputPreview(output, maxLength = 100_000) {
+  if (output === undefined || output === null) return "";
+  const summarized = summarizeNodeOutput(output);
+  const text = typeof summarized === "string" ? summarized : JSON.stringify(summarized, null, 2);
+  return String(text || "").slice(0, maxLength);
+}
+
+function summarizeConversation(conversation) {
+  const { messages, ...summary } = conversation;
+  return {
+    ...summary,
+    messageCount: Array.isArray(messages) ? messages.length : 0,
+  };
+}
+
 function normalizeConversation(conversation) {
   const metadata = conversation.metadata || {};
   const runtimeSessions = normalizeRuntimeSessions(conversation.runtimeSessions);
@@ -2795,9 +3669,13 @@ function normalizeRuntimeSessions(value) {
           provider: session.provider || provider,
           sessionId: session.sessionId || "",
           resumedFromSessionId: session.resumedFromSessionId || "",
+          forkedFromSessionId: session.forkedFromSessionId || "",
           workspacePath: session.workspacePath || "",
           hippoSessionId: session.hippoSessionId || "",
           status: session.status || (session.sessionId ? "active" : "ephemeral"),
+          runtimeOptions: session.runtimeOptions && typeof session.runtimeOptions === "object"
+            ? session.runtimeOptions
+            : {},
           createdAt: session.createdAt || session.updatedAt || new Date().toISOString(),
           updatedAt: session.updatedAt || new Date().toISOString(),
         },

@@ -1,6 +1,6 @@
 import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import multer from "multer";
 import fs from "node:fs/promises";
@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { AnythingLlmError, parseMetadata } from "./anythingllm-client.js";
 import { config } from "./config.js";
-import { createMcpServer, createRagMcpServer } from "./mcp.js";
+import { createContextMcpServer, createGraphMcpServer, createMcpServer, createRagMcpServer } from "./mcp.js";
 import { createAnythingLlmClient } from "./shared.js";
 import { AgentOrchestrator } from "./agent-orchestrator.js";
 import { ResourceManager } from "./resource-manager.js";
@@ -19,6 +19,8 @@ import { RuntimeRegistry } from "./runtime-adapter.js";
 import { ExecutionManager } from "./execution-manager.js";
 import { decodeMultipartFileName } from "./filename-utils.js";
 import { HippoSkillInstaller } from "./skill-installer.js";
+import { ContextStore } from "./context-store.js";
+import { SqliteStateStore } from "./storage/sqlite-state-store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, "..", "public");
@@ -29,6 +31,10 @@ const inlineTextExtensions = new Set([
   ".rs", ".sh", ".sql", ".toml", ".ts", ".tsx", ".txt", ".xml", ".yaml", ".yml",
 ]);
 const upload = multer({ storage: multer.memoryStorage() });
+const attachmentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { files: 200, fileSize: 25 * 1024 * 1024 },
+});
 const app = express();
 const appSettings = new AppSettingsService();
 const settings = appSettings.getSettings();
@@ -37,13 +43,24 @@ const client = createAnythingLlmClient({
   apiKey: appSettings.getAnythingLlmCredentials().apiKey,
 });
 const ragProvider = createRagProvider({ id: settings.ragProviderId, client });
-const resourceManager = new ResourceManager({ rootPath: settings.resourceRootPath, client: ragProvider });
+const stateStore = new SqliteStateStore({
+  databasePath: settings.metadataDbPath,
+  resourceRootPath: settings.resourceRootPath,
+});
+const resourceManager = new ResourceManager({
+  rootPath: settings.resourceRootPath,
+  client: ragProvider,
+  metadataRepository: stateStore.repository,
+});
 const runtimeRegistry = new RuntimeRegistry({ settings });
+const contextStore = new ContextStore({ repository: stateStore.repository });
 const agentOrchestrator = new AgentOrchestrator({
   client,
   ragProvider,
   resourceManager,
   runtimeRegistry,
+  contextStore,
+  stateStore,
   settings,
 });
 const mcpSessions = new Map();
@@ -75,13 +92,31 @@ app.post("/mcp/rag", asyncHandler((req, res) => handleMcpPost(req, res, () => cr
 }))));
 app.get("/mcp/rag", asyncHandler(handleMcpSessionRequest));
 app.delete("/mcp/rag", asyncHandler(handleMcpSessionRequest));
+app.post("/mcp/context", asyncHandler((req, res) => handleMcpPost(req, res, () => createContextMcpServer({
+  workspaceId: String(req.query.workspaceId || ""),
+  sessionId: String(req.query.sessionId || ""),
+  runId: String(req.query.runId || ""),
+  nodeRunId: String(req.query.nodeRunId || ""),
+  role: String(req.query.role || "root"),
+  agentOrchestrator,
+  contextStore,
+}))));
+app.get("/mcp/context", asyncHandler(handleMcpSessionRequest));
+app.delete("/mcp/context", asyncHandler(handleMcpSessionRequest));
+app.post("/mcp/graph", asyncHandler((req, res) => handleMcpPost(req, res, () => createGraphMcpServer({
+  workspaceId: String(req.query.workspaceId || ""),
+  runId: String(req.query.runId || ""),
+  agentOrchestrator,
+}))));
+app.get("/mcp/graph", asyncHandler(handleMcpSessionRequest));
+app.delete("/mcp/graph", asyncHandler(handleMcpSessionRequest));
 
 app.get("/api/status", asyncHandler(async (_req, res) => {
   res.json({
     wrapper: {
       ok: true,
       port: config.wrapperPort,
-      agentStorePath: config.agentStorePath,
+      metadataDbPath: settings.metadataDbPath,
       settings,
       resources: await resourceManager.getStatus(),
     },
@@ -236,6 +271,98 @@ app.get("/api/workspaces/:id", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.getWorkspace(req.params.id));
 }));
 
+app.post("/api/workspaces/:id/reveal", asyncHandler(async (req, res) => {
+  if (!isLoopbackAddress(req.socket.remoteAddress)) {
+    res.status(403).json({ error: "File manager actions are only available from this device." });
+    return;
+  }
+  const { workspace } = await agentOrchestrator.getWorkspace(req.params.id);
+  if (!workspace.localWorkspacePath) throw new HttpError("Workspace does not have a local directory.", 409);
+  const absolutePath = await fs.realpath(workspace.localWorkspacePath).catch((error) => {
+    if (error.code === "ENOENT") throw new HttpError("Workspace directory was not found.", 404);
+    throw error;
+  });
+  const stat = await fs.stat(absolutePath);
+  if (!stat.isDirectory()) throw new HttpError("Workspace path is not a directory.", 409);
+  await revealInFileManager({ type: "directory", absolutePath });
+  res.json({ ok: true, path: absolutePath });
+}));
+
+app.post("/api/workspaces/:id/attachments", attachmentUpload.array("files", 200), asyncHandler(async (req, res) => {
+  const { workspace } = await agentOrchestrator.getWorkspace(req.params.id);
+  const files = Array.isArray(req.files) ? req.files : [];
+  if (!files.length) {
+    res.status(400).json({ error: "At least one attachment file is required." });
+    return;
+  }
+  const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+  if (totalSize > 100 * 1024 * 1024) {
+    res.status(413).json({ error: "Attachments exceed the 100 MB total limit." });
+    return;
+  }
+  if (!workspace.localWorkspacePath) {
+    res.status(409).json({ error: "Workspace does not have a local directory." });
+    return;
+  }
+  const requestedKind = ["file", "folder", "image"].includes(req.body?.kind) ? req.body.kind : "file";
+  const relativePaths = parseAttachmentRelativePaths(req.body?.relativePaths, files.length);
+  const batchId = randomUUID();
+  const batchRelativeRoot = path.posix.join(".hippo", "attachments", batchId);
+  const workspaceRoot = path.resolve(workspace.localWorkspacePath);
+  const saved = [];
+  for (const [index, file] of files.entries()) {
+    const sourcePath = relativePaths[index] || decodeMultipartFileName(file.originalname);
+    const safeRelativePath = normalizeAttachmentRelativePath(sourcePath);
+    const targetRelativePath = path.posix.join(batchRelativeRoot, safeRelativePath);
+    const targetPath = path.resolve(workspaceRoot, ...targetRelativePath.split("/"));
+    assertPathInside(workspaceRoot, targetPath);
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    await fs.writeFile(targetPath, file.buffer, { flag: "wx" });
+    saved.push({
+      id: `${batchId}:${index}`,
+      kind: requestedKind === "image" || file.mimetype.startsWith("image/") ? "image" : "file",
+      name: path.posix.basename(safeRelativePath),
+      path: targetRelativePath,
+      mimeType: file.mimetype || "application/octet-stream",
+      size: file.size,
+    });
+  }
+  stateStore.repository.saveArtifacts(saved.map((file, index) => ({
+    workspaceId: workspace.id,
+    relativePath: file.path,
+    artifactType: file.kind,
+    mimeType: file.mimeType,
+    contentHash: `sha256:${createHash("sha256").update(files[index].buffer).digest("hex")}`,
+    sizeBytes: file.size,
+    metadata: { batchId, sourceName: file.name },
+  })));
+  if (requestedKind === "folder") {
+    const folderName = normalizeAttachmentSegment(relativePaths[0]?.split("/")[0] || "folder");
+    res.json({ attachments: [{
+      id: batchId,
+      kind: "folder",
+      name: folderName,
+      path: path.posix.join(batchRelativeRoot, folderName),
+      size: totalSize,
+      childCount: saved.length,
+    }] });
+    return;
+  }
+  res.json({ attachments: saved });
+}));
+
+app.get("/api/workspaces/:id/artifacts", asyncHandler(async (req, res) => {
+  await agentOrchestrator.getWorkspace(req.params.id);
+  res.json({
+    artifacts: stateStore.repository.listArtifacts(req.params.id, {
+      conversationId: String(req.query.conversationId || ""),
+      runId: String(req.query.runId || ""),
+      limit: req.query.limit,
+      offset: req.query.offset,
+    }),
+  });
+}));
+
 app.get("/workspace-files/:id", asyncHandler(async (req, res) => {
   const { workspace } = await agentOrchestrator.getWorkspace(req.params.id);
   const workspaceRoot = path.resolve(workspace.localWorkspacePath || "");
@@ -271,8 +398,14 @@ app.get("/workspace-files/:id", asyncHandler(async (req, res) => {
     res.status(404).json({ error: "Workspace file was not found." });
     return;
   }
+  if (file.isDirectory()) {
+    const entries = await fs.readdir(realFilePath, { withFileTypes: true });
+    res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'");
+    res.type("html").send(renderWorkspaceDirectory(entries, requestedPath, req.params.id));
+    return;
+  }
   if (!file.isFile()) {
-    res.status(400).json({ error: "Workspace path does not reference a file." });
+    res.status(400).json({ error: "Workspace path does not reference a file or directory." });
     return;
   }
   if (inlineTextExtensions.has(path.extname(realFilePath).toLowerCase())) {
@@ -282,7 +415,7 @@ app.get("/workspace-files/:id", asyncHandler(async (req, res) => {
     return;
   }
   res.setHeader("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(path.basename(filePath))}`);
-  res.sendFile(realFilePath);
+  res.sendFile(realFilePath, { dotfiles: "allow" });
 }));
 
 app.get("/knowledge-files", asyncHandler(async (req, res) => {
@@ -322,7 +455,9 @@ app.delete("/api/workspaces/:id", asyncHandler(async (req, res) => {
 }));
 
 app.get("/api/workspaces/:id/conversations", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.listConversations(req.params.id));
+  res.json(await agentOrchestrator.listConversations(req.params.id, {
+    summary: req.query.summary === "1",
+  }));
 }));
 
 app.post("/api/workspaces/:id/conversations", asyncHandler(async (req, res) => {
@@ -337,6 +472,10 @@ app.patch("/api/workspaces/:id/conversations/:conversationId", asyncHandler(asyn
   res.json(await agentOrchestrator.updateConversation(req.params.id, req.params.conversationId, req.body));
 }));
 
+app.post("/api/workspaces/:id/conversations/:conversationId/branch", asyncHandler(async (req, res) => {
+  res.json(await agentOrchestrator.branchConversation(req.params.id, req.params.conversationId, req.body));
+}));
+
 app.delete("/api/workspaces/:id/conversations/:conversationId", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.deleteConversation(req.params.id, req.params.conversationId));
 }));
@@ -348,6 +487,7 @@ app.post("/api/workspaces/:id/runs", asyncHandler(async (req, res) => {
 app.get("/api/workspaces/:id/runs", asyncHandler(async (req, res) => {
   res.json(await agentOrchestrator.listAgentRuns(req.params.id, {
     rootSessionId: req.query.rootSessionId || "",
+    summary: req.query.summary === "1",
   }));
 }));
 
@@ -412,7 +552,7 @@ app.post("/api/workspaces/:id/runs/:runId/resume", asyncHandler(async (req, res)
           runId: result.run.id,
           text: result.run.status === "waiting_user"
             ? result.run.output?.question || "RootAgent 正在等待用户输入。"
-            : "",
+            : result.run.output?.displayText || "",
           output: result.run.output,
         },
       });
@@ -452,7 +592,12 @@ app.post("/api/runtime-runs/:runId/requests/:requestId/resolve", asyncHandler(as
 }));
 
 app.post("/api/workspaces/:id/runs/:runId/steer", asyncHandler(async (req, res) => {
-  res.json(await agentOrchestrator.steerAgentRun(req.params.id, req.params.runId, req.body?.input || ""));
+  res.json(await agentOrchestrator.steerAgentRun(
+    req.params.id,
+    req.params.runId,
+    req.body?.input || "",
+    req.body?.attachments || []
+  ));
 }));
 
 async function streamWorkspaceExecution(req, res) {
@@ -534,14 +679,16 @@ app.get("/{*splat}", (_req, res) => {
 });
 
 app.use((error, _req, res, _next) => {
-  const status = error.status || (error.name === "ZodError" ? 400 : 500);
+  const status = error.status || (error.name === "MulterError"
+    ? error.code === "LIMIT_FILE_SIZE" || error.code === "LIMIT_FILE_COUNT" ? 413 : 400
+    : error.name === "ZodError" ? 400 : 500);
   res.status(status).json({
     error: error.message || "Unexpected wrapper error.",
     details: error.details || error.issues,
   });
 });
 
-app.listen(config.wrapperPort, () => {
+app.listen(config.wrapperPort, "127.0.0.1", () => {
   console.log(`Hippo listening on http://localhost:${config.wrapperPort}`);
 });
 
@@ -600,6 +747,64 @@ function inspectCommand(command, args = []) {
       error: code === 0 ? "" : (stderr || stdout).trim() || `退出码 ${code}`,
     }));
   });
+}
+
+function parseAttachmentRelativePaths(value, expectedLength) {
+  if (!value) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(String(value));
+  } catch {
+    throw new HttpError("Attachment relativePaths must be a JSON array.", 400);
+  }
+  if (!Array.isArray(parsed) || parsed.length !== expectedLength) {
+    throw new HttpError("Attachment relativePaths does not match uploaded files.", 400);
+  }
+  return parsed.map(normalizeAttachmentRelativePath);
+}
+
+class HttpError extends Error {
+  constructor(message, status = 500) {
+    super(message);
+    this.status = status;
+  }
+}
+
+function normalizeAttachmentRelativePath(value) {
+  const normalized = String(value || "").replaceAll("\\", "/").replace(/^\/+/, "");
+  const segments = normalized.split("/").filter(Boolean).map(normalizeAttachmentSegment);
+  if (!segments.length || segments.includes("..")) throw new HttpError("Invalid attachment path.", 400);
+  return segments.join("/");
+}
+
+function normalizeAttachmentSegment(value) {
+  const segment = String(value || "").trim();
+  if (!segment || segment === "." || segment === ".." || segment.includes("\0")) {
+    throw new HttpError("Invalid attachment path segment.", 400);
+  }
+  return segment.replaceAll("/", "_");
+}
+
+function assertPathInside(root, target) {
+  const relative = path.relative(root, target);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new HttpError("Attachment path is outside the workspace.", 403);
+  }
+}
+
+function renderWorkspaceDirectory(entries, requestedPath, workspaceId) {
+  const escape = (value) => String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+  const sorted = [...entries].sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
+  const rows = sorted.map((entry) => {
+    const childPath = path.posix.join(String(requestedPath).replaceAll("\\", "/"), entry.name);
+    const href = `/workspace-files/${encodeURIComponent(workspaceId)}?path=${encodeURIComponent(childPath)}`;
+    return `<li><a href="${href}">${entry.isDirectory() ? "目录" : "文件"} · ${escape(entry.name)}</a></li>`;
+  }).join("");
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(requestedPath)}</title><style>:root{color-scheme:dark;font-family:system-ui,sans-serif}body{margin:0;background:#111;color:#eee}header{padding:16px 22px;border-bottom:1px solid #333;background:#181818;font-weight:600}ul{list-style:none;margin:0;padding:12px}li{border-bottom:1px solid #292929}a{display:block;padding:12px;color:#d8e7ff;text-decoration:none}a:hover{background:#202020}</style></head><body><header>${escape(requestedPath)}</header><ul>${rows || "<li><a>空目录</a></li>"}</ul></body></html>`;
 }
 
 function renderWorkspaceFile(contents, fileName) {

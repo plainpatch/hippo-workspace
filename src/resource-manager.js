@@ -2,16 +2,19 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { config } from "./config.js";
-
-const KNOWLEDGE_INDEX_FILE = ".hippo-knowledge-index.json";
+import { SqliteStateStore } from "./storage/sqlite-state-store.js";
 
 export class ResourceManager {
-  constructor({ rootPath = config.resourceRootPath, client }) {
+  constructor({ rootPath = config.resourceRootPath, client, metadataRepository, stateStore }) {
     this.rootPath = rootPath;
     this.client = client;
     this.workspacesDir = path.join(rootPath, "workspaces");
     this.knowledgeDir = path.join(rootPath, "knowledge");
-    this.indexPath = path.join(rootPath, KNOWLEDGE_INDEX_FILE);
+    this.stateStore = stateStore || (!metadataRepository ? new SqliteStateStore({
+      databasePath: path.join(rootPath, "metadata", "hippo.sqlite3"),
+      resourceRootPath: rootPath,
+    }) : null);
+    this.metadataRepository = metadataRepository || this.stateStore.repository;
   }
 
   async ensureBaseDirectories() {
@@ -25,7 +28,7 @@ export class ResourceManager {
       rootPath: this.rootPath,
       workspacesDir: this.workspacesDir,
       knowledgeDir: this.knowledgeDir,
-      indexPath: this.indexPath,
+      metadataDbPath: this.metadataRepository.database.databasePath,
     };
   }
 
@@ -574,23 +577,12 @@ export class ResourceManager {
 
   async readKnowledgeIndex() {
     await this.ensureBaseDirectories();
-    try {
-      const content = await fs.readFile(this.indexPath, "utf8");
-      const index = JSON.parse(content);
-      return {
-        version: 1,
-        drawers: index.drawers && typeof index.drawers === "object" ? index.drawers : {},
-        documents: index.documents && typeof index.documents === "object" ? index.documents : {},
-      };
-    } catch (error) {
-      if (error.code === "ENOENT") return { version: 1, drawers: {}, documents: {} };
-      throw error;
-    }
+    return this.metadataRepository.readKnowledgeIndex();
   }
 
   async writeKnowledgeIndex(index) {
     await this.ensureBaseDirectories();
-    await fs.writeFile(this.indexPath, `${JSON.stringify(index, null, 2)}\n`);
+    this.metadataRepository.writeKnowledgeIndex(index);
   }
 }
 

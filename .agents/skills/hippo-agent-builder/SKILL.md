@@ -1,6 +1,6 @@
 ---
 name: hippo-agent-builder
-description: Design, validate, create, and edit versioned Hippo Agent blueprints through Hippo MCP. Use when a user asks to build an Agent, turn a role or workflow into a single/DAG Agent, improve an existing Agent, add or reorganize Agent nodes, prompts, approvals, RAG, skills, MCP declarations, or review an Agent blueprint before publishing.
+description: Design, validate, create, and edit versioned Hippo Agent blueprints through Hippo MCP. Use when a user asks to build an Agent, turn a role or workflow into a single/Blueprint Agent, improve an existing Agent, add or reorganize Agent nodes, prompts, approvals, RAG, skills, MCP declarations, or review an Agent blueprint before publishing.
 ---
 
 # Hippo Agent Builder
@@ -25,8 +25,8 @@ Read [references/mcp-workflow.md](references/mcp-workflow.md) when invoking tool
 
 ## Design Rules
 
-- Use `type: single` when one role and one runtime session can complete the task. Do not create a DAG for cosmetic phases.
-- Use `type: dag` when work benefits from isolated roles, parallel workers, different permissions, independent review, or explicit handoff artifacts.
+- Use `type: single` when one role and one runtime session can complete the task. Do not create a Blueprint for cosmetic phases.
+- Use `type: blueprint` when work benefits from isolated roles, parallel workers, different permissions, independent review, or explicit handoff artifacts.
 - Keep `root` as the coordinator. Describe worker interfaces; do not make Root duplicate worker execution.
 - Treat edges as the default topology. Put conditional routing, retry, user escalation, and completion guidance in `transitionInstruction`.
 - Keep edge `metadata` empty unless Hippo explicitly supplies a supported display field. Do not invent runtime semantics such as `parallelGroup`, gates, priorities, or conditions in metadata.

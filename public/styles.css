@@ -366,6 +366,25 @@ dd {
   margin: 0 0 5px 17px;
 }
 
+.conversationLoading {
+  min-height: 31px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 9px 4px 15px;
+  color: #999b9e;
+  font-size: 13px;
+}
+
+.conversationLoading span {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-top-color: #c9cacc;
+  border-radius: 50%;
+  animation: attachment-spin 0.8s linear infinite;
+}
+
 .conversationItem {
   position: relative;
   width: 100%;
@@ -628,6 +647,25 @@ dd {
   background: #2d2d2d;
 }
 
+.headerActions .headerIconButton {
+  width: 32px;
+  min-width: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.headerIconButton svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .pill {
   min-height: 24px;
   display: inline-flex;
@@ -874,6 +912,91 @@ dd {
   min-width: 0;
   display: grid;
   gap: 8px;
+}
+
+.messageActions {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.message:hover .messageActions,
+.message:focus-within .messageActions {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .messageActions {
+    opacity: 1;
+  }
+}
+
+.messageActions button {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  color: #a1a1aa;
+  background: transparent;
+}
+
+.messageActions button:hover:not(:disabled),
+.messageActions button.copied {
+  color: #f4f4f5;
+  background: #2a2a2a;
+}
+
+.messageActions button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.messageActions svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.messageEditForm {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 12px;
+  background: #222222;
+}
+
+.messageEditForm textarea {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  border: 0;
+  padding: 0;
+  color: #f4f4f5;
+  background: transparent;
+  font: inherit;
+  line-height: 1.6;
+  outline: 0;
+}
+
+.messageEditActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.messageEditActions button {
+  min-height: 34px;
+  padding: 0 14px;
 }
 
 .runtimeRequestList {
@@ -1377,6 +1500,48 @@ dd {
   font-size: 11px;
 }
 
+.runNode .runNodeProgress {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.runNode .runNodeStage {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: #b8b8bd;
+  font-size: 11px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runNodeProgress time {
+  flex: 0 0 auto;
+  color: #77777d;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.runNodePulse {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #72a7f7;
+  box-shadow: 0 0 0 0 rgba(114, 167, 247, 0.45);
+  animation: executionPulse 1.6s ease-out infinite;
+}
+
 .runNode.completed {
   border-color: rgba(16, 185, 129, 0.26);
 }
@@ -1651,6 +1816,86 @@ dd {
   box-shadow: none;
 }
 
+.composerAttachmentTray {
+  display: flex;
+  gap: 8px;
+  padding: 0 0 11px;
+  overflow-x: auto;
+}
+
+.composerAttachment {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  width: 210px;
+  min-height: 54px;
+  gap: 9px;
+  padding: 7px 32px 7px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: #1b1b1b;
+}
+
+.composerAttachment > img {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+
+.composerAttachment > span:not(.composerAttachmentIcon, .attachmentSpinner) {
+  min-width: 0;
+}
+
+.composerAttachment strong,
+.composerAttachment small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composerAttachment strong { color: #eee; font-size: 12px; }
+.composerAttachment small { margin-top: 3px; color: var(--muted); font-size: 11px; }
+.composerAttachmentIcon { font-size: 24px; color: #a8a8aa; }
+.composerAttachment > button {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #333;
+}
+
+.attachmentMenuWrap { position: relative; }
+.attachmentMenuButton { width: 30px; font-size: 20px; }
+.attachmentMenu {
+  position: absolute;
+  z-index: 20;
+  bottom: 38px;
+  left: 0;
+  width: 150px;
+  padding: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #292929;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, .42);
+}
+.attachmentMenu button { width: 100%; justify-content: flex-start; }
+.attachmentSpinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #555;
+  border-top-color: #eee;
+  border-radius: 50%;
+  animation: attachment-spin .8s linear infinite;
+}
+@keyframes attachment-spin { to { transform: rotate(360deg); } }
+
 .composerBar {
   display: flex;
   align-items: center;
@@ -1703,6 +1948,42 @@ dd {
   border-radius: 8px;
   background: #1e1e1e;
 }
+
+#agentSelect {
+  width: 190px;
+  max-width: min(190px, 38vw);
+}
+
+.messageAttachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.messageAttachment {
+  display: flex;
+  align-items: center;
+  width: min(260px, 100%);
+  min-height: 58px;
+  gap: 10px;
+  padding: 8px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: inherit;
+  background: #202020;
+  text-decoration: none;
+}
+.messageAttachment:hover { background: #292929; }
+.messageAttachment.image { display: block; width: min(360px, 100%); padding: 0; overflow: hidden; }
+.messageAttachment.image img { display: block; width: 100%; max-height: 280px; object-fit: contain; background: #111; }
+.messageAttachment.image span { display: block; padding: 7px 10px; color: var(--muted); font-size: 12px; }
+.messageAttachment > span:last-child { min-width: 0; }
+.messageAttachment strong, .messageAttachment small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.messageAttachment small { margin-top: 4px; color: var(--muted); font-size: 12px; }
+.messageAttachmentIcon { flex: 0 0 auto; font-size: 25px; color: #aaa; }
+.messageText img, .messageText video { display: block; max-width: 100%; max-height: 520px; margin: 12px 0; border-radius: 8px; object-fit: contain; }
+.messageText audio { display: block; width: min(520px, 100%); margin: 12px 0; }
 
 .checkRow input {
   width: 15px;
@@ -1833,7 +2114,7 @@ dd {
   gap: 10px;
 }
 
-.dagFields {
+.blueprintFields {
   display: grid;
   gap: 12px;
 }
@@ -1850,7 +2131,7 @@ dd {
   min-width: 0;
 }
 
-.configDrawer.wide #agentDagFields {
+.configDrawer.wide #agentBlueprintFields {
   grid-column: 2;
   grid-row: 1 / span 5;
   position: sticky;
@@ -1872,7 +2153,7 @@ dd {
   margin-inline: auto;
 }
 
-.dagBuilder {
+.blueprintBuilder {
   display: grid;
   gap: 10px;
   border: 1px solid var(--line-strong);
@@ -1881,36 +2162,36 @@ dd {
   background: #1b1b1b;
 }
 
-.dagBuilderHeader,
-.dagPreviewRow {
+.blueprintBuilderHeader,
+.blueprintPreviewRow {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
 }
 
-.dagBuilderActions {
+.blueprintBuilderActions {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
 }
 
-.dagBuilderHeader button,
-.dagPreviewRow button,
-.dagInspector button {
+.blueprintBuilderHeader button,
+.blueprintPreviewRow button,
+.blueprintInspector button {
   min-height: 28px;
   padding: 4px 8px;
 }
 
-.dagVisualEditor {
+.blueprintVisualEditor {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(210px, 250px);
   gap: 10px;
   min-height: calc(100vh - 220px);
 }
 
-.dagCanvasShell {
+.blueprintCanvasShell {
   min-width: 0;
   overflow: auto;
   border: 1px solid var(--line-strong);
@@ -1920,20 +2201,20 @@ dd {
     #151515;
 }
 
-.dagGraphPreview {
+.blueprintGraphPreview {
   position: relative;
   min-width: 760px;
   min-height: calc(100vh - 222px);
 }
 
-.dagCanvas {
+.blueprintCanvas {
   position: absolute;
   inset: 0;
   z-index: 2;
   pointer-events: none;
 }
 
-.dagCanvasNode {
+.blueprintCanvasNode {
   position: absolute;
   width: 210px;
   height: 188px;
@@ -1954,22 +2235,22 @@ dd {
   overflow: visible;
 }
 
-.dagCanvasNode:active {
+.blueprintCanvasNode:active {
   cursor: grabbing;
 }
 
-.dagCanvasNode.root {
+.blueprintCanvasNode.root {
   border-color: rgba(16, 185, 129, 0.45);
   background: #1b2924;
 }
 
-.dagCanvasNode.selected {
+.blueprintCanvasNode.selected {
   border-color: rgba(129, 140, 248, 0.85);
   box-shadow: 0 0 0 2px rgba(129, 140, 248, 0.22), 0 16px 36px rgba(0, 0, 0, 0.28);
 }
 
-.dagNodeHeader,
-.dagNodeIO {
+.blueprintNodeHeader,
+.blueprintNodeIO {
   min-width: 0;
   display: flex;
   align-items: center;
@@ -1977,7 +2258,7 @@ dd {
   gap: 8px;
 }
 
-.dagNodeHeader strong {
+.blueprintNodeHeader strong {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1985,14 +2266,14 @@ dd {
   font-size: 13px;
 }
 
-.dagNodeHeader span,
-.dagCanvasNode small,
-.dagNodeIO span {
+.blueprintNodeHeader span,
+.blueprintCanvasNode small,
+.blueprintNodeIO span {
   color: var(--muted);
   font-size: 11px;
 }
 
-.dagCanvasNode p {
+.blueprintCanvasNode p {
   margin: 0;
   color: #d8d8d8;
   font-size: 12px;
@@ -2003,17 +2284,17 @@ dd {
   -webkit-line-clamp: 2;
 }
 
-.dagNodeIO {
+.blueprintNodeIO {
   align-items: flex-start;
   flex-direction: column;
 }
 
-.dagNodeIO span {
+.blueprintNodeIO span {
   max-width: 100%;
   overflow-wrap: anywhere;
 }
 
-.dagPort {
+.blueprintPort {
   position: absolute;
   top: 50%;
   z-index: 3;
@@ -2027,27 +2308,27 @@ dd {
   touch-action: none;
 }
 
-.dagPort.input {
+.blueprintPort.input {
   left: -8px;
 }
 
-.dagPort.output {
+.blueprintPort.output {
   right: -8px;
 }
 
-.dagPort:hover,
-.dagPort.connectionTarget {
+.blueprintPort:hover,
+.blueprintPort.connectionTarget {
   border-color: #c7c9ff;
   background: #7c83ff;
   box-shadow: 0 0 0 5px rgba(124, 131, 255, 0.18);
 }
 
-.dagPort.disabled {
+.blueprintPort.disabled {
   opacity: 0.28;
   pointer-events: none;
 }
 
-.dagEdgeLayer {
+.blueprintEdgeLayer {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -2056,25 +2337,25 @@ dd {
   pointer-events: none;
 }
 
-.dagEdgePath {
+.blueprintEdgePath {
   fill: none;
   stroke: #7c83ff;
   stroke-width: 2;
   opacity: 0.86;
 }
 
-.dagEdgePath.selected {
+.blueprintEdgePath.selected {
   stroke: #c7c9ff;
   stroke-width: 3;
   opacity: 1;
 }
 
-.dagEdgePath.pending {
+.blueprintEdgePath.pending {
   stroke-dasharray: 6 5;
   marker-end: none;
 }
 
-.dagEdgeHit {
+.blueprintEdgeHit {
   fill: none;
   stroke: transparent;
   stroke-width: 14;
@@ -2082,7 +2363,7 @@ dd {
   cursor: pointer;
 }
 
-.dagInspector {
+.blueprintInspector {
   min-width: 0;
   min-height: 0;
   display: grid;
@@ -2095,27 +2376,27 @@ dd {
   background: #202020;
 }
 
-.dagInspectorHeader {
+.blueprintInspectorHeader {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
 
-.dagInspectorActions {
+.blueprintInspectorActions {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
 }
 
-.dagInspectorHeader strong,
-.dagEdgeEditor strong {
+.blueprintInspectorHeader strong,
+.blueprintEdgeEditor strong {
   color: #f1f1f1;
   font-size: 12px;
 }
 
-.dagEdgeEditor {
+.blueprintEdgeEditor {
   display: grid;
   gap: 8px;
   border-top: 1px solid var(--line);
@@ -2123,24 +2404,24 @@ dd {
   padding-top: 10px;
 }
 
-.dagEdgeEditorHeader {
+.blueprintEdgeEditorHeader {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
 
-.dagEdgeEditorHeader small {
+.blueprintEdgeEditorHeader small {
   color: var(--muted);
   font-size: 11px;
 }
 
-.dagConnectionSummary {
+.blueprintConnectionSummary {
   display: grid;
   gap: 7px;
 }
 
-.dagConnectionSummary div {
+.blueprintConnectionSummary div {
   min-width: 0;
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr);
@@ -2148,13 +2429,13 @@ dd {
   gap: 8px;
 }
 
-.dagConnectionSummary span,
-.dagConnectionSummary small {
+.blueprintConnectionSummary span,
+.blueprintConnectionSummary small {
   color: var(--muted);
   font-size: 11px;
 }
 
-.dagConnectionSummary strong {
+.blueprintConnectionSummary strong {
   min-width: 0;
   color: #e7e7e7;
   font-size: 11px;
@@ -2163,35 +2444,35 @@ dd {
   white-space: nowrap;
 }
 
-.dagJsonDetails {
+.blueprintJsonDetails {
   border: 1px solid var(--line-strong);
   border-radius: 8px;
   padding: 8px 10px;
   background: #1b1b1b;
 }
 
-.dagJsonDetails summary {
+.blueprintJsonDetails summary {
   cursor: pointer;
   color: #d8d8d8;
   font-weight: 650;
   font-size: 12px;
 }
 
-.dagPreviewSection {
+.blueprintPreviewSection {
   display: grid;
   gap: 6px;
 }
 
-.dagPreviewSection strong {
+.blueprintPreviewSection strong {
   color: #f1f1f1;
   font-size: 12px;
 }
 
-.dagPreviewSection small {
+.blueprintPreviewSection small {
   color: var(--muted);
 }
 
-.dagPreviewRow {
+.blueprintPreviewRow {
   min-width: 0;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 7px;
@@ -2199,7 +2480,7 @@ dd {
   background: #222222;
 }
 
-.dagPreviewRow span {
+.blueprintPreviewRow span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2454,7 +2735,7 @@ dd {
 }
 
 .agentEditorMeta label,
-.dagInspector label {
+.blueprintInspector label {
   min-width: 0;
   display: grid;
   gap: 5px;
@@ -2462,13 +2743,13 @@ dd {
   font-size: 12px;
 }
 
-.dagInspector .dagNodeRagToggle {
+.blueprintInspector .blueprintNodeRagToggle {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.dagNodeRagToggle input {
+.blueprintNodeRagToggle input {
   width: 16px;
   height: 16px;
   margin: 0;
@@ -2481,12 +2762,12 @@ dd {
   gap: 10px;
 }
 
-.agentCanvasLayout .dagCanvasShell {
+.agentCanvasLayout .blueprintCanvasShell {
   min-height: 0;
   height: 100%;
 }
 
-.agentCanvasLayout .dagGraphPreview {
+.agentCanvasLayout .blueprintGraphPreview {
   min-height: 100%;
 }
 
@@ -3301,7 +3582,7 @@ dd {
   }
 
   .knowledgeDirectoryItem,
-  .dagVisualEditor,
+  .blueprintVisualEditor,
   .agentCanvasLayout,
   .agentEditorMeta {
     grid-template-columns: 1fr;
@@ -3315,13 +3596,13 @@ dd {
     grid-template-columns: 1fr;
   }
 
-  .configDrawer.wide #agentDagFields {
+  .configDrawer.wide #agentBlueprintFields {
     grid-column: auto;
     grid-row: auto;
     position: static;
   }
 
-  .dagGraphPreview {
+  .blueprintGraphPreview {
     min-width: 640px;
   }
 

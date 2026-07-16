@@ -34,14 +34,14 @@ test("Hippo Agent Builder skill documents the complete versioned MCP workflow", 
   assert.doesNotMatch(`${skill}\n${workflow}\n${guidelines}`, /\bTODO\b/i);
 });
 
-test("Hippo Agent Builder reference DAG is accepted by the current live contract", async () => {
+test("Hippo Agent Builder reference Blueprint is accepted by the current live contract", async () => {
   const guidelines = await fs.readFile(path.join(skillRoot, "references", "design-guidelines.md"), "utf8");
   const jsonBlock = guidelines.match(/```json\n([\s\S]*?)\n```/);
   assert.ok(jsonBlock, "design guidelines must contain a canonical JSON example");
 
   const blueprint = JSON.parse(jsonBlock[1]);
   const orchestrator = new AgentOrchestrator({
-    storePath: path.join(repoRoot, ".unused-agent-builder-test.json"),
+    databasePath: path.join(repoRoot, ".unused-agent-builder-test.json"),
     runtimeRegistry: {},
     ragProvider: {},
     settings: {},

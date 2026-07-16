@@ -5,12 +5,362 @@ import path from "node:path";
 import test from "node:test";
 import { AgentOrchestrator } from "../src/agent-orchestrator.js";
 
+test("concurrent graph advances share one coordinator execution", async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-graph-lease-test-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const orchestrator = new AgentOrchestrator({
+    databasePath: path.join(home, "hippo.sqlite3"),
+    runtimeRegistry: {},
+    ragProvider: {},
+    settings: {},
+  });
+  let calls = 0;
+  orchestrator.runGraphCoordinator = async () => {
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    return { run: { id: "run", status: "completed" } };
+  };
+  const args = [{ id: "workspace" }, { executionPolicy: {} }, {}, "run"];
+  const [first, second] = await Promise.all([
+    orchestrator.coordinateGraphRun(...args),
+    orchestrator.coordinateGraphRun(...args),
+  ]);
+  assert.equal(calls, 1);
+  assert.strictEqual(first, second);
+  assert.equal(orchestrator.graphRunExecutions.size, 0);
+});
+
+test("a Blueprint run cannot complete while a worker remains active", async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-terminal-guard-test-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const orchestrator = new AgentOrchestrator({
+    databasePath: path.join(home, "hippo.sqlite3"),
+    runtimeRegistry: {},
+    ragProvider: {},
+    settings: {},
+  });
+  await orchestrator.writeStore({
+    version: 1,
+    workspaces: [{ id: "workspace", name: "QA", agentIds: [], knowledgeDomainRefs: [], knowledgeTopicRefs: [] }],
+    agents: [],
+    conversations: [],
+    agentRuns: [{
+      id: "run",
+      workspaceId: "workspace",
+      status: "running",
+      agentSnapshot: { type: "blueprint", rootNodeId: "root", nodes: [{ id: "root" }, { id: "worker" }], edges: [] },
+      rootCoordinator: { status: "running" },
+      nodeRuns: {
+        root: { id: "root-run", nodeId: "root", prototypeNodeId: "root", status: "pending", trace: [] },
+        worker: { id: "worker-run", nodeId: "worker", prototypeNodeId: "worker", status: "running", runtimeRunId: "runtime-worker", trace: [] },
+      },
+      trace: [],
+    }],
+  });
+  await assert.rejects(
+    orchestrator.completeBlueprintRun("workspace", "run", { status: "completed", output: { text: "too early" } }),
+    (error) => error.status === 409 && error.details.activeNodeRunIds.includes("worker-run")
+  );
+  assert.equal((await orchestrator.getAgentRun("workspace", "run")).run.status, "running");
+});
+
+test("deleting a conversation deletes its persisted Codex sessions", async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-thread-delete-test-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const deleted = [];
+  const orchestrator = new AgentOrchestrator({
+    databasePath: path.join(home, "hippo.sqlite3"),
+    runtimeRegistry: { deleteSession: async (session) => deleted.push(session.sessionId) },
+    ragProvider: {},
+    settings: {},
+  });
+  await orchestrator.writeStore({
+    version: 1,
+    workspaces: [{ id: "workspace", name: "QA", localWorkspacePath: home, agentIds: [], knowledgeDomainRefs: [], knowledgeTopicRefs: [] }],
+    agents: [],
+    conversations: [{
+      id: "conversation",
+      workspaceId: "workspace",
+      title: "Delete me",
+      messages: [],
+      runtimeSessions: { codex: { provider: "codex", sessionId: "thread-conversation", runtimeOptions: { mcpServerUrls: { hippo: "http://127.0.0.1/mcp" } } } },
+      metadata: {},
+    }],
+    agentRuns: [{
+      id: "run",
+      workspaceId: "workspace",
+      rootSessionId: "conversation",
+      status: "completed",
+      agentSnapshot: { id: "agent", name: "Agent", type: "blueprint" },
+      rootCoordinator: { runtimeSession: { provider: "codex", sessionId: "thread-root" } },
+      nodeRuns: { worker: { id: "worker", nodeId: "worker", status: "completed", runtimeSession: { provider: "codex", sessionId: "thread-worker" } } },
+      trace: [],
+    }],
+  });
+  const stored = (await orchestrator.getConversation("workspace", "conversation")).conversation;
+  assert.equal(stored.runtimeSessions.codex.runtimeOptions.mcpServerUrls.hippo, "http://127.0.0.1/mcp");
+  await orchestrator.deleteConversation("workspace", "conversation");
+  assert.deepEqual(deleted.sort(), ["thread-conversation", "thread-root", "thread-worker"]);
+});
+
+test("conversation summaries omit message payloads used only by the active conversation", async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-conversation-summary-test-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const orchestrator = new AgentOrchestrator({
+    databasePath: path.join(home, "agent-store.json"),
+    runtimeRegistry: {},
+    ragProvider: {},
+    settings: {},
+  });
+  const workspace = { id: "workspace", name: "QA", agentIds: [], knowledgeDomainRefs: [], knowledgeTopicRefs: [] };
+  const conversation = {
+    id: "conversation",
+    type: "root",
+    workspaceId: workspace.id,
+    title: "Large history",
+    messages: [{ role: "assistant", text: "x".repeat(10_000) }],
+    metadata: {},
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  };
+  await orchestrator.writeStore({
+    version: 1,
+    workspaces: [workspace],
+    agents: [],
+    conversations: [conversation],
+    agentRuns: [{
+      id: "run",
+      workspaceId: workspace.id,
+      rootSessionId: conversation.id,
+      status: "waiting_approval",
+      agentSnapshot: { id: "agent", name: "QA Agent", type: "blueprint" },
+      trace: [{ type: "root_coordinator_started", payload: { large: "x".repeat(10_000) }, createdAt: "2026-01-01T00:00:01.000Z" }],
+      nodeRuns: {
+        node: {
+          id: "node",
+          nodeId: "writer",
+          status: "waiting_approval",
+          output: { text: "review this" },
+          trace: [{ type: "node_run_started", payload: { large: "x".repeat(10_000) }, createdAt: "2026-01-01T00:00:02.000Z" }],
+        },
+      },
+    }],
+  });
+
+  const full = (await orchestrator.listConversations(workspace.id)).conversations[0];
+  const summary = (await orchestrator.listConversations(workspace.id, { summary: true })).conversations[0];
+  assert.equal(full.messages[0].text.length, 10_000);
+  assert.equal(summary.messages, undefined);
+  assert.equal(summary.messageCount, 1);
+  assert.equal(summary.title, conversation.title);
+  const fullRun = (await orchestrator.listAgentRuns(workspace.id)).runs[0];
+  const runSummary = (await orchestrator.listAgentRuns(workspace.id, { summary: true })).runs[0];
+  assert.equal(fullRun.trace[0].payload.large.length, 10_000);
+  assert.equal(runSummary.trace, undefined);
+  assert.equal(runSummary.agentSnapshot.systemPrompt, undefined);
+  assert.equal(runSummary.nodeRuns.node.trace, undefined);
+  assert.equal(runSummary.nodeRuns.node.output.text, "review this");
+  assert.equal(runSummary.nodeRuns.node.startedAt, "2026-01-01T00:00:02.000Z");
+});
+
+test("Blueprint nodes complete as soon as expected image artifacts are stable", async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-artifact-recovery-test-"));
+  const workspacePath = path.join(home, "workspace");
+  await fs.mkdir(workspacePath, { recursive: true });
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+
+  let rejectRuntime;
+  const artifactRuntime = {
+    stream: async () => {
+      const outputDirectory = path.join(workspacePath, "assets");
+      await fs.mkdir(outputDirectory, { recursive: true });
+      await fs.writeFile(path.join(outputDirectory, "cover.png"), "cover-image");
+      await fs.writeFile(path.join(outputDirectory, "detail.png"), "detail-image");
+      return new Promise((resolve, reject) => { rejectRuntime = reject; });
+    },
+  };
+  const runtimeRegistry = {
+    getRuntime: () => artifactRuntime,
+    cancelRun: () => {
+      const error = new Error("Runtime run was cancelled after expected artifacts completed.");
+      error.status = 499;
+      error.details = { cancelled: true };
+      rejectRuntime?.(error);
+      return { cancelled: true };
+    },
+  };
+  const orchestrator = new AgentOrchestrator({
+    databasePath: path.join(home, "hippo.sqlite3"),
+    runtimeRegistry,
+    ragProvider: {},
+    settings: {},
+  });
+  const workspace = {
+    id: "workspace",
+    name: "QA",
+    localWorkspacePath: workspacePath,
+    agentIds: ["agent"],
+    knowledgeDomainRefs: [],
+    knowledgeTopicRefs: [],
+  };
+  const input = {
+    nodeTask: "生成两张配图",
+    relevantContext: {},
+    contextRefs: [],
+    requirements: [],
+    expectedArtifacts: [{ type: "image", count: 2, description: "两张 PNG 配图" }],
+  };
+  const agent = {
+    id: "agent",
+    name: "Image Agent",
+    type: "blueprint",
+    runtimeId: "codex",
+    rootNodeId: "root",
+    nodes: [
+      { id: "root", name: "Root", kind: "task", runtimeId: "codex" },
+      { id: "visual", name: "Visual", kind: "task", runtimeId: "codex", resultApprovalPolicy: "none" },
+    ],
+    edges: [{ from: "root", to: "visual" }],
+  };
+  const nodeRunId = "run:visual:1";
+  await orchestrator.writeStore({
+    version: 1,
+    workspaces: [workspace],
+    agents: [agent],
+    conversations: [{
+      id: "conversation",
+      type: "root",
+      workspaceId: workspace.id,
+      title: "Image task",
+      messages: [],
+      runtimeSessions: {},
+      runIds: ["run"],
+      metadata: {},
+    }],
+    agentRuns: [{
+      id: "run",
+      workspaceId: workspace.id,
+      rootSessionId: "conversation",
+      agentId: agent.id,
+      agentSnapshot: agent,
+      status: "running",
+      request: { runtimeId: "codex", runtimeOptions: {}, attachments: [] },
+      rootCoordinator: { prototypeNodeId: "root", status: "ready", decisionCount: 1 },
+      nodeRuns: {
+        [nodeRunId]: {
+          id: nodeRunId,
+          runId: "run",
+          nodeId: "visual",
+          prototypeNodeId: "visual",
+          attempt: 1,
+          status: "ready",
+          input,
+          trace: [],
+        },
+      },
+      trace: [],
+    }],
+  });
+
+  const startedAt = Date.now();
+  await orchestrator.executeBlueprintNode(workspace, agent, {
+    runtimeId: "codex",
+    runtimeOptions: {},
+    attachments: [],
+    task: "生成两张配图",
+  }, "run", nodeRunId);
+
+  const stored = (await orchestrator.getNodeRun(workspace.id, "run", nodeRunId)).nodeRun;
+  assert.equal(stored.status, "completed");
+  assert.equal(stored.output.completedFromArtifacts, true);
+  assert.equal(stored.output.recoveredAfterTimeout, false);
+  assert.ok(Date.now() - startedAt < 4000, "node should not wait for the runtime timeout");
+  assert.deepEqual(stored.output.artifacts.map((item) => item.relativePath), ["assets/cover.png", "assets/detail.png"]);
+  const indexed = orchestrator.stateStore.repository.listArtifacts(workspace.id, { runId: "run" });
+  assert.equal(indexed.length, 2);
+  assert.ok(indexed.every((item) => item.artifactType === "image"));
+});
+
+test("Blueprint completion renders referenced content and workspace images instead of JSON", async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-blueprint-display-test-"));
+  const workspacePath = path.join(home, "workspace");
+  await fs.mkdir(workspacePath, { recursive: true });
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const orchestrator = new AgentOrchestrator({
+    databasePath: path.join(home, "hippo.sqlite3"),
+    runtimeRegistry: {},
+    ragProvider: {},
+    settings: { resourceRootPath: home },
+  });
+  const workspace = {
+    id: "workspace",
+    name: "QA",
+    localWorkspacePath: workspacePath,
+    agentIds: ["agent"],
+    knowledgeDomainRefs: [],
+    knowledgeTopicRefs: [],
+  };
+  const agent = {
+    id: "agent",
+    name: "Writer",
+    type: "blueprint",
+    rootNodeId: "root",
+    nodes: [{ id: "root", name: "Root", kind: "task" }],
+    edges: [],
+  };
+  await orchestrator.writeStore({
+    version: 1,
+    workspaces: [workspace],
+    agents: [agent],
+    conversations: [{
+      id: "conversation",
+      type: "root",
+      workspaceId: workspace.id,
+      title: "Display",
+      messages: [],
+      runtimeSessions: {},
+      runIds: ["run"],
+      metadata: {},
+    }],
+    agentRuns: [{
+      id: "run",
+      workspaceId: workspace.id,
+      rootSessionId: "conversation",
+      agentId: agent.id,
+      agentSnapshot: agent,
+      status: "coordinating",
+      rootCoordinator: { prototypeNodeId: "root", status: "ready", decisionCount: 1 },
+      nodeRuns: {},
+      trace: [],
+    }],
+  });
+  const context = await orchestrator.contextStore.write({
+    workspacePath,
+    sessionId: "conversation",
+    title: "Final article",
+    content: "# 最终正文\n\n这是可直接展示的内容。",
+  });
+
+  const completed = await orchestrator.completeGraphRun(workspace.id, "run", {
+    output: {
+      status: "completed",
+      summary: "完成",
+      finalContent: { ref: context.ref },
+      images: [{ title: "配图一", relativePath: "assets/final.png", path: path.join(workspacePath, "assets/final.png") }],
+    },
+  });
+
+  assert.match(completed.run.output.displayText, /^# 最终正文/);
+  assert.match(completed.run.output.displayText, /!\[配图一\]\(\/workspace-files\/workspace\?path=assets%2Ffinal\.png\)/);
+  assert.doesNotMatch(completed.run.output.displayText, /^\s*\{/);
+});
+
 test("restart reconciliation fails managed pending/running runs but preserves manually staged graph runs", async (t) => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-reconcile-test-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
-  const storePath = path.join(home, "agent-store.json");
+  const databasePath = path.join(home, "hippo.sqlite3");
   const orchestrator = new AgentOrchestrator({
-    storePath,
+    databasePath,
     runtimeRegistry: {},
     ragProvider: {},
     settings: {},
@@ -75,8 +425,8 @@ function resultApprovalRun(id, status, damaged = false) {
     status,
     error,
     agentSnapshot: {
-      type: "dag",
-      name: "Approval DAG",
+      type: "blueprint",
+      name: "Approval Blueprint",
       rootNodeId: "root",
       nodes: [
         { id: "root", name: "Root", resultApprovalPolicy: "none" },
@@ -107,7 +457,7 @@ test("conversation updates and managed run creation do not overwrite each other"
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-store-lock-test-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const orchestrator = new AgentOrchestrator({
-    storePath: path.join(home, "agent-store.json"),
+    databasePath: path.join(home, "agent-store.json"),
     runtimeRegistry: {},
     ragProvider: {},
     settings: {},
@@ -153,6 +503,61 @@ test("conversation updates and managed run creation do not overwrite each other"
   assert.equal(storedRun.status, "pending");
 });
 
+test("editing and resending branches a conversation and clears later runtime state", async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-conversation-branch-test-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const deletedSessions = [];
+  const orchestrator = new AgentOrchestrator({
+    databasePath: path.join(home, "agent-store.json"),
+    runtimeRegistry: { deleteSession: async (session) => deletedSessions.push(session.sessionId) },
+    ragProvider: {},
+    settings: {},
+  });
+  const workspace = { id: "workspace", name: "QA", agentIds: [], knowledgeDomainRefs: [], knowledgeTopicRefs: [] };
+  const conversation = {
+    id: "conversation",
+    type: "root",
+    workspaceId: workspace.id,
+    title: "First",
+    messages: [
+      { role: "user", text: "first", runId: "run-1" },
+      { role: "assistant", text: "first answer", runId: "run-1" },
+      { role: "user", text: "second", runId: "run-2" },
+      { role: "assistant", text: "second answer", runId: "run-2" },
+    ],
+    runtimeSessions: { codex: { provider: "codex", sessionId: "old-codex-session" } },
+    runIds: ["run-1", "run-2"],
+    metadata: { runtimeSessions: { codex: { provider: "codex", sessionId: "old-codex-session" } } },
+  };
+  const makeRun = (id) => ({
+    id,
+    workspaceId: workspace.id,
+    rootSessionId: conversation.id,
+    status: "completed",
+    nodeRuns: {},
+    trace: [],
+  });
+  await orchestrator.writeStore({
+    version: 1,
+    workspaces: [workspace],
+    agents: [],
+    conversations: [conversation],
+    agentRuns: [makeRun("run-1"), makeRun("run-2")],
+  });
+
+  const branched = (await orchestrator.branchConversation(workspace.id, conversation.id, { messageIndex: 2 })).conversation;
+  assert.deepEqual(branched.messages.map((message) => message.text), ["first", "first answer"]);
+  assert.deepEqual(branched.runtimeSessions, {});
+  assert.deepEqual(branched.metadata.runtimeSessions, {});
+  assert.deepEqual(branched.runIds, ["run-1"]);
+  assert.deepEqual(deletedSessions, ["old-codex-session"]);
+  assert.deepEqual((await orchestrator.listAgentRuns(workspace.id)).runs.map((run) => run.id), ["run-1"]);
+  await assert.rejects(
+    orchestrator.branchConversation(workspace.id, conversation.id, { messageIndex: 1 }),
+    /Only an existing user message/
+  );
+});
+
 test("RAG scope omits documents and document listing enforces workspace authorization", async (t) => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-rag-scope-test-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
@@ -180,7 +585,7 @@ test("RAG scope omits documents and document listing enforces workspace authoriz
     },
   };
   const orchestrator = new AgentOrchestrator({
-    storePath: path.join(home, "agent-store.json"),
+    databasePath: path.join(home, "agent-store.json"),
     resourceManager,
     runtimeRegistry: {},
     ragProvider: {},
@@ -245,7 +650,7 @@ test("RAG search results include their accessible Hippo document paths", async (
     },
   };
   const orchestrator = new AgentOrchestrator({
-    storePath: path.join(home, "agent-store.json"),
+    databasePath: path.join(home, "agent-store.json"),
     resourceManager,
     runtimeRegistry: {},
     ragProvider: {

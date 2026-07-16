@@ -9,7 +9,7 @@ test("default workspace is created once without repurposing an existing workspac
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-default-workspace-test-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const orchestrator = new AgentOrchestrator({
-    storePath: path.join(home, "agents.json"),
+    databasePath: path.join(home, "agents.json"),
     runtimeRegistry: {},
     ragProvider: {},
     settings: {},
@@ -43,7 +43,7 @@ test("workspace MCP loading is explicit while RAG remains node-scoped", async (t
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-workspace-mcp-test-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const orchestrator = new AgentOrchestrator({
-    storePath: path.join(home, "agents.json"),
+    databasePath: path.join(home, "agents.json"),
     runtimeRegistry: {},
     ragProvider: {},
     settings: {},

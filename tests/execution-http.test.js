@@ -294,8 +294,8 @@ test("HTTP settings expose automatic diagnostics and validate editable values", 
   );
 });
 
-test("DAG app-server approvals route to coordinator and worker turns while the root thread resumes", { timeout: 20000 }, async (t) => {
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-dag-app-server-test-"));
+test("Blueprint app-server approvals route to coordinator and worker turns while the root thread resumes", { timeout: 20000 }, async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-blueprint-app-server-test-"));
   const port = await getFreePort();
   const server = await startServer({
     home,
@@ -312,8 +312,8 @@ test("DAG app-server approvals route to coordinator and worker turns while the r
   const agent = (await jsonRequest(port, "/api/agents", {
     method: "POST",
     body: {
-      type: "dag",
-      name: "DAG Control QA",
+      type: "blueprint",
+      name: "Blueprint Control QA",
       runtimeId: "codex",
       rootNodeId: "root",
       nodes: [
@@ -325,15 +325,15 @@ test("DAG app-server approvals route to coordinator and worker turns while the r
   })).agent;
   const workspace = (await jsonRequest(port, "/api/workspaces", {
     method: "POST",
-    body: { name: "DAG Control QA", agentIds: [agent.id] },
+    body: { name: "Blueprint Control QA", agentIds: [agent.id] },
   })).workspace;
   const conversation = (await jsonRequest(port, `/api/workspaces/${workspace.id}/conversations`, {
     method: "POST",
-    body: { title: "DAG", messages: [] },
+    body: { title: "Blueprint", messages: [] },
   })).conversation;
   const runId = "77777777-7777-4777-8777-777777777777";
   const response = await startExecution(port, workspace.id, {
-    task: "DAG_APPROVAL",
+    task: "Blueprint_APPROVAL",
     agentId: agent.id,
     sessionId: conversation.id,
     runId,
@@ -376,7 +376,7 @@ test("DAG app-server approvals route to coordinator and worker turns while the r
     `http://127.0.0.1:${port}/api/workspaces/${workspace.id}/runs/${runId}/events?after=${workerApproval.sequence}`
   );
   const waitingForResultApproval = await readEvents(completionResponse.body, (events) => events.some(isTerminalEvent));
-  assert.ok(waitingForResultApproval.events.some((event) => event.type === "dag_node_waiting"));
+  assert.ok(waitingForResultApproval.events.some((event) => event.type === "blueprint_node_waiting"));
   assert.ok(waitingForResultApproval.events.some((event) => event.type === "done"));
 
   const waitingRun = (await jsonRequest(port, `/api/workspaces/${workspace.id}/runs/${runId}`)).run;
@@ -394,16 +394,115 @@ test("DAG app-server approvals route to coordinator and worker turns while the r
   const resumedEvents = await readEvents(resumedResponse.body, (events) => events.some(isTerminalEvent));
   assert.ok(resumedEvents.events.some((event) => event.type === "root_coordinator_started"));
   assert.ok(resumedEvents.events.some((event) => event.type === "done"));
+  assert.equal(resumedEvents.events.find((event) => event.type === "done").result.text, "Blueprint complete");
 
   const completed = (await jsonRequest(port, `/api/workspaces/${workspace.id}/runs/${runId}`)).run;
+  const updatedConversation = (await jsonRequest(port, `/api/workspaces/${workspace.id}/conversations/${conversation.id}`)).conversation;
+  assert.equal(updatedConversation.activeAgentId, agent.id);
   assert.equal(completed.status, "completed");
-  assert.equal(completed.output.result, "DAG complete");
+  assert.equal(completed.output.result, "Blueprint complete");
+  assert.equal(completed.output.displayText, "Blueprint complete");
   assert.equal(completed.rootCoordinator.decisionCount, 2);
+  assert.equal(completed.rootCoordinator.lastDecision.action, "graph_tool_managed");
   assert.equal(completed.rootCoordinator.runtimeSession.sessionId, "thread-1");
+  assert.equal(
+    completed.trace.filter((event) => event.type === "runtime_event" && event.payload?.eventType === "turn_started").length,
+    3,
+    "two coordinator turns and one worker turn should each be persisted once"
+  );
   const workerRun = Object.values(completed.nodeRuns).find((node) => node.prototypeNodeId === "worker");
   assert.equal(workerRun.status, "completed");
   assert.deepEqual(workerRun.approval.value, { decision: "approved" });
   assert.equal(workerRun.runtimeSession.sessionId, "thread-2");
+});
+
+test("Blueprint worker receives the immutable request and Root dispatch contract", { timeout: 15000 }, async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-blueprint-context-test-"));
+  const port = await getFreePort();
+  const server = await startServer({
+    home,
+    logPath: path.join(home, "unused.log"),
+    port,
+    command: fakeAppServerPath,
+    transport: "app-server",
+  });
+  t.after(async () => {
+    await stopServer(server);
+    await fs.rm(home, { recursive: true, force: true });
+  });
+
+  const agent = (await jsonRequest(port, "/api/agents", {
+    method: "POST",
+    body: {
+      type: "blueprint",
+      name: "Blueprint Context QA",
+      runtimeId: "codex",
+      rootNodeId: "root",
+      nodes: [
+        { id: "root", name: "Root" },
+        {
+          id: "worker",
+          name: "Image Worker",
+          description: "Generates final image artifacts.",
+          skills: [{ name: "imagegen", description: "Image generation skill" }],
+        },
+      ],
+      edges: [{ from: "root", to: "worker" }],
+    },
+  })).agent;
+  const workspace = (await jsonRequest(port, "/api/workspaces", {
+    method: "POST",
+    body: { name: "Blueprint Context QA", agentIds: [agent.id] },
+  })).workspace;
+  const conversation = (await jsonRequest(port, `/api/workspaces/${workspace.id}/conversations`, {
+    method: "POST",
+    body: {
+      title: "Context",
+      messages: [
+        { role: "user", text: "先写一篇帖子" },
+        { role: "assistant", text: "前一轮完整帖子" },
+      ],
+    },
+  })).conversation;
+  const runId = "88888888-8888-4888-8888-888888888888";
+  const response = await startExecution(port, workspace.id, {
+    task: "Blueprint_CONTEXT_QA 为文章生成两张配图",
+    agentId: agent.id,
+    sessionId: conversation.id,
+    runId,
+  });
+  await readEvents(response.body, (events) => events.some(isTerminalEvent));
+
+  const run = (await jsonRequest(port, `/api/workspaces/${workspace.id}/runs/${runId}`)).run;
+  assert.equal(run.status, "completed");
+  assert.equal(run.rootCoordinator.lastDecision.action, "graph_tool_managed");
+  const worker = Object.values(run.nodeRuns).find((node) => node.prototypeNodeId === "worker");
+  assert.deepEqual(worker.input.originalRequest, {
+    task: "Blueprint_CONTEXT_QA 为文章生成两张配图",
+    context: {},
+    attachments: [],
+  });
+  assert.equal(worker.input.nodeTask, "调用 $imagegen 生成两张配图并返回实际文件路径");
+  assert.deepEqual(worker.input.relevantContext, { articleTitle: "前一轮帖子" });
+  assert.equal(worker.input.contextRefs.length, 1);
+  assert.equal(worker.input.contextRefs[0].ref, run.input.conversationContext[1].ref);
+  assert.deepEqual(worker.input.requirements, ["必须生成两张真实图片", "不得只返回提示词"]);
+  assert.deepEqual(worker.input.expectedArtifacts, [
+    { type: "image", count: 2, description: "工作区内可访问的 PNG 文件" },
+  ]);
+  assert.equal(run.input.conversationContext.length, 2);
+  assert.deepEqual(run.input.conversationContext.map(({ role }) => role), ["user", "assistant"]);
+  assert.match(run.input.conversationContext[1].ref, /^ctx:\/\/[^/]+\/message-[a-f0-9]+@1$/);
+  assert.equal(run.input.conversationContext[1].summary, "前一轮完整帖子");
+  assert.deepEqual(JSON.parse(worker.output.text), {
+    originalRequest: true,
+    nodeTask: true,
+    relevantContext: true,
+    contextRefs: true,
+    requirements: true,
+    expectedArtifacts: true,
+    availableSkills: true,
+  });
 });
 
 async function startServer({ home, logPath, port, command = fakeCodexPath, transport = "exec" }) {
@@ -413,7 +512,7 @@ async function startServer({ home, logPath, port, command = fakeCodexPath, trans
       ...process.env,
       WRAPPER_PORT: String(port),
       HIPPO_APP_HOME: home,
-      AGENT_STORE_PATH: path.join(home, "agent-store.json"),
+      HIPPO_DATABASE_PATH: path.join(home, "agent-store.json"),
       RESOURCE_ROOT_PATH: home,
       CODEX_COMMAND: command,
       CODEX_TRANSPORT: transport,

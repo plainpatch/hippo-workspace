@@ -7,6 +7,7 @@ import { config } from "./config.js";
 import { CodexAppServerRuntimeAdapter } from "./codex-app-server.js";
 
 const runningProcesses = new Map();
+const DEFAULT_EXEC_TIMEOUT_MS = 5 * 60 * 1000;
 
 export class CodexRuntimeAdapter {
   constructor({
@@ -33,7 +34,7 @@ export class CodexRuntimeAdapter {
       runId,
       runtimeId: this.id,
       input: prompt,
-      timeoutMs: Number(process.env.CODEX_EXEC_TIMEOUT_MS || 300000),
+      timeoutMs: positiveTimeout(process.env.CODEX_EXEC_TIMEOUT_MS, DEFAULT_EXEC_TIMEOUT_MS),
       onStdout: (chunk) => collectJsonEvents(chunk, events),
     });
 
@@ -82,7 +83,7 @@ export class CodexRuntimeAdapter {
       runId,
       runtimeId: this.id,
       input: prompt,
-      timeoutMs: Number(process.env.CODEX_EXEC_TIMEOUT_MS || 300000),
+      timeoutMs: positiveTimeout(process.env.CODEX_EXEC_TIMEOUT_MS, DEFAULT_EXEC_TIMEOUT_MS),
       onStdout: (chunk) => {
         const parsed = collectStreamEvents(chunk);
         if (parsed.passthrough) emit({ type: "stdout", text: parsed.passthrough });
@@ -165,6 +166,11 @@ export class CodexRuntimeAdapter {
   cancel(runId) {
     return cancelRuntimeProcess(runId);
   }
+}
+
+function positiveTimeout(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function collectJsonEvents(chunk, target) {
@@ -478,11 +484,18 @@ export class RuntimeRegistry {
     };
   }
 
-  steerRun(runId, input) {
+  steerRun(runId, input, attachments = []) {
     if (!this.codexRuntime?.steer) {
       throw new RuntimeAdapterError("The active runtime transport does not support turn steering.", 409);
     }
-    return this.codexRuntime.steer(runId, input);
+    return this.codexRuntime.steer(runId, input, attachments);
+  }
+
+  async deleteSession(runtimeSession) {
+    if (!runtimeSession?.sessionId) return { deleted: false, reason: "missing-session-id" };
+    const runtime = this.getRuntime(runtimeSession.provider || this.settings.defaultRuntimeId);
+    if (!runtime.deleteSession) return { deleted: false, reason: "runtime-does-not-support-session-deletion" };
+    return runtime.deleteSession(runtimeSession.sessionId);
   }
 }
 

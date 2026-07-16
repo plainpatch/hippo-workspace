@@ -27,7 +27,7 @@ test("Agent Blueprint v1 schema distinguishes schema and revision versions", asy
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-agent-schema-test-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const orchestrator = new AgentOrchestrator({
-    storePath: path.join(home, "agents.json"),
+    databasePath: path.join(home, "agents.json"),
     runtimeRegistry: {},
     ragProvider: {},
     settings: {},
@@ -71,25 +71,25 @@ test("Agent Blueprint v1 rejects invalid graph semantics", async (t) => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "hippo-agent-graph-test-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const orchestrator = new AgentOrchestrator({
-    storePath: path.join(home, "agents.json"),
+    databasePath: path.join(home, "agents.json"),
     runtimeRegistry: {},
     ragProvider: {},
     settings: {},
   });
-  const created = (await orchestrator.createAgent(dagBlueprint("Partial update"))).agent;
+  const created = (await orchestrator.createAgent(multiNodeBlueprint("Partial update"))).agent;
   const partiallyUpdated = (await orchestrator.updateAgent(created.id, {
     expectedVersion: created.version,
     description: "Only this field changes.",
   })).agent;
-  assert.equal(partiallyUpdated.type, "dag");
+  assert.equal(partiallyUpdated.type, "blueprint");
   assert.equal(partiallyUpdated.nodes.length, 2);
   assert.equal(partiallyUpdated.edges.length, 1);
 
-  const blueprint = dagBlueprint("Cycle");
+  const blueprint = multiNodeBlueprint("Cycle");
   blueprint.edges.push({ id: "worker->root", from: "worker", to: "root", metadata: {} });
   assert.throws(() => orchestrator.validateAgent(blueprint), /cycle/i);
 
-  const disconnected = dagBlueprint("Disconnected");
+  const disconnected = multiNodeBlueprint("Disconnected");
   disconnected.nodes.push({
     ...disconnected.nodes[1],
     id: "orphan",
@@ -97,15 +97,15 @@ test("Agent Blueprint v1 rejects invalid graph semantics", async (t) => {
   });
   assert.throws(() => orchestrator.validateAgent(disconnected), /unreachable from root/i);
 
-  const invalidRag = dagBlueprint("Invalid RAG");
+  const invalidRag = multiNodeBlueprint("Invalid RAG");
   invalidRag.rag.topN = 0;
   assert.throws(() => orchestrator.validateAgent(invalidRag), />=1/i);
 
-  const invalidExecution = dagBlueprint("Invalid execution policy");
+  const invalidExecution = multiNodeBlueprint("Invalid execution policy");
   invalidExecution.executionPolicy.maxDecisions = 1001;
   assert.throws(() => orchestrator.validateAgent(invalidExecution), /<=1000/i);
 
-  const duplicateMcp = dagBlueprint("Duplicate MCP");
+  const duplicateMcp = multiNodeBlueprint("Duplicate MCP");
   duplicateMcp.nodes[1].mcpServers = ["hippo", "hippo"];
   assert.throws(() => orchestrator.validateAgent(duplicateMcp), /must be unique/i);
 });
@@ -120,7 +120,7 @@ test("Agent REST and MCP support schema, validate, create, view, versioned edit,
       WRAPPER_PORT: String(port),
       HIPPO_APP_HOME: home,
       RESOURCE_ROOT_PATH: home,
-      AGENT_STORE_PATH: path.join(home, "agents.json"),
+      HIPPO_DATABASE_PATH: path.join(home, "agents.json"),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -174,7 +174,7 @@ test("Agent REST and MCP support schema, validate, create, view, versioned edit,
 
   const schema = parseToolResult(await client.callTool({ name: "hippo_get_agent_schema", arguments: {} }));
   assert.equal(schema.schemaVersion, 1);
-  const candidate = dagBlueprint("Delivery Agent");
+  const candidate = multiNodeBlueprint("Delivery Agent");
   const validation = parseToolResult(await client.callTool({
     name: "hippo_validate_agent_graph",
     arguments: candidate,
@@ -223,7 +223,7 @@ function singleBlueprint(name) {
   };
 }
 
-function dagBlueprint(name) {
+function multiNodeBlueprint(name) {
   const node = (id, nodeName) => ({
     id,
     kind: "task",
@@ -240,7 +240,7 @@ function dagBlueprint(name) {
   });
   return {
     ...singleBlueprint(name),
-    type: "dag",
+    type: "blueprint",
     rootNodeId: "root",
     nodes: [node("root", "Root"), node("worker", "Worker")],
     edges: [{ id: "root->worker", from: "root", to: "worker", metadata: {} }],

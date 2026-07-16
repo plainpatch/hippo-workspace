@@ -3,12 +3,12 @@
 ## Contents
 
 - Field semantics
-- Choosing single or DAG
+- Choosing single or Blueprint
 - Node design
 - Topology and transitions
 - Approval and RAG decisions
 - Quality checklist
-- Example DAG
+- Example Blueprint
 
 ## Field Semantics
 
@@ -17,7 +17,7 @@
 - `version`: Stored Agent revision. Read-only; use as `expectedVersion` for edits.
 - `description`: User-facing summary of the entire Agent.
 - `systemPrompt`: Instructions shared by the Agent. Avoid repeating every worker prompt here.
-- `rootNodeId`: Root coordinator node for DAG Agents.
+- `rootNodeId`: Root coordinator node for Blueprint Agents.
 - `nodes[].description`: External interface visible to RootAgent: when to call the node, accepted input, and expected output.
 - `nodes[].systemPrompt`: Instructions used inside that worker runtime session.
 - `nodes[].transitionInstruction`: Plain-language guidance shown to RootAgent with the node result.
@@ -26,7 +26,7 @@
 - `resultApprovalPolicy`: Review required after a node completes.
 - `rag`: Node-level RAG capability and retrieval ceiling.
 
-## Choosing Single or DAG
+## Choosing Single or Blueprint
 
 Choose `single` when all are true:
 
@@ -34,7 +34,7 @@ Choose `single` when all are true:
 - Separate context or permissions are unnecessary.
 - Intermediate output does not need independent review.
 
-Choose `dag` when at least one is true:
+Choose `blueprint` when at least one is true:
 
 - Roles need isolated system prompts or sessions.
 - Workers can run independently or in parallel.
@@ -73,7 +73,7 @@ Keep worker prompts imperative and bounded. Require structured sections only whe
 ## Quality Checklist
 
 - The Agent has one clear purpose.
-- Every DAG node has a unique id and non-empty name.
+- Every Blueprint node has a unique id and non-empty name.
 - Root coordinates rather than duplicating workers.
 - Every worker has an interface description and bounded system prompt.
 - Every conditional handoff is understandable from transition instructions.
@@ -82,13 +82,13 @@ Keep worker prompts imperative and bounded. Require structured sections only whe
 - RAG, Skill, and MCP declarations are justified and real.
 - The live MCP validator accepts the final blueprint.
 
-## Example DAG
+## Example Blueprint
 
 ```json
 {
   "$schema": "https://hippo.local/schemas/agent-blueprint-v1.schema.json",
   "schemaVersion": 1,
-  "type": "dag",
+  "type": "blueprint",
   "name": "Implementation Review",
   "description": "Implements a scoped change and independently reviews it.",
   "systemPrompt": "Preserve the requested scope and report evidence.",

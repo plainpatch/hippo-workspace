@@ -1,14 +1,12 @@
 const { app, BrowserWindow, shell } = require("electron");
-const { spawn } = require("node:child_process");
 const http = require("node:http");
 const path = require("node:path");
-const fs = require("node:fs");
+const { pathToFileURL } = require("node:url");
 
 const repoRoot = path.resolve(__dirname, "..", "..");
 const preferredPort = Number(process.env.WRAPPER_PORT || 8787);
 let port = preferredPort;
 let appUrl = `http://127.0.0.1:${port}`;
-let sidecar = null;
 let mainWindow = null;
 
 const gotLock = app.requestSingleInstanceLock();
@@ -34,10 +32,6 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", () => {
-  if (sidecar) sidecar.kill();
-});
-
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
@@ -48,21 +42,9 @@ async function ensureWrapperRunning() {
   port = process.env.WRAPPER_PORT ? preferredPort : await findAvailablePort(preferredPort);
   appUrl = `http://127.0.0.1:${port}`;
 
-  const nodePath = resolveNodeExecutable();
-  sidecar = spawn(nodePath, ["src/server.js"], {
-    cwd: repoRoot,
-    env: {
-      ...process.env,
-      WRAPPER_PORT: String(port),
-      ANYTHINGLLM_BASE_URL: process.env.ANYTHINGLLM_BASE_URL || "http://localhost:3001",
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  sidecar.stdout.on("data", (chunk) => console.log(`[hippo-wrapper] ${chunk}`.trim()));
-  sidecar.stderr.on("data", (chunk) => console.error(`[hippo-wrapper] ${chunk}`.trim()));
-  sidecar.on("error", (error) => console.error(`[hippo-wrapper] failed to start: ${error.message}`));
-  sidecar.unref();
+  process.env.WRAPPER_PORT = String(port);
+  process.env.ANYTHINGLLM_BASE_URL ||= "http://localhost:3001";
+  await import(pathToFileURL(path.join(repoRoot, "src", "server.js")).href);
 
   const started = await waitForHealth(15_000);
   if (!started) {
@@ -93,22 +75,6 @@ function createWindow() {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
-}
-
-function resolveNodeExecutable() {
-  const candidates = [
-    process.env.HIPPO_NODE_PATH,
-    process.env.npm_node_execpath,
-    process.env.NODE,
-    process.versions.electron ? "" : process.execPath,
-    "node",
-  ].filter(Boolean);
-
-  for (const candidate of candidates) {
-    if (candidate === "node") return candidate;
-    if (fs.existsSync(candidate)) return candidate;
-  }
-  return "node";
 }
 
 function waitForHealth(timeoutMs) {

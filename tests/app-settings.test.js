@@ -111,7 +111,7 @@ function createInitialSettings(appHomePath) {
   return {
     appHomePath,
     resourceRootPath: appHomePath,
-    agentStorePath: path.join(appHomePath, "agents.json"),
+    metadataDbPath: path.join(appHomePath, "agents.json"),
     defaultRuntimeId: "codex",
     ragProviderId: "anythingllm",
     codexCommand: "codex",

@@ -24,25 +24,30 @@ const state = {
     drawers: new Set(),
     topics: new Set(),
   },
-  selectedDagNodeId: "root",
-  selectedDagEdgeKey: "",
+  selectedBlueprintNodeId: "root",
+  selectedBlueprintEdgeKey: "",
   currentView: "home",
   activeRun: null,
   reconnectingRunId: "",
   executionStream: null,
   conversationSaveTimers: new Map(),
   conversationSaveChains: new Map(),
+  conversationLoadVersion: 0,
+  loadingConversationProjectId: "",
   messages: [],
+  composerAttachments: [],
+  attachmentUploading: false,
+  editingMessageIndex: -1,
 };
 
 const ACTIVE_EXECUTION_STATUSES = new Set(["preparing", "pending", "coordinating", "running", "waiting_approval", "waiting_user"]);
 const RESUMABLE_EXECUTION_STATUSES = new Set(["preparing", "pending", "coordinating", "running"]);
 const TERMINAL_EXECUTION_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
-const DAG_NODE_WIDTH = 210;
-const DAG_NODE_HEIGHT = 188;
-const DAG_COLUMN_GAP = 60;
-const DAG_ROW_GAP = 36;
+const BLUEPRINT_NODE_WIDTH = 210;
+const BLUEPRINT_NODE_HEIGHT = 188;
+const BLUEPRINT_COLUMN_GAP = 60;
+const BLUEPRINT_ROW_GAP = 36;
 
 const icons = {
   project: `<svg class="projectGlyph" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="15" height="18" rx="2.5"></rect><path d="M3 7h4"></path><path d="M3 12h4"></path><path d="M3 17h4"></path><path d="M10 8h6"></path><path d="M10 12h6"></path><path d="M10 16h4"></path></svg>`,
@@ -52,6 +57,8 @@ const icons = {
   pin: `<svg class="pinIcon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 4 5 5"></path><path d="M14 5 8 11l-1 5 5-1 6-6"></path><path d="m9 15-5 5"></path></svg>`,
   archive: `<svg class="archiveIcon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="5" rx="1.5"></rect><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9"></path><path d="M10 13h4"></path></svg>`,
   folderOpen: `<svg class="folderOpenIcon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5V6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v1.5"></path><path d="M3.5 9.5h18l-2 9a2 2 0 0 1-2 1.5h-11a2 2 0 0 1-2-1.5l-1-9Z"></path></svg>`,
+  copy: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg>`,
+  edit: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4L16.5 3.5Z"></path></svg>`,
 };
 
 bindEvents();
@@ -75,6 +82,7 @@ function bindEvents() {
   document.getElementById("runtimeBtn").addEventListener("click", showRuntimeMessage);
   document.getElementById("settingsBtn").addEventListener("click", showSettingsPage);
   document.getElementById("createProjectBtn").addEventListener("click", () => openProjectForm());
+  document.getElementById("workspaceRevealBtn")?.addEventListener("click", revealActiveWorkspace);
   document.getElementById("projectConfigBtn").addEventListener("click", () => {
     if (state.currentView === "home") openProjectForm();
     else if (state.currentView === "agents") openAgentForm();
@@ -99,9 +107,23 @@ function bindEvents() {
     renderProjectKnowledgeTreeFromForm(active);
   });
   document.getElementById("composerForm").addEventListener("submit", sendMessage);
+  document.getElementById("attachmentMenuBtn")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    document.getElementById("attachmentMenu")?.classList.toggle("hidden");
+  });
+  document.querySelectorAll("[data-attachment-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      document.getElementById("attachmentMenu")?.classList.add("hidden");
+      document.getElementById(button.dataset.attachmentAction === "folder" ? "attachmentFolderInput" : "attachmentFileInput")?.click();
+    });
+  });
+  document.getElementById("attachmentFileInput")?.addEventListener("change", (event) => uploadComposerFiles(event.target.files, "file"));
+  document.getElementById("attachmentFolderInput")?.addEventListener("change", (event) => uploadComposerFiles(event.target.files, "folder"));
+  document.addEventListener("click", () => document.getElementById("attachmentMenu")?.classList.add("hidden"));
   document.getElementById("stopExecutionBtn")?.addEventListener("click", cancelActiveRun);
   document.getElementById("quickTextForm").addEventListener("submit", uploadTextToProject);
   messageInput.addEventListener("input", () => resizeComposer(messageInput));
+  messageInput.addEventListener("paste", handleComposerPaste);
   messageInput.addEventListener("keydown", (event) => {
     if (event.key !== "Enter" || event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return;
     event.preventDefault();
@@ -155,23 +177,62 @@ async function loadProjects() {
 }
 
 async function loadConversations(projectId) {
-  const data = await request(`/api/workspaces/${encodeURIComponent(projectId)}/conversations`);
-  state.conversations = data.conversations || [];
-  if (state.activeConversationId && !state.conversations.some((item) => item.id === state.activeConversationId)) {
-    state.activeConversationId = null;
+  const loadVersion = ++state.conversationLoadVersion;
+  state.loadingConversationProjectId = projectId;
+  if (state.activeProjectId === projectId) renderProjectList();
+  try {
+    const data = await request(`/api/workspaces/${encodeURIComponent(projectId)}/conversations?summary=1`);
+    if (loadVersion !== state.conversationLoadVersion || state.activeProjectId !== projectId) return;
+    state.conversations = data.conversations || [];
+    state.editingMessageIndex = -1;
+    if (state.activeConversationId && !state.conversations.some((item) => item.id === state.activeConversationId)) {
+      state.activeConversationId = null;
+    }
+    if (!state.activeConversationId && state.conversations.length) {
+      state.activeConversationId = state.conversations[0].id;
+    }
+    state.loadingConversationProjectId = "";
+    renderProjectList();
+    if (state.activeConversationId) {
+      await loadConversationDetail(projectId, state.activeConversationId, loadVersion);
+    } else {
+      state.messages = [];
+    }
+    if (loadVersion !== state.conversationLoadVersion || state.activeProjectId !== projectId) return;
+    state.composerAttachments = [];
+    renderComposerAttachments();
+    if (state.currentView === "chat") renderActiveProject();
+    await refreshMessageRunSummaries(projectId);
+    if (loadVersion !== state.conversationLoadVersion || state.activeProjectId !== projectId) return;
+    renderProjectList();
+  } finally {
+    if (loadVersion === state.conversationLoadVersion && state.loadingConversationProjectId === projectId) {
+      state.loadingConversationProjectId = "";
+      renderProjectList();
+    }
   }
-  if (!state.activeConversationId && state.conversations.length) {
-    state.activeConversationId = state.conversations[0].id;
-  }
-  const active = getActiveConversation();
-  state.messages = active?.messages ? [...active.messages] : [];
-  await refreshMessageRunSummaries(projectId);
-  renderProjectList();
+}
+
+async function loadConversationDetail(projectId, conversationId, loadVersion = state.conversationLoadVersion) {
+  const detail = await request(
+    `/api/workspaces/${encodeURIComponent(projectId)}/conversations/${encodeURIComponent(conversationId)}`
+  );
+  if (loadVersion !== state.conversationLoadVersion || !isConversationActive(projectId, conversationId)) return false;
+  state.conversations = state.conversations.map((conversation) =>
+    conversation.id === detail.conversation.id ? detail.conversation : conversation
+  );
+  state.messages = [...(detail.conversation.messages || [])];
+  return true;
 }
 
 async function refreshMessageRunSummaries(projectId) {
+  const conversationId = state.activeProjectId === projectId ? state.activeConversationId : "";
+  if (!conversationId) return;
   try {
-    const data = await request(`/api/workspaces/${encodeURIComponent(projectId)}/runs`);
+    const data = await request(
+      `/api/workspaces/${encodeURIComponent(projectId)}/runs?rootSessionId=${encodeURIComponent(conversationId)}&summary=1`
+    );
+    if (!isConversationActive(projectId, conversationId)) return;
     const runsById = new Map((data.runs || []).map((run) => [run.id, run]));
     state.messages = state.messages.map((message) => {
       const run = runsById.get(message.runId);
@@ -275,6 +336,10 @@ function renderProjectList() {
       state.activeProjectId = projectId;
       state.collapsedProjectIds.delete(projectId);
       state.activeConversationId = null;
+      state.conversations = [];
+      state.messages = [];
+      state.loadingConversationProjectId = projectId;
+      renderProjectList();
       await loadConversations(state.activeProjectId);
       renderActiveProject();
     });
@@ -283,10 +348,15 @@ function renderProjectList() {
     button.addEventListener("click", async () => {
       disconnectExecutionStream();
       clearActiveRun();
-      state.activeConversationId = button.dataset.conversationId;
-      const conversation = getActiveConversation();
-      state.messages = conversation?.messages ? [...conversation.messages] : [];
-      await refreshMessageRunSummaries(state.activeProjectId);
+      const projectId = state.activeProjectId;
+      const conversationId = button.dataset.conversationId;
+      const loadVersion = ++state.conversationLoadVersion;
+      state.activeConversationId = conversationId;
+      state.editingMessageIndex = -1;
+      renderProjectList();
+      await loadConversationDetail(projectId, conversationId, loadVersion);
+      if (!isConversationActive(projectId, conversationId)) return;
+      await refreshMessageRunSummaries(projectId);
       renderProjectList();
       renderActiveProject();
     });
@@ -316,6 +386,9 @@ function renderProjectList() {
 }
 
 function renderConversationList() {
+  if (state.loadingConversationProjectId === state.activeProjectId) {
+    return `<div class="conversationList"><div class="conversationLoading"><span></span>正在加载会话</div></div>`;
+  }
   if (!state.conversations.length) {
     return `<div class="conversationList"><div class="conversationEmpty">暂无会话</div></div>`;
   }
@@ -472,20 +545,24 @@ function renderActiveProject() {
   renderMessages();
 }
 
-function renderMessages() {
+function renderMessages({ forceScrollBottom = false } = {}) {
   const stream = document.getElementById("chatStream");
+  const previousScrollTop = stream.scrollTop;
+  const distanceFromBottom = stream.scrollHeight - stream.clientHeight - previousScrollTop;
+  const shouldFollowLatest = forceScrollBottom || distanceFromBottom <= 72;
   const expandedExecutionIds = new Set(
     [...stream.querySelectorAll("[data-execution-detail-id][open]")].map((item) => item.dataset.executionDetailId)
   );
-  stream.innerHTML = state.messages.map((message) => `
+  stream.innerHTML = state.messages.map((message, index) => `
     <article class="message ${escapeHtml(message.role)}">
       <div class="messageAvatar">${message.role === "user" ? "你" : "H"}</div>
       <div class="messageBody">
         <div class="messageMeta">${message.role === "user" ? "你" : "Hippo Agent"}</div>
-        ${renderMessageText(message)}
+        ${state.editingMessageIndex === index ? renderMessageEditor(message, index) : renderMessageText(message)}
         ${message.role === "assistant" ? renderExecutionProgress(message) : ""}
         ${message.role === "assistant" ? renderRuntimeRequests(message) : ""}
         ${message.agentRunSummary ? renderAgentRunSummary(message.agentRunSummary, message.runId) : ""}
+        ${state.editingMessageIndex === index ? "" : renderMessageActions(message, index)}
       </div>
     </article>
   `).join("");
@@ -511,10 +588,61 @@ function renderMessages() {
   stream.querySelectorAll("[data-copy-code]").forEach((button) => {
     button.addEventListener("click", () => copyRenderedCode(button));
   });
-  stream.scrollTop = stream.scrollHeight;
+  stream.querySelectorAll("[data-copy-message-index]").forEach((button) => {
+    button.addEventListener("click", () => copyMessage(Number(button.dataset.copyMessageIndex), button));
+  });
+  stream.querySelectorAll("[data-edit-message-index]").forEach((button) => {
+    button.addEventListener("click", () => beginMessageEdit(Number(button.dataset.editMessageIndex)));
+  });
+  stream.querySelectorAll("[data-cancel-message-edit]").forEach((button) => {
+    button.addEventListener("click", cancelMessageEdit);
+  });
+  stream.querySelectorAll("[data-message-edit-form]").forEach((form) => {
+    form.addEventListener("submit", resendEditedMessage);
+  });
+  stream.scrollTop = shouldFollowLatest ? stream.scrollHeight : previousScrollTop;
+}
+
+function renderMessageActions(message, index) {
+  if (!message?.text) return "";
+  const editingDisabled = Boolean(state.activeRun);
+  return `<div class="messageActions" aria-label="消息操作">
+    ${message.role === "user" ? `<button type="button" data-edit-message-index="${index}" title="编辑并重发" aria-label="编辑并重发" ${editingDisabled ? "disabled" : ""}>${icons.edit}</button>` : ""}
+    <button type="button" data-copy-message-index="${index}" title="复制" aria-label="复制">${icons.copy}</button>
+  </div>`;
+}
+
+function renderMessageEditor(message, index) {
+  return `<form class="messageEditForm" data-message-edit-form data-message-index="${index}">
+    <textarea name="message" rows="3" aria-label="编辑消息">${escapeHtml(message.text || "")}</textarea>
+    ${renderMessageAttachments(message.attachments)}
+    <div class="messageEditActions">
+      <button type="button" data-cancel-message-edit>取消</button>
+      <button class="primary" type="submit">发送</button>
+    </div>
+  </form>`;
+}
+
+function beginMessageEdit(index) {
+  if (state.activeRun || state.messages[index]?.role !== "user") return;
+  state.editingMessageIndex = index;
+  renderMessages();
+  const editor = document.querySelector("[data-message-edit-form] textarea");
+  editor?.focus();
+  editor?.setSelectionRange(editor.value.length, editor.value.length);
+}
+
+function cancelMessageEdit() {
+  state.editingMessageIndex = -1;
+  renderMessages();
 }
 
 function renderMessageText(message) {
+  const text = getDisplayMessageText(message);
+  return `${text ? `<div class="messageText">${formatMessage(text)}</div>` : ""}${renderMessageAttachments(message.attachments)}`;
+}
+
+function getDisplayMessageText(message) {
   let text = String(message?.text || "");
   if (message?.role === "assistant" && message.metadata?.status === "waiting_approval" && isEmptyRuntimeEnvelope(text)) {
     const waitingNode = [...(message.agentRunSummary?.nodes || [])].reverse()
@@ -528,7 +656,72 @@ function renderMessageText(message) {
       // Keep non-JSON model output unchanged.
     }
   }
-  return text ? `<div class="messageText">${formatMessage(text)}</div>` : "";
+  return text;
+}
+
+function renderMessageAttachments(attachments = []) {
+  if (!Array.isArray(attachments) || !attachments.length) return "";
+  return `<div class="messageAttachments">${attachments.map((item) => {
+    const href = safeWorkspaceFileUrl(item.path);
+    if (item.kind === "image" && href) {
+      return `<a class="messageAttachment image" href="${escapeHtml(href)}" target="_blank" rel="noreferrer"><img src="${escapeHtml(href)}" alt="${escapeHtml(item.name)}" loading="lazy"><span>${escapeHtml(item.name)}</span></a>`;
+    }
+    return `<a class="messageAttachment" href="${escapeHtml(href)}" target="_blank" rel="noreferrer"><span class="messageAttachmentIcon">${item.kind === "folder" ? "▰" : "▤"}</span><span><strong>${escapeHtml(item.name)}</strong><small>${item.kind === "folder" ? `${Number(item.childCount) || 0} 个文件` : formatFileSize(item.size)}</small></span></a>`;
+  }).join("")}</div>`;
+}
+
+async function handleComposerPaste(event) {
+  const images = [...(event.clipboardData?.files || [])].filter((file) => file.type.startsWith("image/"));
+  if (!images.length) return;
+  event.preventDefault();
+  await uploadComposerFiles(images, "image");
+}
+
+async function uploadComposerFiles(fileList, kind) {
+  const project = getActiveProject();
+  const files = [...(fileList || [])];
+  if (!project || !files.length || state.attachmentUploading) return;
+  state.attachmentUploading = true;
+  renderComposerAttachments();
+  const body = new FormData();
+  for (const file of files) body.append("files", file, file.name);
+  body.append("kind", kind);
+  body.append("relativePaths", JSON.stringify(files.map((file) => file.webkitRelativePath || file.name)));
+  try {
+    const data = await request(`/api/workspaces/${encodeURIComponent(project.id)}/attachments`, { method: "POST", body });
+    state.composerAttachments.push(...(data.attachments || []));
+  } catch {
+    // request() already reports the upload error in the shared status toast.
+  } finally {
+    state.attachmentUploading = false;
+    const input = document.getElementById(kind === "folder" ? "attachmentFolderInput" : "attachmentFileInput");
+    if (input) input.value = "";
+    renderComposerAttachments();
+  }
+}
+
+function renderComposerAttachments() {
+  const tray = document.getElementById("composerAttachmentTray");
+  const send = document.querySelector("#composerForm .sendButton");
+  if (!tray) return;
+  const items = state.composerAttachments.map((item, index) => {
+    const href = safeWorkspaceFileUrl(item.path);
+    return `<div class="composerAttachment">
+      ${item.kind === "image" && href ? `<img src="${escapeHtml(href)}" alt="">` : `<span class="composerAttachmentIcon">${item.kind === "folder" ? "▰" : "▤"}</span>`}
+      <span><strong>${escapeHtml(item.name)}</strong><small>${item.kind === "folder" ? `${Number(item.childCount) || 0} 个文件` : formatFileSize(item.size)}</small></span>
+      <button type="button" data-remove-attachment="${index}" aria-label="移除 ${escapeHtml(item.name)}">×</button>
+    </div>`;
+  });
+  if (state.attachmentUploading) items.push(`<div class="composerAttachment uploading"><span class="attachmentSpinner"></span><span><strong>正在添加附件</strong><small>保存到当前工作区</small></span></div>`);
+  tray.innerHTML = items.join("");
+  tray.classList.toggle("hidden", !items.length);
+  send?.toggleAttribute("disabled", state.attachmentUploading);
+  tray.querySelectorAll("[data-remove-attachment]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.composerAttachments.splice(Number(button.dataset.removeAttachment), 1);
+      renderComposerAttachments();
+    });
+  });
 }
 
 function isEmptyRuntimeEnvelope(value) {
@@ -579,7 +772,7 @@ function showAgentsPage() {
 }
 
 function formatAgentCardMeta(agent) {
-  const nodeCount = agent.type === "dag" ? Math.max(1, (agent.nodes || []).length) : 1;
+  const nodeCount = agent.type === "blueprint" ? Math.max(1, (agent.nodes || []).length) : 1;
   return `${nodeCount} 节点 · v${agent.version || 1} · Schema ${agent.schemaVersion || 1} · ${agent.runtimeId || "codex"}`;
 }
 
@@ -604,7 +797,7 @@ async function showInboxPage() {
   document.getElementById("composerForm").classList.add("hidden");
   setHeaderConfigButton(true);
   document.getElementById("activeProjectName").textContent = "待处理";
-  document.getElementById("activeProjectMeta").textContent = "等待人工审批的 DAG 节点；确认后会继续推进运行图。";
+  document.getElementById("activeProjectMeta").textContent = "等待人工审批的蓝图节点；确认后会继续推进运行图。";
   document.getElementById("projectConfigBtn").textContent = "刷新";
   await renderInboxManager();
 }
@@ -784,7 +977,7 @@ async function renderInboxManager() {
     stream.innerHTML = `<div class="emptyBlock">请先选择工作区。</div>`;
     return;
   }
-  const data = await request(`/api/workspaces/${encodeURIComponent(project.id)}/runs`);
+  const data = await request(`/api/workspaces/${encodeURIComponent(project.id)}/runs?summary=1`);
   const waitingItems = (data.runs || []).flatMap((run) =>
     Object.values(run.nodeRuns || {})
       .filter((node) => node.status === "waiting_approval")
@@ -914,7 +1107,7 @@ function renderInboxItem(run, node) {
       <div class="inboxItemHeader">
         <div>
           <strong>${escapeHtml(nodeDef.name || node.nodeId)}</strong>
-          <small>${escapeHtml(run.agentSnapshot?.name || "DAG Run")} · ${escapeHtml(run.id.slice(0, 8))}</small>
+          <small>${escapeHtml(run.agentSnapshot?.name || "蓝图运行")} · ${escapeHtml(run.id.slice(0, 8))}</small>
         </div>
         <span class="runStatus waiting">waiting</span>
       </div>
@@ -1608,6 +1801,19 @@ async function revealKnowledgePath(relativePath, button) {
   }
 }
 
+async function revealActiveWorkspace() {
+  const project = getActiveProject();
+  const button = document.getElementById("workspaceRevealBtn");
+  if (!project || button?.disabled) return;
+  if (button) button.disabled = true;
+  try {
+    await request(`/api/workspaces/${encodeURIComponent(project.id)}/reveal`, { method: "POST" });
+    toast("已打开工作区文件夹。");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 function setActiveSystemNav(view) {
   document.querySelectorAll("[data-system-view]").forEach((button) => {
     button.classList.toggle("active", button.dataset.systemView === view);
@@ -1745,7 +1951,7 @@ function renderRuntimeDetails(data) {
     "Provider URL": data.anythingllm.baseUrl,
     "Provider 认证": data.anythingllm.auth?.authenticated ? "已认证" : "未认证",
     "MCP": `http://localhost:${data.wrapper.port}/mcp`,
-    "Agent Store": data.wrapper.agentStorePath || "",
+    "Metadata DB": data.wrapper.metadataDbPath || "",
   });
 }
 
@@ -1801,7 +2007,7 @@ async function saveAgent(event) {
     edges: parseJsonField(form.get("edgesJson"), []),
   }).edges;
   const rootNode = nodes.find((node) => node.id === "root") || {};
-  const type = nodes.length > 1 || edges.length ? "dag" : "single";
+  const type = nodes.length > 1 || edges.length ? "blueprint" : "single";
   const body = {
     $schema: "https://hippo.local/schemas/agent-blueprint-v1.schema.json",
     schemaVersion: 1,
@@ -1814,12 +2020,12 @@ async function saveAgent(event) {
     runtimeId: form.get("runtimeId") || "codex",
     rag: normalizeNodeRag(rootNode.rag),
   };
-  if (type === "dag") {
+  if (type === "blueprint") {
     body.rootNodeId = "root";
     body.nodes = nodes;
     body.edges = edges;
     body.executionPolicy = { maxDecisions: Number(form.get("maxDecisions") || 50) };
-    validateDagDraft(body);
+    validateBlueprintDraft(body);
   }
   if (id) body.expectedVersion = Number(form.get("version"));
 
@@ -1846,8 +2052,28 @@ async function sendMessage(event) {
 
   const form = new FormData(event.currentTarget);
   const task = String(form.get("message") || "").trim();
-  if (!task) return;
+  const attachments = state.composerAttachments.map((item) => ({ ...item }));
+  if ((!task && !attachments.length) || state.attachmentUploading) return;
   const selectedAgentId = String(form.get("agentId") || "");
+  await executeConversationTurn({
+    project,
+    task,
+    attachments,
+    selectedAgentId,
+    sandboxMode: String(form.get("sandboxMode") || ""),
+  });
+}
+
+async function executeConversationTurn({
+  project,
+  task,
+  attachments = [],
+  selectedAgentId = "",
+  sandboxMode = "",
+  context,
+  suppressEmptyWelcome = false,
+}) {
+  const runtimeTask = task || "请查看并处理本轮附件。";
   if (selectedAgentId && !project.agentIds?.includes(selectedAgentId)) {
     renderAgentOptions();
     toast("当前工作区未启用该智能体，请先在工作区设置中添加。", true);
@@ -1855,27 +2081,32 @@ async function sendMessage(event) {
   }
 
   if (state.activeRun?.projectId === project.id && state.activeRun.conversationId === state.activeConversationId) {
-    await steerActiveRun(task);
+    await steerActiveRun(runtimeTask, attachments);
     return;
   }
 
-  const conversation = await ensureActiveConversation(task);
+  const conversation = await ensureActiveConversation(runtimeTask);
   state.selectedAgentByConversation.set(conversation.id, selectedAgentId);
-  renderActiveProject();
+  if (suppressEmptyWelcome) renderAgentOptions();
+  else renderActiveProject();
   const runId = crypto.randomUUID?.() || `run-${Date.now()}`;
   const payload = {
-    task,
+    task: runtimeTask,
     agentId: selectedAgentId || undefined,
     sessionId: conversation.id,
     runId,
-    sandboxMode: form.get("sandboxMode") || undefined,
+    sandboxMode: sandboxMode || undefined,
+    attachments,
+    context,
   };
   const turnMetadata = buildTurnMetadata(project, conversation, payload);
-  state.messages.push({ role: "user", text: task, runId, metadata: { ...turnMetadata, messageRole: "user" } });
-  renderMessages();
+  state.messages.push({ role: "user", text: task, attachments, runId, metadata: { ...turnMetadata, messageRole: "user" } });
+  renderMessages({ forceScrollBottom: true });
   await saveActiveConversation();
   const input = document.getElementById("messageInput");
   input.value = "";
+  state.composerAttachments = [];
+  renderComposerAttachments();
   resizeComposer(input);
 
   const assistantMessage = {
@@ -1893,7 +2124,7 @@ async function sendMessage(event) {
   };
   state.messages.push(assistantMessage);
   const conversationMessages = state.messages;
-  renderMessages();
+  renderMessages({ forceScrollBottom: true });
   setActiveRun(project.id, payload.runId, 0, conversation.id);
   const handlers = createExecutionHandlers({
     project,
@@ -1911,7 +2142,68 @@ async function sendMessage(event) {
   renderMessages();
 }
 
-async function steerActiveRun(input) {
+async function resendEditedMessage(event) {
+  event.preventDefault();
+  if (state.activeRun) return;
+  const project = getActiveProject();
+  const conversation = getActiveConversation();
+  const index = Number(event.currentTarget.dataset.messageIndex);
+  const original = state.messages[index];
+  const text = String(new FormData(event.currentTarget).get("message") || "").trim();
+  const attachments = Array.isArray(original?.attachments) ? original.attachments.map((item) => ({ ...item })) : [];
+  if (!project || !conversation || original?.role !== "user" || (!text && !attachments.length)) return;
+  const originalAgentId = String(original.metadata?.agentId || "");
+  const selectedAgentId = project.agentIds?.includes(originalAgentId)
+    ? originalAgentId
+    : String(document.getElementById("agentSelect")?.value || "");
+  if (selectedAgentId && !project.agentIds?.includes(selectedAgentId)) {
+    renderAgentOptions();
+    toast("当前工作区未启用该智能体，请先在工作区设置中添加。", true);
+    return;
+  }
+
+  const submitButton = event.currentTarget.querySelector("button[type='submit']");
+  submitButton.disabled = true;
+  submitButton.textContent = "发送中...";
+  try {
+    const history = state.messages.slice(0, index).map((message) => ({
+      role: message.role,
+      text: message.text,
+      attachments: (message.attachments || []).map((item) => ({ name: item.name, path: item.path, kind: item.kind })),
+    }));
+    const saveKey = `${project.id}:${conversation.id}`;
+    await (state.conversationSaveChains.get(saveKey) || Promise.resolve()).catch(() => {});
+    const { conversation: branched } = await request(
+      `/api/workspaces/${encodeURIComponent(project.id)}/conversations/${encodeURIComponent(conversation.id)}/branch`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messageIndex: index }),
+      }
+    );
+    state.conversations = [branched].concat(state.conversations.filter((item) => item.id !== branched.id));
+    state.messages = [...branched.messages];
+    state.editingMessageIndex = -1;
+    state.selectedAgentByConversation.set(conversation.id, selectedAgentId);
+    renderProjectList();
+    renderAgentOptions();
+    await executeConversationTurn({
+      project,
+      task: text,
+      attachments,
+      selectedAgentId,
+      sandboxMode: String(original.metadata?.sandboxMode || document.querySelector("[name='sandboxMode']")?.value || ""),
+      context: history.length ? { editedConversationHistory: history } : undefined,
+      suppressEmptyWelcome: true,
+    });
+  } catch (error) {
+    toast(`编辑重发失败：${error.message}`, true);
+    state.editingMessageIndex = -1;
+    renderMessages();
+  }
+}
+
+async function steerActiveRun(input, attachments = []) {
   const project = getActiveProject();
   const conversation = getActiveConversation();
   const activeRun = state.activeRun;
@@ -1919,6 +2211,7 @@ async function steerActiveRun(input) {
   const steerMessage = {
     role: "user",
     text: input,
+    attachments,
     runId: activeRun.runId,
     metadata: {
       workspaceId: project.id,
@@ -1934,13 +2227,15 @@ async function steerActiveRun(input) {
   else state.messages.splice(assistantIndex, 0, steerMessage);
   const inputNode = document.getElementById("messageInput");
   inputNode.value = "";
+  state.composerAttachments = [];
+  renderComposerAttachments();
   resizeComposer(inputNode);
-  renderMessages();
+  renderMessages({ forceScrollBottom: true });
   await queueConversationSave(project.id, conversation.id, state.messages, { immediate: true });
   await request(`/api/workspaces/${encodeURIComponent(project.id)}/runs/${encodeURIComponent(activeRun.runId)}/steer`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ input }),
+    body: JSON.stringify({ input, attachments }),
   });
 }
 
@@ -1987,6 +2282,10 @@ function createExecutionHandlers({ project, conversationId, messages, payload, a
       if (!chunk) return;
       if (["正在调用 Codex runtime...", "连接已断开，正在恢复..."].includes(assistantMessage.text)) assistantMessage.text = "";
       assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, { executionStage: "正在生成回复" });
+      assistantMessage.agentRunSummary = updateActiveRunSummaryProgress(
+        assistantMessage.agentRunSummary,
+        "正在生成回复"
+      );
       appendExecutionActivity(assistantMessage, { key: "response_streaming", label: "正在生成回复" });
       assistantMessage.text += chunk;
       renderCurrentConversation();
@@ -1995,6 +2294,11 @@ function createExecutionHandlers({ project, conversationId, messages, payload, a
     onRuntimeEvent(event) {
       const activity = describeRuntimeEvent(event);
       if (!activity) return;
+      assistantMessage.agentRunSummary = updateRunSummaryRuntimeProgress(
+        assistantMessage.agentRunSummary,
+        event,
+        activity.stage || activity.label
+      );
       assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, { executionStage: activity.stage || activity.label });
       appendExecutionActivity(assistantMessage, activity);
       renderCurrentConversation();
@@ -2032,17 +2336,29 @@ function createExecutionHandlers({ project, conversationId, messages, payload, a
       renderCurrentConversation();
       saveConversation(true);
     },
-    onDagNodeEvent(event) {
+    onBlueprintNodeEvent(event) {
       assistantMessage.agentRunSummary = updateRunSummaryNode(assistantMessage.agentRunSummary, event);
-      const completed = event.type === "dag_node_completed";
+      const completed = event.type === "blueprint_node_completed";
       appendExecutionActivity(assistantMessage, {
         key: `${event.type}:${event.nodeRunId || event.nodeId || "node"}`,
-        label: completed ? "节点执行完成" : event.type === "dag_node_waiting" ? "节点等待确认" : "节点开始执行",
+        label: completed ? "节点执行完成" : event.type === "blueprint_node_waiting" ? "节点等待确认" : "节点开始执行",
         detail: event.nodeId || "",
       });
       assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
-        executionStage: completed ? "正在协调下一步" : event.type === "dag_node_waiting" ? "等待确认" : `正在执行 ${event.nodeId || "节点"}`,
+        executionStage: completed ? "正在协调下一步" : event.type === "blueprint_node_waiting" ? "等待确认" : `正在执行 ${event.nodeId || "节点"}`,
       });
+      renderCurrentConversation();
+    },
+    onRootCoordinatorEvent(event) {
+      assistantMessage.agentRunSummary = updateRootCoordinatorSummary(assistantMessage.agentRunSummary, event);
+      assistantMessage.metadata = mergeMessageMetadata(assistantMessage.metadata, {
+        executionStage: event.type === "root_coordinator_started" ? "RootAgent 正在协调" : "RootAgent 已完成本轮决策",
+      });
+      renderCurrentConversation();
+    },
+    onBlueprintRuntimeOutput(event) {
+      const stage = event.stream === "stderr" ? "节点正在处理" : "正在生成节点结果";
+      assistantMessage.agentRunSummary = updateRunSummaryRuntimeProgress(assistantMessage.agentRunSummary, event, stage);
       renderCurrentConversation();
     },
     onRuntimeRequest(event) {
@@ -2195,7 +2511,9 @@ async function consumeExecutionStream(body, handlers = {}) {
       else if (event.type === "runtime_event") handlers.onRuntimeEvent?.(event);
       else if (event.type === "runtime_request") handlers.onRuntimeRequest?.(event);
       else if (event.type === "runtime_request_resolved") handlers.onRuntimeRequestResolved?.(event);
-      else if (["dag_node_started", "dag_node_completed", "dag_node_waiting"].includes(event.type)) handlers.onDagNodeEvent?.(event);
+      else if (["blueprint_node_started", "blueprint_node_completed", "blueprint_node_waiting"].includes(event.type)) handlers.onBlueprintNodeEvent?.(event);
+      else if (["root_coordinator_started", "root_coordinator_decision"].includes(event.type)) handlers.onRootCoordinatorEvent?.(event);
+      else if (event.type === "blueprint_runtime_output") handlers.onBlueprintRuntimeOutput?.(event);
       else if (event.type === "run_snapshot") handlers.onSnapshot?.(event);
       else if (event.type === "cancelled") handlers.onCancelled?.(event);
       else if (event.type === "done") handlers.onDone?.(event);
@@ -2320,14 +2638,18 @@ function hydrateMessageFromRun(message, run) {
 
 function updateRunSummaryStatus(summary, status) {
   if (!summary) return summary;
+  const now = new Date().toISOString();
+  const terminal = TERMINAL_EXECUTION_STATUSES.has(status);
   return {
     ...summary,
     status,
     rootCoordinator: summary.rootCoordinator && ["running", "pending", "waiting_approval"].includes(summary.rootCoordinator.status)
-      ? { ...summary.rootCoordinator, status }
+      ? { ...summary.rootCoordinator, status, stage: runStatusLabel(status), completedAt: terminal ? now : summary.rootCoordinator.completedAt }
       : summary.rootCoordinator,
     nodes: (summary.nodes || []).map((node) =>
-      ["running", "ready", "pending", "waiting_approval"].includes(node.status) ? { ...node, status } : node
+      ["running", "ready", "pending", "waiting_approval"].includes(node.status)
+        ? { ...node, status, stage: runStatusLabel(status), completedAt: terminal ? now : node.completedAt }
+        : node
     ),
   };
 }
@@ -2338,14 +2660,24 @@ function updateRuntimeRequestSummary(summary, event, status) {
     return {
       ...summary,
       status,
-      rootCoordinator: summary.rootCoordinator ? { ...summary.rootCoordinator, status } : summary.rootCoordinator,
+      rootCoordinator: summary.rootCoordinator ? {
+        ...summary.rootCoordinator,
+        status,
+        stage: runStatusLabel(status),
+        completedAt: status === "waiting_approval" ? new Date().toISOString() : "",
+      } : summary.rootCoordinator,
     };
   }
   if (event.nodeRunId) {
     return {
       ...summary,
       status,
-      nodes: (summary.nodes || []).map((node) => node.id === event.nodeRunId ? { ...node, status } : node),
+      nodes: (summary.nodes || []).map((node) => node.id === event.nodeRunId ? {
+        ...node,
+        status,
+        stage: runStatusLabel(status),
+        completedAt: status === "waiting_approval" ? new Date().toISOString() : "",
+      } : node),
     };
   }
   return updateRunSummaryStatus(summary, status);
@@ -2845,12 +3177,12 @@ function openAgentForm(agent = undefined) {
   document.getElementById("projectConfigBtn").textContent = "保存";
 
   const draft = createAgentDraft(agent);
-  state.selectedDagNodeId = "root";
-  state.selectedDagEdgeKey = "";
+  state.selectedBlueprintNodeId = "root";
+  state.selectedBlueprintEdgeKey = "";
   const stream = document.getElementById("chatStream");
   stream.innerHTML = renderAgentEditor(draft);
   bindAgentEditorEvents();
-  renderDagBuilder(draft.nodes, draft.edges);
+  renderBlueprintBuilder(draft.nodes, draft.edges);
   stream.scrollTop = 0;
 }
 
@@ -2862,8 +3194,8 @@ function setChatStreamMode(mode) {
 }
 
 function createAgentDraft(agent = undefined) {
-  const nodes = agent?.type === "dag" ? [...(agent.nodes || [])] : [];
-  const edges = agent?.type === "dag" ? [...(agent.edges || [])] : [];
+  const nodes = agent?.type === "blueprint" ? [...(agent.nodes || [])] : [];
+  const edges = agent?.type === "blueprint" ? [...(agent.edges || [])] : [];
   return ensureRootDraft({
     id: agent?.id || "",
     version: agent?.version || 0,
@@ -2913,7 +3245,7 @@ function renderAgentEditor(draft) {
     <form id="agentForm" class="agentEditor">
       <input name="id" type="hidden" value="${escapeHtml(draft.id)}" />
       <input name="version" type="hidden" value="${escapeHtml(draft.version)}" />
-      <input name="type" type="hidden" value="dag" />
+      <input name="type" type="hidden" value="blueprint" />
       <input name="rootNodeId" type="hidden" value="root" />
       <input name="maxDecisions" type="hidden" value="${escapeHtml(draft.maxDecisions)}" />
       <textarea name="nodesJson" class="hidden">${escapeHtml(JSON.stringify(draft.nodes, null, 2))}</textarea>
@@ -2933,51 +3265,51 @@ function renderAgentEditor(draft) {
       </div>
 
       <div class="agentCanvasLayout">
-        <div class="dagCanvasShell">
-          <div id="dagGraphPreview" class="dagGraphPreview"></div>
+        <div class="blueprintCanvasShell">
+          <div id="blueprintGraphPreview" class="blueprintGraphPreview"></div>
         </div>
-        <aside class="dagInspector">
-          <div class="dagInspectorHeader">
+        <aside class="blueprintInspector">
+          <div class="blueprintInspectorHeader">
             <strong>节点配置</strong>
-            <button id="removeDagNodeBtn" type="button">删除节点</button>
+            <button id="removeBlueprintNodeBtn" type="button">删除节点</button>
           </div>
-          <label>节点 ID <input id="dagNodeIdInput" readonly /></label>
-          <label>节点名称 <input id="dagNodeNameInput" placeholder="需求分析" /></label>
+          <label>节点 ID <input id="blueprintNodeIdInput" readonly /></label>
+          <label>节点名称 <input id="blueprintNodeNameInput" placeholder="需求分析" /></label>
           <label>执行命令审批
-            <select id="dagNodeRuntimeApprovalInput">
+            <select id="blueprintNodeRuntimeApprovalInput">
               <option value="inherit">继承会话设置</option>
               <option value="untrusted">仅信任命令免审</option>
               <option value="on-request">按需请求审批</option>
               <option value="never">不请求审批</option>
             </select>
           </label>
-          <label id="dagNodeResultApprovalField">完成结果审核
-            <select id="dagNodeResultApprovalInput">
+          <label id="blueprintNodeResultApprovalField">完成结果审核
+            <select id="blueprintNodeResultApprovalInput">
               <option value="none">免审</option>
               <option value="manual">人工审批</option>
               <option value="auto">自动审批</option>
             </select>
           </label>
-          <label class="dagNodeRagToggle"><input id="dagNodeRagEnabledInput" type="checkbox" /> 启用 RAG 工具</label>
-          <label id="dagNodeRagTopNField">RAG Top N <input id="dagNodeRagTopNInput" type="number" min="1" value="4" /></label>
-          <div class="dagEdgeEditor">
-            <div class="dagEdgeEditorHeader">
+          <label class="blueprintNodeRagToggle"><input id="blueprintNodeRagEnabledInput" type="checkbox" /> 启用 RAG 工具</label>
+          <label id="blueprintNodeRagTopNField">RAG Top N <input id="blueprintNodeRagTopNInput" type="number" min="1" value="4" /></label>
+          <div class="blueprintEdgeEditor">
+            <div class="blueprintEdgeEditorHeader">
               <strong>节点连接</strong>
-              <small id="dagConnectionCount"></small>
+              <small id="blueprintConnectionCount"></small>
             </div>
-            <div id="dagConnectionSummary" class="dagConnectionSummary"></div>
+            <div id="blueprintConnectionSummary" class="blueprintConnectionSummary"></div>
           </div>
-          <label>接口描述 <textarea id="dagNodeDescriptionInput" rows="2" placeholder="说明该节点对 RootAgent 暴露的能力、适用场景和输出"></textarea></label>
-          <label>系统提示词 <textarea id="dagNodePromptInput" rows="3" placeholder="该节点执行任务时使用的系统提示词"></textarea></label>
-          <label>结果处置规则 <textarea id="dagNodeTransitionInput" rows="3" placeholder="RootAgent 收到该节点结果后，如何继续、重试、请求用户或结束任务"></textarea></label>
+          <label>接口描述 <textarea id="blueprintNodeDescriptionInput" rows="2" placeholder="说明该节点对 RootAgent 暴露的能力、适用场景和输出"></textarea></label>
+          <label>系统提示词 <textarea id="blueprintNodePromptInput" rows="3" placeholder="该节点执行任务时使用的系统提示词"></textarea></label>
+          <label>结果处置规则 <textarea id="blueprintNodeTransitionInput" rows="3" placeholder="RootAgent 收到该节点结果后，如何继续、重试、请求用户或结束任务"></textarea></label>
         </aside>
       </div>
 
       <div class="agentCanvasConsole">
-        <button id="addDagNodeBtn" type="button">新增节点</button>
-        <button id="removeDagEdgeBtn" type="button" disabled>删除连线</button>
+        <button id="addBlueprintNodeBtn" type="button">新增节点</button>
+        <button id="removeBlueprintEdgeBtn" type="button" disabled>删除连线</button>
         <button id="importAgentGraphBtn" type="button">导入</button>
-        <button id="alignDagCanvasBtn" type="button">对齐</button>
+        <button id="alignBlueprintCanvasBtn" type="button">对齐</button>
         <button id="saveAgentCanvasBtn" class="primary" type="submit">保存</button>
         <input id="agentGraphImportInput" class="hidden" type="file" accept="application/json,.json" />
       </div>
@@ -2987,14 +3319,14 @@ function renderAgentEditor(draft) {
 
 function bindAgentEditorEvents() {
   document.getElementById("agentForm")?.addEventListener("submit", saveAgent);
-  document.getElementById("addDagNodeBtn")?.addEventListener("click", addDagNodeFromBuilder);
-  document.getElementById("removeDagNodeBtn")?.addEventListener("click", removeSelectedDagNode);
-  document.getElementById("removeDagEdgeBtn")?.addEventListener("click", removeSelectedDagEdge);
-  document.getElementById("alignDagCanvasBtn")?.addEventListener("click", alignDagCanvas);
+  document.getElementById("addBlueprintNodeBtn")?.addEventListener("click", addBlueprintNodeFromBuilder);
+  document.getElementById("removeBlueprintNodeBtn")?.addEventListener("click", removeSelectedBlueprintNode);
+  document.getElementById("removeBlueprintEdgeBtn")?.addEventListener("click", removeSelectedBlueprintEdge);
+  document.getElementById("alignBlueprintCanvasBtn")?.addEventListener("click", alignBlueprintCanvas);
   document.getElementById("importAgentGraphBtn")?.addEventListener("click", () => document.getElementById("agentGraphImportInput")?.click());
   document.getElementById("agentGraphImportInput")?.addEventListener("change", importAgentGraphFile);
-  ["dagNodeNameInput", "dagNodeRuntimeApprovalInput", "dagNodeResultApprovalInput", "dagNodeRagEnabledInput", "dagNodeRagTopNInput", "dagNodeDescriptionInput", "dagNodePromptInput", "dagNodeTransitionInput"].forEach((id) => {
-    document.getElementById(id)?.addEventListener("change", updateSelectedDagNodeFromInspector);
+  ["blueprintNodeNameInput", "blueprintNodeRuntimeApprovalInput", "blueprintNodeResultApprovalInput", "blueprintNodeRagEnabledInput", "blueprintNodeRagTopNInput", "blueprintNodeDescriptionInput", "blueprintNodePromptInput", "blueprintNodeTransitionInput"].forEach((id) => {
+    document.getElementById(id)?.addEventListener("change", updateSelectedBlueprintNodeFromInspector);
   });
 }
 
@@ -3002,105 +3334,105 @@ function submitActiveAgentEditor() {
   document.getElementById("agentForm")?.requestSubmit();
 }
 
-function renderDagBuilder(nodes = [], edges = []) {
-  const preview = document.getElementById("dagGraphPreview");
+function renderBlueprintBuilder(nodes = [], edges = []) {
+  const preview = document.getElementById("blueprintGraphPreview");
   if (!preview) return;
   nodes = ensureRootDraft({ nodes, edges }).nodes;
   edges = ensureRootDraft({ nodes, edges }).edges;
   const rootId = "root";
-  if (!state.selectedDagNodeId || !nodes.some((node) => node.id === state.selectedDagNodeId)) {
-    state.selectedDagNodeId = rootId;
+  if (!state.selectedBlueprintNodeId || !nodes.some((node) => node.id === state.selectedBlueprintNodeId)) {
+    state.selectedBlueprintNodeId = rootId;
   }
-  if (state.selectedDagEdgeKey && !edges.some((edge) => dagEdgeKey(edge) === state.selectedDagEdgeKey)) {
-    state.selectedDagEdgeKey = "";
+  if (state.selectedBlueprintEdgeKey && !edges.some((edge) => blueprintEdgeKey(edge) === state.selectedBlueprintEdgeKey)) {
+    state.selectedBlueprintEdgeKey = "";
   }
   const edgeByTarget = groupEdgesByTarget(edges);
   const edgeBySource = groupEdgesBySource(edges);
-  const layout = layoutDagNodes(nodes, edges, rootId);
-  const width = Math.max(760, ...Object.values(layout).map((item) => item.x + DAG_NODE_WIDTH + 40), 760);
-  const height = Math.max(430, ...Object.values(layout).map((item) => item.y + DAG_NODE_HEIGHT + 40), 430);
+  const layout = layoutBlueprintNodes(nodes, edges, rootId);
+  const width = Math.max(760, ...Object.values(layout).map((item) => item.x + BLUEPRINT_NODE_WIDTH + 40), 760);
+  const height = Math.max(430, ...Object.values(layout).map((item) => item.y + BLUEPRINT_NODE_HEIGHT + 40), 430);
   preview.innerHTML = `
-    <svg class="dagEdgeLayer" viewBox="0 0 ${width} ${height}" aria-label="节点连线">
+    <svg class="blueprintEdgeLayer" viewBox="0 0 ${width} ${height}" aria-label="节点连线">
       <defs>
-        <marker id="dagArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <marker id="blueprintArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
           <path d="M 0 0 L 10 5 L 0 10 z" fill="#7c83ff"></path>
         </marker>
       </defs>
-      ${edges.map((edge) => renderDagEdgePath(edge, layout)).join("")}
-      <path id="dagPendingEdge" class="dagEdgePath pending hidden"></path>
+      ${edges.map((edge) => renderBlueprintEdgePath(edge, layout)).join("")}
+      <path id="blueprintPendingEdge" class="blueprintEdgePath pending hidden"></path>
     </svg>
-    <div class="dagCanvas" aria-label="DAG 可视化画布" style="width:${width}px;height:${height}px">
+    <div class="blueprintCanvas" aria-label="蓝图可视化画布" style="width:${width}px;height:${height}px">
       ${nodes.length ? nodes.map((node) => `
-        <div class="dagCanvasNode ${node.id === rootId ? "root" : ""} ${node.id === state.selectedDagNodeId ? "selected" : ""}" style="left:${layout[node.id]?.x || 24}px;top:${layout[node.id]?.y || 24}px" data-select-dag-node="${escapeHtml(node.id)}" role="button" tabindex="0">
-          <span class="dagPort input ${node.id === rootId ? "disabled" : ""}" data-dag-input="${escapeHtml(node.id)}" title="输入端点"></span>
-          <div class="dagNodeHeader">
+        <div class="blueprintCanvasNode ${node.id === rootId ? "root" : ""} ${node.id === state.selectedBlueprintNodeId ? "selected" : ""}" style="left:${layout[node.id]?.x || 24}px;top:${layout[node.id]?.y || 24}px" data-select-blueprint-node="${escapeHtml(node.id)}" role="button" tabindex="0">
+          <span class="blueprintPort input ${node.id === rootId ? "disabled" : ""}" data-blueprint-input="${escapeHtml(node.id)}" title="输入端点"></span>
+          <div class="blueprintNodeHeader">
             <strong>${escapeHtml(node.name || node.id)}</strong>
             <span>${node.id === rootId ? `执行: ${formatNodeRuntimeApproval(node)} · Root` : `执行: ${formatNodeRuntimeApproval(node)} · 结果: ${formatNodeResultApproval(node)}`}</span>
           </div>
           <small>${escapeHtml(node.id)}</small>
           ${node.description ? `<p>${escapeHtml(node.description)}</p>` : ""}
-          <div class="dagNodeIO">
+          <div class="blueprintNodeIO">
             <span>结果处置: ${node.transitionInstruction ? "已配置" : "默认处理"}</span>
             <span>RAG: ${normalizeNodeRag(node.rag).enabled ? `启用 · Top ${normalizeNodeRag(node.rag).topN}` : "未启用"}</span>
             <span>入: ${edgeByTarget.get(node.id)?.map((edge) => edge.from).join(", ") || (node.id === rootId ? "任务输入" : "未连接")}</span>
             <span>出: ${edgeBySource.get(node.id)?.map((edge) => edge.to).join(", ") || "终端输出"}</span>
           </div>
-          <span class="dagPort output" data-dag-output="${escapeHtml(node.id)}" title="输出端点"></span>
+          <span class="blueprintPort output" data-blueprint-output="${escapeHtml(node.id)}" title="输出端点"></span>
         </div>
       `).join("") : `<small>还没有节点。</small>`}
     </div>
   `;
-  const renderedLayout = measureRenderedDagLayout(preview, layout);
+  const renderedLayout = measureRenderedBlueprintLayout(preview, layout);
   const renderedWidth = Math.max(width, ...Object.values(renderedLayout).map((item) => item.x + item.width + 40));
   const renderedHeight = Math.max(height, ...Object.values(renderedLayout).map((item) => item.y + item.height + 40));
   preview.style.minWidth = `${renderedWidth}px`;
   preview.style.minHeight = `${renderedHeight}px`;
-  preview.querySelector(".dagEdgeLayer")?.setAttribute("viewBox", `0 0 ${renderedWidth} ${renderedHeight}`);
-  const canvas = preview.querySelector(".dagCanvas");
+  preview.querySelector(".blueprintEdgeLayer")?.setAttribute("viewBox", `0 0 ${renderedWidth} ${renderedHeight}`);
+  const canvas = preview.querySelector(".blueprintCanvas");
   if (canvas) {
     canvas.style.width = `${renderedWidth}px`;
     canvas.style.height = `${renderedHeight}px`;
   }
-  updateRenderedDagEdges(preview, renderedLayout);
-  preview.querySelectorAll("[data-select-dag-node]").forEach((nodeElement) => {
-    bindDagNodeInteraction(nodeElement, nodes, edges, renderedLayout);
+  updateRenderedBlueprintEdges(preview, renderedLayout);
+  preview.querySelectorAll("[data-select-blueprint-node]").forEach((nodeElement) => {
+    bindBlueprintNodeInteraction(nodeElement, nodes, edges, renderedLayout);
   });
-  preview.querySelectorAll("[data-dag-edge]").forEach((path) => {
+  preview.querySelectorAll("[data-blueprint-edge]").forEach((path) => {
     path.addEventListener("click", (event) => {
       event.stopPropagation();
-      state.selectedDagEdgeKey = path.dataset.dagEdge;
-      renderDagBuilder(nodes, edges);
+      state.selectedBlueprintEdgeKey = path.dataset.blueprintEdge;
+      renderBlueprintBuilder(nodes, edges);
       preview.focus({ preventScroll: true });
     });
   });
   preview.onclick = (event) => {
-    if (event.target === preview || event.target.classList.contains("dagCanvas")) {
-      state.selectedDagEdgeKey = "";
-      renderDagBuilder(nodes, edges);
+    if (event.target === preview || event.target.classList.contains("blueprintCanvas")) {
+      state.selectedBlueprintEdgeKey = "";
+      renderBlueprintBuilder(nodes, edges);
     }
   };
   preview.tabIndex = 0;
   preview.onkeydown = (event) => {
-    if ((event.key === "Delete" || event.key === "Backspace") && state.selectedDagEdgeKey) {
+    if ((event.key === "Delete" || event.key === "Backspace") && state.selectedBlueprintEdgeKey) {
       event.preventDefault();
-      removeSelectedDagEdge();
+      removeSelectedBlueprintEdge();
     }
   };
-  const selectedNode = nodes.find((node) => node.id === state.selectedDagNodeId);
-  if (selectedNode) loadDagNodeIntoInspector(selectedNode);
-  syncDagEdgeSelection(edges);
+  const selectedNode = nodes.find((node) => node.id === state.selectedBlueprintNodeId);
+  if (selectedNode) loadBlueprintNodeIntoInspector(selectedNode);
+  syncBlueprintEdgeSelection(edges);
 }
 
-function addDagNodeFromBuilder() {
+function addBlueprintNodeFromBuilder() {
   const form = document.getElementById("agentForm");
   const nodes = parseJsonField(form.elements.nodesJson.value, []);
   const edges = parseJsonField(form.elements.edgesJson.value, []);
-  const nodeId = nextDagNodeId(nodes);
-  const selectedId = nodes.some((node) => node.id === state.selectedDagNodeId) ? state.selectedDagNodeId : "root";
-  const currentLayout = layoutDagNodes(nodes, edges, "root");
+  const nodeId = nextBlueprintNodeId(nodes);
+  const selectedId = nodes.some((node) => node.id === state.selectedBlueprintNodeId) ? state.selectedBlueprintNodeId : "root";
+  const currentLayout = layoutBlueprintNodes(nodes, edges, "root");
   const selectedPosition = currentLayout[selectedId] || { x: 24, y: 28 };
-  const position = findAvailableDagPosition(nodes, currentLayout, {
-    x: selectedPosition.x + DAG_NODE_WIDTH + DAG_COLUMN_GAP,
+  const position = findAvailableBlueprintPosition(nodes, currentLayout, {
+    x: selectedPosition.x + BLUEPRINT_NODE_WIDTH + BLUEPRINT_COLUMN_GAP,
     y: selectedPosition.y,
   });
   const node = {
@@ -3119,37 +3451,37 @@ function addDagNodeFromBuilder() {
   const nextEdges = selectedId && selectedId !== nodeId
     ? [...edges, { from: selectedId, to: nodeId }]
     : edges;
-  state.selectedDagNodeId = nodeId;
-  state.selectedDagEdgeKey = selectedId ? dagEdgeKey({ from: selectedId, to: nodeId }) : "";
-  setDagJson(nextNodes, nextEdges);
+  state.selectedBlueprintNodeId = nodeId;
+  state.selectedBlueprintEdgeKey = selectedId ? blueprintEdgeKey({ from: selectedId, to: nodeId }) : "";
+  setBlueprintJson(nextNodes, nextEdges);
 }
 
-function loadDagNodeIntoInspector(node) {
-  document.getElementById("dagNodeIdInput").value = node.id || "";
-  document.getElementById("dagNodeNameInput").value = node.name || "";
-  document.getElementById("dagNodeRuntimeApprovalInput").value = normalizeNodeRuntimeApproval(node);
-  document.getElementById("dagNodeResultApprovalInput").value = normalizeNodeResultApproval(node);
+function loadBlueprintNodeIntoInspector(node) {
+  document.getElementById("blueprintNodeIdInput").value = node.id || "";
+  document.getElementById("blueprintNodeNameInput").value = node.name || "";
+  document.getElementById("blueprintNodeRuntimeApprovalInput").value = normalizeNodeRuntimeApproval(node);
+  document.getElementById("blueprintNodeResultApprovalInput").value = normalizeNodeResultApproval(node);
   const rag = normalizeNodeRag(node.rag);
-  document.getElementById("dagNodeRagEnabledInput").checked = rag.enabled;
-  document.getElementById("dagNodeRagTopNInput").value = String(rag.topN);
-  document.getElementById("dagNodeResultApprovalField").classList.toggle("hidden", node.id === "root");
-  document.getElementById("dagNodeDescriptionInput").value = node.description || "";
-  document.getElementById("dagNodePromptInput").value = node.systemPrompt || "";
-  document.getElementById("dagNodeTransitionInput").value = node.transitionInstruction || "";
-  document.getElementById("removeDagNodeBtn").disabled = node.id === "root";
-  syncDagNodeRagFieldState();
-  renderDagConnectionSummary(node.id || "root");
+  document.getElementById("blueprintNodeRagEnabledInput").checked = rag.enabled;
+  document.getElementById("blueprintNodeRagTopNInput").value = String(rag.topN);
+  document.getElementById("blueprintNodeResultApprovalField").classList.toggle("hidden", node.id === "root");
+  document.getElementById("blueprintNodeDescriptionInput").value = node.description || "";
+  document.getElementById("blueprintNodePromptInput").value = node.systemPrompt || "";
+  document.getElementById("blueprintNodeTransitionInput").value = node.transitionInstruction || "";
+  document.getElementById("removeBlueprintNodeBtn").disabled = node.id === "root";
+  syncBlueprintNodeRagFieldState();
+  renderBlueprintConnectionSummary(node.id || "root");
 }
 
-function syncDagNodeRagFieldState() {
-  const enabled = document.getElementById("dagNodeRagEnabledInput")?.checked === true;
-  document.getElementById("dagNodeRagTopNField")?.classList.toggle("hidden", !enabled);
+function syncBlueprintNodeRagFieldState() {
+  const enabled = document.getElementById("blueprintNodeRagEnabledInput")?.checked === true;
+  document.getElementById("blueprintNodeRagTopNField")?.classList.toggle("hidden", !enabled);
 }
 
-function renderDagConnectionSummary(selectedNodeId) {
+function renderBlueprintConnectionSummary(selectedNodeId) {
   const form = document.getElementById("agentForm");
-  const summary = document.getElementById("dagConnectionSummary");
-  const count = document.getElementById("dagConnectionCount");
+  const summary = document.getElementById("blueprintConnectionSummary");
+  const count = document.getElementById("blueprintConnectionCount");
   if (!form || !summary || !count) return;
   const edges = parseJsonField(form.elements.edgesJson.value, []);
   const incoming = edges.filter((edge) => edge.to === selectedNodeId).map((edge) => edge.from);
@@ -3162,17 +3494,17 @@ function renderDagConnectionSummary(selectedNodeId) {
   `;
 }
 
-function bindDagNodeInteraction(nodeElement, nodes, edges, layout) {
-  const nodeId = nodeElement.dataset.selectDagNode;
+function bindBlueprintNodeInteraction(nodeElement, nodes, edges, layout) {
+  const nodeId = nodeElement.dataset.selectBlueprintNode;
   const selectNode = () => {
     const node = nodes.find((item) => item.id === nodeId);
     if (!node) return;
-    state.selectedDagNodeId = node.id;
-    state.selectedDagEdgeKey = "";
-    renderDagBuilder(nodes, edges);
+    state.selectedBlueprintNodeId = node.id;
+    state.selectedBlueprintEdgeKey = "";
+    renderBlueprintBuilder(nodes, edges);
   };
   nodeElement.addEventListener("click", (event) => {
-    if (event.target.closest(".dagPort") || nodeElement.dataset.dragged === "true") return;
+    if (event.target.closest(".blueprintPort") || nodeElement.dataset.dragged === "true") return;
     selectNode();
   });
   nodeElement.addEventListener("keydown", (event) => {
@@ -3182,7 +3514,7 @@ function bindDagNodeInteraction(nodeElement, nodes, edges, layout) {
     }
   });
   nodeElement.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || event.target.closest(".dagPort")) return;
+    if (event.button !== 0 || event.target.closest(".blueprintPort")) return;
     const start = layout[nodeId];
     if (!start) return;
     const origin = { x: event.clientX, y: event.clientY };
@@ -3203,7 +3535,7 @@ function bindDagNodeInteraction(nodeElement, nodes, edges, layout) {
       liveLayout[nodeId] = position;
       nodeElement.style.left = `${position.x}px`;
       nodeElement.style.top = `${position.y}px`;
-      updateRenderedDagEdges(nodeElement.closest(".dagGraphPreview"), liveLayout);
+      updateRenderedBlueprintEdges(nodeElement.closest(".blueprintGraphPreview"), liveLayout);
     };
     const end = (upEvent) => {
       nodeElement.removeEventListener("pointermove", move);
@@ -3212,43 +3544,43 @@ function bindDagNodeInteraction(nodeElement, nodes, edges, layout) {
       if (nodeElement.hasPointerCapture(upEvent.pointerId)) nodeElement.releasePointerCapture(upEvent.pointerId);
       if (!moved) return;
       const position = liveLayout[nodeId];
-      const nextNodes = nodes.map((node) => node.id === nodeId ? withDagCanvasPosition(node, position) : node);
-      state.selectedDagNodeId = nodeId;
-      state.selectedDagEdgeKey = "";
-      setDagJson(nextNodes, edges);
+      const nextNodes = nodes.map((node) => node.id === nodeId ? withBlueprintCanvasPosition(node, position) : node);
+      state.selectedBlueprintNodeId = nodeId;
+      state.selectedBlueprintEdgeKey = "";
+      setBlueprintJson(nextNodes, edges);
     };
     nodeElement.addEventListener("pointermove", move);
     nodeElement.addEventListener("pointerup", end);
     nodeElement.addEventListener("pointercancel", end);
   });
-  nodeElement.querySelector("[data-dag-output]")?.addEventListener("pointerdown", (event) => {
-    startDagConnection(event, nodeId, layout);
+  nodeElement.querySelector("[data-blueprint-output]")?.addEventListener("pointerdown", (event) => {
+    startBlueprintConnection(event, nodeId, layout);
   });
 }
 
-function startDagConnection(event, sourceNodeId, layout) {
+function startBlueprintConnection(event, sourceNodeId, layout) {
   if (event.button !== 0) return;
   event.preventDefault();
   event.stopPropagation();
-  const preview = event.currentTarget.closest(".dagGraphPreview");
-  const pending = preview?.querySelector("#dagPendingEdge");
+  const preview = event.currentTarget.closest(".blueprintGraphPreview");
+  const pending = preview?.querySelector("#blueprintPendingEdge");
   const source = layout[sourceNodeId];
   if (!preview || !pending || !source) return;
-  const start = dagOutputPoint(source);
+  const start = blueprintOutputPoint(source);
   pending.classList.remove("hidden");
   const move = (moveEvent) => {
-    const point = dagPointerPosition(preview, moveEvent);
-    pending.setAttribute("d", dagEdgeCurve(start, point));
-    preview.querySelectorAll(".dagPort.input.connectionTarget").forEach((port) => port.classList.remove("connectionTarget"));
-    const target = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)?.closest("[data-dag-input]");
-    if (target && target.dataset.dagInput !== "root" && target.dataset.dagInput !== sourceNodeId) {
+    const point = blueprintPointerPosition(preview, moveEvent);
+    pending.setAttribute("d", blueprintEdgeCurve(start, point));
+    preview.querySelectorAll(".blueprintPort.input.connectionTarget").forEach((port) => port.classList.remove("connectionTarget"));
+    const target = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)?.closest("[data-blueprint-input]");
+    if (target && target.dataset.blueprintInput !== "root" && target.dataset.blueprintInput !== sourceNodeId) {
       target.classList.add("connectionTarget");
     }
   };
   const end = (upEvent) => {
-    const target = document.elementFromPoint(upEvent.clientX, upEvent.clientY)?.closest("[data-dag-input]");
+    const target = document.elementFromPoint(upEvent.clientX, upEvent.clientY)?.closest("[data-blueprint-input]");
     cleanup();
-    if (target) createDagEdge(sourceNodeId, target.dataset.dagInput);
+    if (target) createBlueprintEdge(sourceNodeId, target.dataset.blueprintInput);
   };
   const cleanup = () => {
     document.removeEventListener("pointermove", move);
@@ -3256,14 +3588,14 @@ function startDagConnection(event, sourceNodeId, layout) {
     document.removeEventListener("pointercancel", cleanup);
     pending.classList.add("hidden");
     pending.removeAttribute("d");
-    preview.querySelectorAll(".dagPort.input.connectionTarget").forEach((port) => port.classList.remove("connectionTarget"));
+    preview.querySelectorAll(".blueprintPort.input.connectionTarget").forEach((port) => port.classList.remove("connectionTarget"));
   };
   document.addEventListener("pointermove", move);
   document.addEventListener("pointerup", end);
   document.addEventListener("pointercancel", cleanup);
 }
 
-function createDagEdge(from, to) {
+function createBlueprintEdge(from, to) {
   const form = document.getElementById("agentForm");
   if (!form || !from || !to) return;
   if (to === "root") return toast("Root 是任务入口，不能连接上游节点。", true);
@@ -3272,45 +3604,45 @@ function createDagEdge(from, to) {
   const edges = parseJsonField(form.elements.edgesJson.value, []);
   if (!nodes.some((node) => node.id === from) || !nodes.some((node) => node.id === to)) return;
   if (edges.some((edge) => edge.from === from && edge.to === to)) {
-    state.selectedDagEdgeKey = dagEdgeKey({ from, to });
-    renderDagBuilder(nodes, edges);
+    state.selectedBlueprintEdgeKey = blueprintEdgeKey({ from, to });
+    renderBlueprintBuilder(nodes, edges);
     return toast("连线已存在。", true);
   }
   const nextEdges = [...edges, { from, to }];
-  if (wouldCreateDagCycle(nodes, nextEdges)) return toast("该连线会形成循环。", true);
-  state.selectedDagNodeId = to;
-  state.selectedDagEdgeKey = dagEdgeKey({ from, to });
-  setDagJson(nodes, nextEdges);
+  if (wouldCreateBlueprintCycle(nodes, nextEdges)) return toast("该连线会形成循环。", true);
+  state.selectedBlueprintNodeId = to;
+  state.selectedBlueprintEdgeKey = blueprintEdgeKey({ from, to });
+  setBlueprintJson(nodes, nextEdges);
 }
 
-function removeSelectedDagEdge() {
+function removeSelectedBlueprintEdge() {
   const form = document.getElementById("agentForm");
-  if (!form || !state.selectedDagEdgeKey) return;
+  if (!form || !state.selectedBlueprintEdgeKey) return;
   const nodes = parseJsonField(form.elements.nodesJson.value, []);
   const edges = parseJsonField(form.elements.edgesJson.value, []);
-  const nextEdges = edges.filter((edge) => dagEdgeKey(edge) !== state.selectedDagEdgeKey);
-  state.selectedDagEdgeKey = "";
-  setDagJson(nodes, nextEdges);
+  const nextEdges = edges.filter((edge) => blueprintEdgeKey(edge) !== state.selectedBlueprintEdgeKey);
+  state.selectedBlueprintEdgeKey = "";
+  setBlueprintJson(nodes, nextEdges);
 }
 
-function syncDagEdgeSelection(edges) {
-  const selected = edges.find((edge) => dagEdgeKey(edge) === state.selectedDagEdgeKey);
-  const button = document.getElementById("removeDagEdgeBtn");
+function syncBlueprintEdgeSelection(edges) {
+  const selected = edges.find((edge) => blueprintEdgeKey(edge) === state.selectedBlueprintEdgeKey);
+  const button = document.getElementById("removeBlueprintEdgeBtn");
   if (!button) return;
   button.disabled = !selected;
   button.textContent = selected ? `删除连线 ${selected.from} → ${selected.to}` : "删除连线";
 }
 
-function alignDagCanvas() {
+function alignBlueprintCanvas() {
   const form = document.getElementById("agentForm");
   if (!form) return;
   const nodes = parseJsonField(form.elements.nodesJson.value, []);
   const edges = parseJsonField(form.elements.edgesJson.value, []);
-  const layout = autoLayoutDagNodes(nodes, edges, "root");
-  setDagJson(nodes.map((node) => withDagCanvasPosition(node, layout[node.id])), edges);
+  const layout = autoLayoutBlueprintNodes(nodes, edges, "root");
+  setBlueprintJson(nodes.map((node) => withBlueprintCanvasPosition(node, layout[node.id])), edges);
 }
 
-function withDagCanvasPosition(node, position) {
+function withBlueprintCanvasPosition(node, position) {
   return {
     ...node,
     metadata: {
@@ -3320,18 +3652,18 @@ function withDagCanvasPosition(node, position) {
   };
 }
 
-function findAvailableDagPosition(nodes, layout, preferred) {
+function findAvailableBlueprintPosition(nodes, layout, preferred) {
   const occupied = nodes.map((node) => layout[node.id]).filter(Boolean);
   let position = { ...preferred };
-  while (occupied.some((item) => Math.abs(item.x - position.x) < DAG_NODE_WIDTH + 20 && Math.abs(item.y - position.y) < DAG_NODE_HEIGHT + 20)) {
-    position.y += DAG_NODE_HEIGHT + DAG_ROW_GAP;
+  while (occupied.some((item) => Math.abs(item.x - position.x) < BLUEPRINT_NODE_WIDTH + 20 && Math.abs(item.y - position.y) < BLUEPRINT_NODE_HEIGHT + 20)) {
+    position.y += BLUEPRINT_NODE_HEIGHT + BLUEPRINT_ROW_GAP;
   }
   return position;
 }
 
-function updateSelectedDagNodeFromInspector() {
+function updateSelectedBlueprintNodeFromInspector() {
   const form = document.getElementById("agentForm");
-  const nodeId = state.selectedDagNodeId || "root";
+  const nodeId = state.selectedBlueprintNodeId || "root";
   const nodes = parseJsonField(form.elements.nodesJson.value, []);
   const edges = parseJsonField(form.elements.edgesJson.value, []);
   const nextNodes = nodes.map((node) => {
@@ -3340,24 +3672,24 @@ function updateSelectedDagNodeFromInspector() {
       ...node,
       id: node.id,
       kind: "task",
-      runtimeApprovalPolicy: document.getElementById("dagNodeRuntimeApprovalInput").value || "inherit",
-      resultApprovalPolicy: document.getElementById("dagNodeResultApprovalInput").value || "none",
+      runtimeApprovalPolicy: document.getElementById("blueprintNodeRuntimeApprovalInput").value || "inherit",
+      resultApprovalPolicy: document.getElementById("blueprintNodeResultApprovalInput").value || "none",
       rag: {
-        enabled: document.getElementById("dagNodeRagEnabledInput").checked,
-        topN: Math.max(1, Number(document.getElementById("dagNodeRagTopNInput").value) || 4),
+        enabled: document.getElementById("blueprintNodeRagEnabledInput").checked,
+        topN: Math.max(1, Number(document.getElementById("blueprintNodeRagTopNInput").value) || 4),
       },
-      transitionInstruction: document.getElementById("dagNodeTransitionInput").value.trim(),
-      name: document.getElementById("dagNodeNameInput").value.trim() || (node.id === "root" ? "Root" : node.id),
-      description: document.getElementById("dagNodeDescriptionInput").value.trim(),
-      systemPrompt: document.getElementById("dagNodePromptInput").value.trim(),
+      transitionInstruction: document.getElementById("blueprintNodeTransitionInput").value.trim(),
+      name: document.getElementById("blueprintNodeNameInput").value.trim() || (node.id === "root" ? "Root" : node.id),
+      description: document.getElementById("blueprintNodeDescriptionInput").value.trim(),
+      systemPrompt: document.getElementById("blueprintNodePromptInput").value.trim(),
     });
   });
   form.elements.nodesJson.value = JSON.stringify(nextNodes, null, 2);
-  if (nodeId === "root") form.elements.systemPrompt.value = document.getElementById("dagNodePromptInput").value.trim();
-  renderDagBuilder(nextNodes, edges);
+  if (nodeId === "root") form.elements.systemPrompt.value = document.getElementById("blueprintNodePromptInput").value.trim();
+  renderBlueprintBuilder(nextNodes, edges);
 }
 
-function nextDagNodeId(nodes) {
+function nextBlueprintNodeId(nodes) {
   const ids = new Set(nodes.map((node) => node.id));
   let index = Math.max(2, nodes.length + 1);
   while (ids.has(`node-${index}`)) index += 1;
@@ -3398,21 +3730,21 @@ function formatNodeRuntimeApproval(node = {}) {
   return "继承会话";
 }
 
-function renderDagEdgePath(edge, layout) {
+function renderBlueprintEdgePath(edge, layout) {
   const from = layout[edge.from];
   const to = layout[edge.to];
   if (!from || !to) return "";
-  const key = dagEdgeKey(edge);
-  const path = dagEdgeCurve(dagOutputPoint(from), dagInputPoint(to));
-  const selected = key === state.selectedDagEdgeKey ? "selected" : "";
+  const key = blueprintEdgeKey(edge);
+  const path = blueprintEdgeCurve(blueprintOutputPoint(from), blueprintInputPoint(to));
+  const selected = key === state.selectedBlueprintEdgeKey ? "selected" : "";
   return `
-    <path class="dagEdgePath ${selected}" d="${path}" marker-end="url(#dagArrow)" data-edge-from="${escapeHtml(edge.from)}" data-edge-to="${escapeHtml(edge.to)}"></path>
-    <path class="dagEdgeHit" d="${path}" data-dag-edge="${escapeHtml(key)}" data-edge-from="${escapeHtml(edge.from)}" data-edge-to="${escapeHtml(edge.to)}"></path>
+    <path class="blueprintEdgePath ${selected}" d="${path}" marker-end="url(#blueprintArrow)" data-edge-from="${escapeHtml(edge.from)}" data-edge-to="${escapeHtml(edge.to)}"></path>
+    <path class="blueprintEdgeHit" d="${path}" data-blueprint-edge="${escapeHtml(key)}" data-edge-from="${escapeHtml(edge.from)}" data-edge-to="${escapeHtml(edge.to)}"></path>
   `;
 }
 
-function layoutDagNodes(nodes, edges, rootId) {
-  const layout = autoLayoutDagNodes(nodes, edges, rootId);
+function layoutBlueprintNodes(nodes, edges, rootId) {
+  const layout = autoLayoutBlueprintNodes(nodes, edges, rootId);
   for (const node of nodes) {
     const position = node.metadata?.canvasPosition;
     if (Number.isFinite(position?.x) && Number.isFinite(position?.y)) {
@@ -3422,8 +3754,8 @@ function layoutDagNodes(nodes, edges, rootId) {
   return layout;
 }
 
-function autoLayoutDagNodes(nodes, edges, rootId) {
-  const levels = computeDagLevels(nodes, edges, rootId);
+function autoLayoutBlueprintNodes(nodes, edges, rootId) {
+  const levels = computeBlueprintLevels(nodes, edges, rootId);
   const byLevel = new Map();
   for (const node of nodes) {
     const level = levels.get(node.id) || 0;
@@ -3433,26 +3765,26 @@ function autoLayoutDagNodes(nodes, edges, rootId) {
   for (const [level, levelNodes] of byLevel.entries()) {
     levelNodes.forEach((node, index) => {
       layout[node.id] = {
-        x: 24 + level * (DAG_NODE_WIDTH + DAG_COLUMN_GAP),
-        y: 28 + index * (DAG_NODE_HEIGHT + DAG_ROW_GAP),
+        x: 24 + level * (BLUEPRINT_NODE_WIDTH + BLUEPRINT_COLUMN_GAP),
+        y: 28 + index * (BLUEPRINT_NODE_HEIGHT + BLUEPRINT_ROW_GAP),
       };
     });
   }
   return layout;
 }
 
-function updateRenderedDagEdges(preview, layout) {
+function updateRenderedBlueprintEdges(preview, layout) {
   preview?.querySelectorAll("[data-edge-from][data-edge-to]").forEach((path) => {
     const from = layout[path.dataset.edgeFrom];
     const to = layout[path.dataset.edgeTo];
-    if (from && to) path.setAttribute("d", dagEdgeCurve(dagOutputPoint(from), dagInputPoint(to)));
+    if (from && to) path.setAttribute("d", blueprintEdgeCurve(blueprintOutputPoint(from), blueprintInputPoint(to)));
   });
 }
 
-function measureRenderedDagLayout(preview, layout) {
+function measureRenderedBlueprintLayout(preview, layout) {
   const measured = Object.fromEntries(Object.entries(layout).map(([id, position]) => [id, { ...position }]));
-  preview.querySelectorAll("[data-select-dag-node]").forEach((nodeElement) => {
-    const nodeId = nodeElement.dataset.selectDagNode;
+  preview.querySelectorAll("[data-select-blueprint-node]").forEach((nodeElement) => {
+    const nodeId = nodeElement.dataset.selectBlueprintNode;
     if (!measured[nodeId]) return;
     measured[nodeId] = {
       ...measured[nodeId],
@@ -3463,32 +3795,32 @@ function measureRenderedDagLayout(preview, layout) {
   return measured;
 }
 
-function dagEdgeKey(edge) {
+function blueprintEdgeKey(edge) {
   return `${edge.from}->${edge.to}`;
 }
 
-function dagOutputPoint(position) {
+function blueprintOutputPoint(position) {
   return {
-    x: position.x + (position.width || DAG_NODE_WIDTH),
-    y: position.y + (position.height || DAG_NODE_HEIGHT) / 2,
+    x: position.x + (position.width || BLUEPRINT_NODE_WIDTH),
+    y: position.y + (position.height || BLUEPRINT_NODE_HEIGHT) / 2,
   };
 }
 
-function dagInputPoint(position) {
-  return { x: position.x, y: position.y + (position.height || DAG_NODE_HEIGHT) / 2 };
+function blueprintInputPoint(position) {
+  return { x: position.x, y: position.y + (position.height || BLUEPRINT_NODE_HEIGHT) / 2 };
 }
 
-function dagPointerPosition(preview, event) {
+function blueprintPointerPosition(preview, event) {
   const rect = preview.getBoundingClientRect();
   return { x: event.clientX - rect.left, y: event.clientY - rect.top };
 }
 
-function dagEdgeCurve(start, end) {
+function blueprintEdgeCurve(start, end) {
   const curve = Math.max(48, Math.abs(end.x - start.x) * 0.45);
   return `M ${start.x} ${start.y} C ${start.x + curve} ${start.y}, ${end.x - curve} ${end.y}, ${end.x} ${end.y}`;
 }
 
-function computeDagLevels(nodes, edges, rootId) {
+function computeBlueprintLevels(nodes, edges, rootId) {
   const ids = new Set(nodes.map((node) => node.id));
   const outgoing = groupEdgesBySource(edges);
   const levels = new Map();
@@ -3517,20 +3849,20 @@ function computeDagLevels(nodes, edges, rootId) {
   return levels;
 }
 
-function removeSelectedDagNode() {
+function removeSelectedBlueprintNode() {
   const form = document.getElementById("agentForm");
-  const nodeId = document.getElementById("dagNodeIdInput").value.trim() || state.selectedDagNodeId;
+  const nodeId = document.getElementById("blueprintNodeIdInput").value.trim() || state.selectedBlueprintNodeId;
   if (!nodeId) return toast("请先选择节点。", true);
   if (nodeId === "root") return toast("Root 节点不能删除。", true);
   const nodes = parseJsonField(form.elements.nodesJson.value, []);
   const edges = parseJsonField(form.elements.edgesJson.value, []);
   const nextNodes = nodes.filter((node) => node.id !== nodeId);
   const nextEdges = edges.filter((edge) => edge.from !== nodeId && edge.to !== nodeId);
-  state.selectedDagNodeId = "root";
-  setDagJson(nextNodes, nextEdges);
+  state.selectedBlueprintNodeId = "root";
+  setBlueprintJson(nextNodes, nextEdges);
 }
 
-function setDagJson(nodes, edges) {
+function setBlueprintJson(nodes, edges) {
   const form = document.getElementById("agentForm");
   const draft = ensureRootDraft({ nodes, edges });
   form.elements.rootNodeId.value = "root";
@@ -3538,10 +3870,10 @@ function setDagJson(nodes, edges) {
   form.elements.edgesJson.value = JSON.stringify(draft.edges, null, 2);
   const root = draft.nodes.find((node) => node.id === "root");
   form.elements.systemPrompt.value = root?.systemPrompt || "";
-  renderDagBuilder(draft.nodes, draft.edges);
+  renderBlueprintBuilder(draft.nodes, draft.edges);
 }
 
-function applyDevDagTemplate() {
+function applyDevBlueprintTemplate() {
   const form = document.getElementById("agentForm");
   const nodes = [
     {
@@ -3592,7 +3924,7 @@ function applyDevDagTemplate() {
   ];
   form.elements.rootNodeId.value = "root";
   form.elements.maxDecisions.value = 50;
-  setDagJson(nodes, edges);
+  setBlueprintJson(nodes, edges);
 }
 
 async function importAgentGraphFile(event) {
@@ -3607,8 +3939,8 @@ async function importAgentGraphFile(event) {
     if (data.name && document.getElementById("agentForm")?.elements.name && !document.getElementById("agentForm").elements.name.value) {
       document.getElementById("agentForm").elements.name.value = data.name;
     }
-    state.selectedDagNodeId = "root";
-    setDagJson(nodes, edges);
+    state.selectedBlueprintNodeId = "root";
+    setBlueprintJson(nodes, edges);
     toast("已导入智能体画布。");
   } catch (error) {
     toast(`导入失败：${error.message}`, true);
@@ -3617,18 +3949,18 @@ async function importAgentGraphFile(event) {
   }
 }
 
-function validateDagDraft(body) {
-  if (!body.nodes.length) throw new Error("DAG 至少需要一个节点。");
+function validateBlueprintDraft(body) {
+  if (!body.nodes.length) throw new Error("蓝图至少需要一个节点。");
   const ids = new Set(body.nodes.map((node) => node.id));
   if (!body.rootNodeId || !ids.has(body.rootNodeId)) throw new Error("Root Node ID 必须指向已有节点。");
   for (const edge of body.edges) {
     if (!ids.has(edge.from) || !ids.has(edge.to)) throw new Error(`连边 ${edge.from} -> ${edge.to} 指向不存在的节点。`);
     if (edge.from === edge.to) throw new Error("连边不能指向同一个节点。");
   }
-  if (wouldCreateDagCycle(body.nodes, body.edges)) throw new Error("DAG 不能包含循环连边。");
+  if (wouldCreateBlueprintCycle(body.nodes, body.edges)) throw new Error("蓝图不能包含循环连边。");
 }
 
-function wouldCreateDagCycle(nodes, edges) {
+function wouldCreateBlueprintCycle(nodes, edges) {
   const outgoing = new Map(nodes.map((node) => [node.id, []]));
   for (const edge of edges) {
     if (!outgoing.has(edge.from) || !outgoing.has(edge.to)) continue;
@@ -3810,6 +4142,7 @@ function extractAgentResponse(data) {
 function extractRunOutputText(output) {
   if (!output) return "";
   if (typeof output === "string") return output;
+  if (typeof output.displayText === "string" && output.displayText.trim()) return output.displayText;
   if (typeof output.textResponse === "string" && output.textResponse.trim()) return output.textResponse;
   if (typeof output.text === "string" && output.text.trim()) return output.text;
   if (typeof output.message === "string" && output.message.trim()) return output.message;
@@ -3823,6 +4156,7 @@ function extractRunOutputText(output) {
   }
   if (output.output && output.output !== output) return extractRunOutputText(output.output);
   if (output.result && output.result !== output) return extractRunOutputText(output.result);
+  if (typeof output.summary === "string" && output.summary.trim()) return output.summary;
   return "";
 }
 
@@ -3842,6 +4176,9 @@ function summarizeAgentRun(run) {
     status: node.status,
     runtimeSessionId: node.runtimeSession?.sessionId || "",
     text: extractRunOutputText(node.output),
+    stage: runStatusLabel(node.status),
+    startedAt: node.startedAt || traceTimestamp(node.trace, "node_run_started") || (node.status !== "pending" && node.status !== "ready" ? node.createdAt : ""),
+    completedAt: ["completed", "failed", "cancelled", "waiting_approval"].includes(node.status) ? node.updatedAt : "",
   }));
   return {
     id: run?.id || "",
@@ -3853,9 +4190,18 @@ function summarizeAgentRun(run) {
       decisionCount: run.rootCoordinator.decisionCount || 0,
       runtimeSessionId: run.rootCoordinator.runtimeSession?.sessionId || "",
       lastDecision: run.rootCoordinator.lastDecision,
+      stage: runStatusLabel(run.rootCoordinator.status),
+      startedAt: run.rootCoordinator.startedAt || traceTimestamp(run.trace, "root_coordinator_started") || run.createdAt || "",
+      completedAt: ["completed", "failed", "cancelled", "waiting_approval", "ready"].includes(run.rootCoordinator.status)
+        ? run.rootCoordinator.updatedAt || run.updatedAt || ""
+        : "",
     } : undefined,
     nodes,
   };
+}
+
+function traceTimestamp(trace, type) {
+  return [...(Array.isArray(trace) ? trace : [])].reverse().find((item) => item.type === type)?.createdAt || "";
 }
 
 function summarizeRunOutput(output) {
@@ -3864,7 +4210,7 @@ function summarizeRunOutput(output) {
 
 function updateRunSummaryNode(summary, event) {
   if (!summary) {
-    summary = { id: event.runId || "", status: "running", agentType: "dag", nodes: [] };
+    summary = { id: event.runId || "", status: "running", agentType: "blueprint", nodes: [] };
   }
   const nodes = Array.isArray(summary.nodes) ? [...summary.nodes] : [];
   const index = nodes.findIndex((node) => node.id === event.nodeRunId || node.nodeId === event.nodeId);
@@ -3873,9 +4219,14 @@ function updateRunSummaryNode(summary, event) {
     ...current,
     id: event.nodeRunId || current.id,
     nodeId: event.nodeId || current.nodeId,
-    status: event.type === "dag_node_completed" ? "completed" : event.type === "dag_node_waiting" ? "waiting_approval" : "running",
+    status: event.type === "blueprint_node_completed" ? "completed" : event.type === "blueprint_node_waiting" ? "waiting_approval" : "running",
     runtimeSessionId: event.result?.runtimeSession?.sessionId || current.runtimeSessionId || "",
     text: event.result ? summarizeRunOutput(event.result) : current.text || "",
+    stage: event.type === "blueprint_node_completed"
+      ? "节点执行完成"
+      : event.type === "blueprint_node_waiting" ? "等待你的确认" : "正在启动节点",
+    startedAt: event.type === "blueprint_node_started" ? new Date().toISOString() : current.startedAt || "",
+    completedAt: ["blueprint_node_completed", "blueprint_node_waiting"].includes(event.type) ? new Date().toISOString() : "",
   };
   if (index === -1) nodes.push(updated);
   else nodes[index] = updated;
@@ -3883,10 +4234,62 @@ function updateRunSummaryNode(summary, event) {
     ...summary,
     status: nodes.some((node) => node.status === "waiting_approval")
       ? "waiting_approval"
-      : event.type === "dag_node_completed" && nodes.every((node) => node.status === "completed")
+      : event.type === "blueprint_node_completed" && nodes.every((node) => node.status === "completed")
         ? "completed"
         : "running",
     nodes,
+  };
+}
+
+function updateRunSummaryRuntimeProgress(summary, event, stage) {
+  if (!summary || !stage) return summary;
+  const now = new Date().toISOString();
+  if (event.runtimeScope === "coordinator") {
+    return {
+      ...summary,
+      rootCoordinator: summary.rootCoordinator ? {
+        ...summary.rootCoordinator,
+        status: "running",
+        stage,
+        startedAt: summary.rootCoordinator.startedAt || now,
+        completedAt: "",
+      } : summary.rootCoordinator,
+    };
+  }
+  const targetId = event.nodeRunId;
+  let updated = false;
+  const nodes = (summary.nodes || []).map((node) => {
+    const matches = targetId ? node.id === targetId : !updated && ["running", "ready"].includes(node.status);
+    if (!matches) return node;
+    updated = true;
+    return { ...node, status: "running", stage, startedAt: node.startedAt || now, completedAt: "" };
+  });
+  return { ...summary, nodes };
+}
+
+function updateActiveRunSummaryProgress(summary, stage) {
+  if (!summary) return summary;
+  if (summary.rootCoordinator?.status === "running") {
+    return updateRunSummaryRuntimeProgress(summary, { runtimeScope: "coordinator" }, stage);
+  }
+  return updateRunSummaryRuntimeProgress(summary, {}, stage);
+}
+
+function updateRootCoordinatorSummary(summary, event) {
+  if (!summary?.rootCoordinator) return summary;
+  const now = new Date().toISOString();
+  const started = event.type === "root_coordinator_started";
+  return {
+    ...summary,
+    status: "running",
+    rootCoordinator: {
+      ...summary.rootCoordinator,
+      status: started ? "running" : "ready",
+      decisionCount: started ? summary.rootCoordinator.decisionCount || 0 : (summary.rootCoordinator.decisionCount || 0) + 1,
+      stage: started ? "正在启动协调" : "已完成本轮决策",
+      startedAt: started ? now : summary.rootCoordinator.startedAt || now,
+      completedAt: started ? "" : now,
+    },
   };
 }
 
@@ -3896,7 +4299,7 @@ function renderAgentRunSummary(summary, messageRunId = "") {
   return `
     <div class="runSummary">
       <div class="runSummaryHeader">
-        <strong>${escapeHtml(summary.agentType === "dag" ? "DAG Run" : "Run")}</strong>
+        <strong>${escapeHtml(summary.agentType === "blueprint" ? "蓝图运行" : "运行")}</strong>
         <div class="runSummaryActions">
           <span class="runStatus ${escapeHtml(summary.status || "pending")}">${escapeHtml(runStatusLabel(summary.status || "pending"))}</span>
           ${runId ? `<button class="runDetailButton" data-run-detail-id="${escapeHtml(runId)}" type="button">详情</button>` : ""}
@@ -3906,14 +4309,14 @@ function renderAgentRunSummary(summary, messageRunId = "") {
       <div class="runNodeList">
         ${summary.rootCoordinator ? `
           <div class="runNode ${escapeHtml(summary.rootCoordinator.status || "pending")}">
-            <span>RootAgent · ${escapeHtml(summary.rootCoordinator.decisionCount || 0)} 次决策</span>
-            <small>${escapeHtml(runStatusLabel(summary.rootCoordinator.status || "pending"))}${summary.rootCoordinator.runtimeSessionId ? ` · ${escapeHtml(summary.rootCoordinator.runtimeSessionId.slice(0, 8))}` : ""}</small>
+            <span class="runNodeName">RootAgent · ${escapeHtml(summary.rootCoordinator.decisionCount || 0)} 次决策</span>
+            ${renderRunNodeProgress(summary.rootCoordinator)}
           </div>
         ` : ""}
         ${nodes.map((node) => `
           <div class="runNode ${escapeHtml(node.status || "pending")}">
-            <span>${escapeHtml(node.nodeId || "node")}${node.status === "waiting_approval" ? " · 待审批" : ""}</span>
-            <small>${escapeHtml(runStatusLabel(node.status || "pending"))}${node.runtimeSessionId ? ` · ${escapeHtml(node.runtimeSessionId.slice(0, 8))}` : ""}</small>
+            <span class="runNodeName">${escapeHtml(node.nodeId || "node")}${node.status === "waiting_approval" ? " · 待审批" : ""}</span>
+            ${renderRunNodeProgress(node)}
           </div>
           ${node.status === "waiting_approval" ? `
             <div class="runApprovalPanel">
@@ -3928,6 +4331,19 @@ function renderAgentRunSummary(summary, messageRunId = "") {
       </div>
     </div>
   `;
+}
+
+function renderRunNodeProgress(node) {
+  const status = node?.status || "pending";
+  const stage = node?.stage || runStatusLabel(status);
+  const startedAt = node?.startedAt || "";
+  const completedAt = node?.completedAt || "";
+  const active = ["running", "coordinating"].includes(status);
+  const timerPrefix = active ? "已用 " : "用时 ";
+  return `<span class="runNodeProgress">
+    <span class="runNodeStage">${active ? '<i class="runNodePulse" aria-hidden="true"></i>' : ""}${escapeHtml(stage)}</span>
+    ${startedAt ? `<time data-execution-clock data-started-at="${escapeHtml(startedAt)}" data-completed-at="${escapeHtml(completedAt)}" data-prefix="${timerPrefix}">${timerPrefix}${escapeHtml(formatElapsedDuration(startedAt, completedAt))}</time>` : ""}
+  </span>`;
 }
 
 function deriveConversationTitle(task) {
@@ -4092,22 +4508,45 @@ function formatMessage(value) {
   const parsed = marked.parse(String(value ?? ""));
   const sanitized = DOMPurify.sanitize(parsed, {
     USE_PROFILES: { html: true },
+    ADD_TAGS: ["video", "audio", "source"],
+    ADD_ATTR: ["controls", "preload", "poster"],
   });
   const template = document.createElement("template");
   template.innerHTML = sanitized;
+  linkifyWorkspacePaths(template.content);
   template.content.querySelectorAll("a[href]").forEach((link) => {
     const rawHref = link.getAttribute("href");
-    const externalHref = safeExternalUrl(rawHref);
-    const workspaceHref = externalHref ? "" : safeWorkspaceFileUrl(rawHref);
-    if (externalHref || workspaceHref) {
-      link.setAttribute("href", externalHref || workspaceHref);
+    if (link.dataset.workspaceFileLink === "true") {
+      link.classList.add("workspaceFileLink");
       link.setAttribute("target", "_blank");
       link.setAttribute("rel", "noreferrer");
-      if (workspaceHref) {
+      link.setAttribute("title", "打开工作区文件");
+      return;
+    }
+    const externalHref = safeExternalUrl(rawHref);
+    const resourceHref = externalHref ? "" : safeWorkspaceResourceUrl(rawHref);
+    const workspaceHref = externalHref || resourceHref ? "" : safeWorkspaceFileUrl(rawHref);
+    if (externalHref || resourceHref || workspaceHref) {
+      link.setAttribute("href", externalHref || resourceHref || workspaceHref);
+      link.setAttribute("target", "_blank");
+      link.setAttribute("rel", "noreferrer");
+      if (resourceHref || workspaceHref) {
         link.classList.add("workspaceFileLink");
         link.setAttribute("title", "打开工作区文件");
       }
+      const mediaType = mediaTypeForPath(rawHref);
+      if (mediaType) replaceMediaLink(link, externalHref || resourceHref || workspaceHref, mediaType);
     } else link.removeAttribute("href");
+  });
+  template.content.querySelectorAll("img[src], video[src], audio[src], source[src]").forEach((media) => {
+    const rawSrc = media.getAttribute("src");
+    const safeSrc = safeExternalUrl(rawSrc) || safeWorkspaceResourceUrl(rawSrc) || safeWorkspaceFileUrl(rawSrc);
+    if (safeSrc) media.setAttribute("src", safeSrc);
+    else media.removeAttribute("src");
+    if (media.matches("video, audio")) {
+      media.setAttribute("controls", "");
+      media.setAttribute("preload", "metadata");
+    }
   });
   template.content.querySelectorAll("pre").forEach((pre) => {
     const code = pre.querySelector("code");
@@ -4135,17 +4574,86 @@ function safeWorkspaceFileUrl(value) {
   if (!project || !href || href.startsWith("#") || href.startsWith("//")) return "";
   if (/^[a-z][a-z\d+.-]*:/i.test(href)) return "";
   const fragmentIndex = href.indexOf("#");
-  const pathValue = fragmentIndex === -1 ? href : href.slice(0, fragmentIndex);
+  let pathValue = fragmentIndex === -1 ? href : href.slice(0, fragmentIndex);
   if (!pathValue) return "";
   let decodedPath;
   try {
-    decodedPath = decodeURIComponent(pathValue);
+    decodedPath = decodeURIComponent(pathValue).replace(/:\d+(?::\d+)?$/, "");
   } catch {
     return "";
   }
+  const workspaceRoot = String(project.localWorkspacePath || "").replace(/\/+$/, "");
+  if (decodedPath.startsWith("/")) {
+    if (!workspaceRoot || (decodedPath !== workspaceRoot && !decodedPath.startsWith(`${workspaceRoot}/`))) return "";
+    decodedPath = decodedPath.slice(workspaceRoot.length).replace(/^\/+/, "");
+  }
+  if (!decodedPath || decodedPath.split("/").includes("..")) return "";
   const fragment = fragmentIndex === -1 ? "" : href.slice(fragmentIndex + 1);
   const fileUrl = `/workspace-files/${encodeURIComponent(project.id)}?path=${encodeURIComponent(decodedPath)}`;
   return fragment ? `${fileUrl}#${encodeURIComponent(fragment)}` : fileUrl;
+}
+
+function safeWorkspaceResourceUrl(value) {
+  const project = getActiveProject();
+  if (!project) return "";
+  try {
+    const url = new URL(String(value || ""), window.location.origin);
+    const expectedPath = `/workspace-files/${encodeURIComponent(project.id)}`;
+    if (url.origin !== window.location.origin || url.pathname !== expectedPath || !url.searchParams.get("path")) return "";
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return "";
+  }
+}
+
+function linkifyWorkspacePaths(root) {
+  const extensions = "md|txt|json|ya?ml|toml|js|mjs|cjs|jsx|ts|tsx|css|html|py|go|rs|java|c|cc|cpp|h|hpp|sh|sql|csv|pdf|png|jpe?g|gif|webp|svg|mp4|webm|mov|mp3|wav|m4a|ogg";
+  const pattern = new RegExp(`(^|[\\s（(：:])((?:/[^\\s<>()，。；;：:]+|(?:\\.?\\.?/)?[^\\s<>()，。；;：:]+\\.(?:${extensions}))(?:[:#]\\d+(?::\\d+)?)?)(?=$|[\\s）)，。；;])`, "gi");
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) {
+    if (!walker.currentNode.parentElement?.closest("a, code, pre, script, style")) nodes.push(walker.currentNode);
+  }
+  for (const node of nodes) {
+    const text = node.textContent || "";
+    pattern.lastIndex = 0;
+    if (!pattern.test(text)) continue;
+    pattern.lastIndex = 0;
+    const fragment = document.createDocumentFragment();
+    let cursor = 0;
+    for (const match of text.matchAll(pattern)) {
+      const start = match.index + match[1].length;
+      fragment.append(text.slice(cursor, start));
+      const href = safeWorkspaceFileUrl(match[2]);
+      if (href) {
+        const link = document.createElement("a");
+        link.setAttribute("href", href);
+        link.dataset.workspaceFileLink = "true";
+        link.textContent = match[2];
+        fragment.append(link);
+      } else fragment.append(match[2]);
+      cursor = start + match[2].length;
+    }
+    fragment.append(text.slice(cursor));
+    node.replaceWith(fragment);
+  }
+}
+
+function mediaTypeForPath(value) {
+  const clean = String(value || "").split(/[?#]/)[0].toLowerCase();
+  if (/\.(mp4|webm|mov)$/.test(clean)) return "video";
+  if (/\.(mp3|wav|m4a|ogg)$/.test(clean)) return "audio";
+  return "";
+}
+
+function replaceMediaLink(link, src, type) {
+  if (!src || !link.parentNode) return;
+  const media = document.createElement(type);
+  media.controls = true;
+  media.preload = "metadata";
+  media.src = src;
+  media.setAttribute("aria-label", link.textContent || type);
+  link.replaceWith(media);
 }
 
 async function copyRenderedCode(button) {
@@ -4170,6 +4678,37 @@ async function copyRenderedCode(button) {
   }, 1200);
 }
 
+async function copyMessage(index, button) {
+  const text = getDisplayMessageText(state.messages[index]);
+  if (!text) return;
+  await writeClipboardText(text);
+  button.classList.add("copied");
+  button.setAttribute("aria-label", "已复制");
+  button.title = "已复制";
+  setTimeout(() => {
+    if (!button.isConnected) return;
+    button.classList.remove("copied");
+    button.setAttribute("aria-label", "复制");
+    button.title = "复制";
+  }, 1200);
+}
+
+async function writeClipboardText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const input = document.createElement("textarea");
+    input.value = text;
+    input.setAttribute("readonly", "");
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.append(input);
+    input.select();
+    document.execCommand("copy");
+    input.remove();
+  }
+}
+
 function settingsRestartText(requiresRestart = {}) {
   const labels = { resourceRootPath: "资源根目录" };
   const restartKeys = Object.entries(requiresRestart)
@@ -4182,6 +4721,10 @@ function settingsRestartText(requiresRestart = {}) {
 
 function setHeaderConfigButton(visible) {
   document.getElementById("projectConfigBtn")?.classList.toggle("hidden", !visible);
+  document.getElementById("workspaceRevealBtn")?.classList.toggle(
+    "hidden",
+    state.currentView !== "chat" || !getActiveProject()
+  );
 }
 
 function toast(message, error = false) {

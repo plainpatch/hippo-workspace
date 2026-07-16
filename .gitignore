@@ -2,6 +2,9 @@
 anythingllm/storage/
 anythingllm/server.env
 node_modules/
+dist/
+tmp/
+.DS_Store
 .npm-cache/
 .playwright-cli/
 .chrome-extension-profile/

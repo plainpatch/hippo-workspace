@@ -60,11 +60,11 @@ Hippo 在保留本地 Runtime 原生能力的前提下，为这些问题提供�
 
 ![Hippo Agent 可视化编排画布](docs/images/hippo-agent-canvas.png)
 
-### DAG 对话执行
+### 蓝图对话执行
 
 RootAgent 负责读取运行图、派发 Worker、处理节点结果并决定下一步。对话中可以查看耗时、节点状态、审批入口和运行详情，等待期间不会丢失当前进度。
 
-![Hippo DAG Agent 对话执行结果](docs/images/hippo-dag-run.png)
+![Hippo 蓝图智能体对话执行结果](docs/images/hippo-blueprint-run.png)
 
 ## 核心能力
 
@@ -112,14 +112,14 @@ Hippo 中的 Agent 是一份可复用的能力蓝图，而不是另一个模型�
 - 可选的 RAG 工具与 Top N
 - 节点结果处置规则
 
-Agent 蓝图可以只有一个 Root 节点，也可以包含多个通过默认拓扑连接的节点。用户不需要在创建时区分“单 Agent”或“DAG Agent”。
+Agent 蓝图可以只有一个 Root 节点，也可以包含多个通过默认拓扑连接的节点。用户不需要在创建时区分“单智能体”或“蓝图智能体”。
 
 蓝图使用版本化 JSON Schema 作为持久化和交换契约。当前版本为 `Agent Blueprint v1`，规范文件位于 `schemas/agent-blueprint-v1.schema.json`：
 
 - `$schema` 和 `schemaVersion` 标识蓝图契约版本。
 - `version` 是具体 Agent 的修订版本，创建时由服务端置为 `1`，每次编辑递增。
 - 编辑必须携带读取时的 `expectedVersion`，避免覆盖其他会话中的新修改。
-- `single` Agent 不包含运行图；`dag` Agent 的 `rootNodeId` 固定为 `root`，并校验节点、连线、环路和 Root 可达性。
+- `single` Agent 不包含运行图；`blueprint` Agent 的 `rootNodeId` 固定为 `root`，并校验节点、连线、环路和 Root 可达性。
 - Agent 蓝图只描述原型。Session、NodeRun、输入输出、状态和 Trace 属于独立的运行时图。
 
 REST 提供 `/api/agents/schema`、`/api/agents/validate` 和 `/api/agents` 下的创建、查看、编辑、删除接口。完整系统 MCP 提供对应的 `hippo_get_agent_schema`、`hippo_validate_agent_graph`、`hippo_create_agent`、`hippo_get_agent`、`hippo_update_agent` 和 `hippo_delete_agent` 工具。
@@ -162,12 +162,16 @@ Hippo Local Service
 
 ```text
 ~/.hippo/
-  workspaces/   # 工作区本地目录
+  metadata/     # SQLite 核心元数据与文件索引
+  objects/      # 消息、运行载荷、Context 内容对象
+  runs/         # 追加式运行 Trace 分段
+  workspaces/   # 工作区、附件与任务产物
   knowledge/    # 两级知识库目录与文档
-  agents/       # Agent、工作区、会话和运行图数据
 ```
 
 系统路径、默认 Runtime、Codex 权限和 RAG Provider 地址都可以在应用设置中配置。
+
+SQLite 是工作区、智能体、会话、Runtime Session、运行图、知识库、Context 和 Artifact 的唯一元数据源。大体积正文与事件保存在文件中并由 SQLite 索引，不会将完整会话和 Trace 反复写入一个大型 JSON。持久化边界、备份和恢复方式见 [本地持久化设计](docs/persistence.md)。
 
 ## 安装与部署
 
@@ -234,7 +238,15 @@ open -a AnythingLLM
 npm run desktop
 ```
 
-`npm run desktop` 会启动 Electron 窗口，并自动启动 `src/server.js` 作为本地 Sidecar。默认从 `8787` 开始选择可用端口；退出 Hippo Desktop 时，它启动的 Sidecar 会一并停止。
+`npm run desktop` 会启动 Electron 窗口，并在 Electron 主进程中加载本地 Hippo Service。默认从 `8787` 开始选择可用端口；退出 Hippo Desktop 时，本地服务随应用一并停止。
+
+Desktop 使用 Electron 自带的 Node Runtime，不依赖系统 `node`。启动前会为 Electron ABI 重建原生 SQLite 模块。构建本地安装包使用：
+
+```sh
+npm run dist
+```
+
+切回 `npm start` 或运行 Node 测试前，如果刚执行过 Electron 原生模块重建，可运行 `npm run rebuild:node`。
 
 如果需要复用已经单独启动的 Hippo Service：
 
@@ -331,8 +343,9 @@ npm run install:chrome-extension
 - 首页与默认工作区、工作区级多会话、Agent 授权和会话内切换
 - 本地两级知识库、目录元数据、文档管理、工作区引用和主题筛选
 - AnythingLLM 主题级 Workspace 映射、文档同步和节点级 RAG MCP
-- Agent Blueprint v1、可视化 DAG 画布、版本化编辑和实时 Schema 校验
+- Agent Blueprint v1、可视化蓝图画布、版本化编辑和实时 Schema 校验
 - RootAgent 协调调度、独立 Node Session、运行状态、输入输出、审批和 Trace 持久化
+- SQLite 元数据索引、内容寻址对象、单份分段 Trace、Context 版本和 Artifact 索引
 - `hippo-agent-builder` Skill 及工作区级系统 MCP 注入
 - Web、Electron Desktop 和 Chrome 侧边栏三种本地入口
 

@@ -6,7 +6,7 @@ Evaluation date: 2026-07-14
 
 The evaluation covers whether `.agents/skills/hippo-agent-builder` can guide a model to:
 
-- choose between a single Agent and a DAG Agent;
+- choose between a single Agent and a Blueprint Agent;
 - produce an Agent Blueprint v1 instance accepted by Hippo;
 - avoid inventing unavailable Skills, MCP servers, RAG access, or edge semantics;
 - apply runtime and result approval policies at the correct boundary;
@@ -28,13 +28,13 @@ Result:
 
 No change was required.
 
-### Round 2: parallel release review DAG
+### Round 2: parallel release review Blueprint
 
 Prompt: implementation first, followed by independent security and QA review, with human approval of security results.
 
 Result:
 
-- selected a valid DAG topology and the correct manual result approval;
+- selected a valid Blueprint topology and the correct manual result approval;
 - incorrectly added `metadata.parallelGroup` to edges even though the scheduler does not interpret it;
 - added persistence-status fields to top-level metadata that were not part of the Agent behavior.
 
@@ -59,13 +59,13 @@ Result after iteration:
 
 The first attempt exposed that write-tool annotations were incomplete and the client treated calls as approval-sensitive. Read/write/destructive/idempotent annotations were added to the Agent MCP tools before rerunning successfully.
 
-### Round 4: post-fix DAG regression
+### Round 4: post-fix Blueprint regression
 
 The Round 2 release workflow was regenerated after tightening the Skill.
 
 Result:
 
-- passed current JSON Schema and DAG semantic validation;
+- passed current JSON Schema and Blueprint semantic validation;
 - used `root`, `implementation`, `security_review`, `qa`, and `release_readiness` nodes;
 - represented independent reviews with two outgoing implementation edges;
 - set only `security_review.resultApprovalPolicy` to `manual`;
@@ -75,7 +75,7 @@ Result:
 
 ## Automated Gates
 
-`tests/agent-builder-skill.test.js` prevents drift between the Skill and the runtime contract. It checks the complete MCP workflow, publishing safety, concurrency guidance, topology rules, and validates the reference DAG using the current orchestrator.
+`tests/agent-builder-skill.test.js` prevents drift between the Skill and the runtime contract. It checks the complete MCP workflow, publishing safety, concurrency guidance, topology rules, and validates the reference Blueprint using the current orchestrator.
 
 `tests/agent-blueprint.test.js` verifies schema/revision separation, stale edit rejection, graph semantics, and an end-to-end Streamable HTTP MCP lifecycle covering schema, validate, create, view, update, and delete.
 

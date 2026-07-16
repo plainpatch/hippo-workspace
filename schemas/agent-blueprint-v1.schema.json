@@ -40,7 +40,7 @@
       "readOnly": true
     },
     "type": {
-      "enum": ["single", "dag"]
+      "enum": ["single", "blueprint"]
     },
     "name": {
       "type": "string",

@@ -1,10 +1,10 @@
-# Agent Runtime and DAG Orchestration Plan
+# Agent Runtime and Blueprint Orchestration Plan
 
 > Superseded for graph execution by [root-agent-runtime.md](./root-agent-runtime.md). This file remains as historical context; automatic ready-node scheduling, wait nodes, edge success rules, and serial/parallel edge types are no longer the target architecture.
 
 ## Objective
 
-Hippo must evolve from a single `codex exec` wrapper into a workspace-scoped agent orchestration system. The system must separate agent prototypes from runtime execution state, support Codex session reuse, and provide a DAG orchestration layer that can be exposed as a stateful tool.
+Hippo must evolve from a single `codex exec` wrapper into a workspace-scoped agent orchestration system. The system must separate agent prototypes from runtime execution state, support Codex session reuse, and provide a Blueprint orchestration layer that can be exposed as a stateful tool.
 
 ## Requirements
 
@@ -24,9 +24,9 @@ Hippo must evolve from a single `codex exec` wrapper into a workspace-scoped age
 - Agent definitions are static user-authored prototypes.
 - Agent definitions must support two shapes:
   - `single`: prompt + skills + MCP + runtime + RAG defaults.
-  - `dag`: root node + nodes + edges + execution policy.
+  - `blueprint`: root node + nodes + edges + execution policy.
 - Agent definitions must be versioned.
-- A DAG agent prototype must not contain runtime session ids, node outputs, trace, or status.
+- A Blueprint agent prototype must not contain runtime session ids, node outputs, trace, or status.
 - A run must snapshot the agent definition/version used at run creation.
 
 ### Runtime Graph
@@ -36,7 +36,7 @@ Hippo must evolve from a single `codex exec` wrapper into a workspace-scoped age
 - A `NodeRun` is one executable node instance.
 - A `NodeRun` owns input, output, status, trace, and runtime session mapping.
 - A `NodeRun` does not own the full graph; it belongs to the root run.
-- Each Codex DAG node should map to one Codex runtime session by default.
+- Each Codex Blueprint node should map to one Codex runtime session by default.
 - Serial and parallel nodes must be scheduled by a deterministic root controller.
 
 ### Graph Orchestration Tool
@@ -54,7 +54,7 @@ Hippo must evolve from a single `codex exec` wrapper into a workspace-scoped age
 - Codex session id is runtime metadata.
 - First turn should create a Codex session with workspace path.
 - Later turns should resume the Codex session when possible.
-- DAG worker nodes start isolated Codex sessions; the Root conversation always resumes its mapped session.
+- Blueprint worker nodes start isolated Codex sessions; the Root conversation always resumes its mapped session.
 - The adapter should prefer `codex exec --json` so Hippo can consume structured runtime events.
 - The adapter must support cancellation by run id / process id.
 
@@ -102,7 +102,7 @@ type RuntimeSessionRef = {
 type AgentDefinition = {
   id: string;
   version: number;
-  type: "single" | "dag";
+  type: "single" | "blueprint";
   name: string;
   description?: string;
   systemPrompt?: string;
@@ -166,9 +166,9 @@ Status as of the current implementation:
 
 - Phase 1: implemented. Hippo root conversations store runtime session refs, and Codex JSON events are captured when available.
 - Phase 2: implemented. Runtime events are normalized, executions carry `runId`, and active runtime processes can be cancelled.
-- Phase 3: implemented. Agent definitions are versioned and support `single` and `dag` prototypes with DAG validation and acyclicity checks.
-- Phase 4: implemented. Every execution creates a persistent `AgentRun`; `single` agents create one `NodeRun`, and DAG agents expand to one `NodeRun` per prototype node.
-- Phase 5: implemented for automatic execution. DAG runs expand deterministically, ready nodes are scheduled by dependency order, parallel branches use independent runtime sessions, and terminal outputs are collected into the run output.
+- Phase 3: implemented. Agent definitions are versioned and support `single` and `blueprint` prototypes with Blueprint validation and acyclicity checks.
+- Phase 4: implemented. Every execution creates a persistent `AgentRun`; `single` agents create one `NodeRun`, and Blueprint agents expand to one `NodeRun` per prototype node.
+- Phase 5: implemented for automatic execution. Blueprint runs expand deterministically, ready nodes are scheduled by dependency order, parallel branches use independent runtime sessions, and terminal outputs are collected into the run output.
 - Phase 6: implemented as a first stateful API/MCP surface. Tools can validate graph prototypes, create/read/advance/cancel/retry runs, inspect node runs, and append/list trace events.
 - Workspace RAG scope planning is implemented as API/MCP. A model can first read the authorized knowledge domains/topics, then call scoped search against topic-level RAG workspaces. Search requests are intersected with the workspace's configured knowledge authorization.
 - Topic-level RAG synchronization is implemented as API/UI/MCP. Hippo scans second-level topic folders, uploads new or changed files to the mapped AnythingLLM workspace, stores returned document names, and refreshes embeddings before retrieval.
@@ -226,15 +226,15 @@ Gate:
 
 Implementation:
 - Add `type`, `version`, `rag`, `nodes`, and `edges` fields to agent definitions.
-- Agent definitions use an explicit `single` or `dag` type and version.
-- Validate DAG shape and acyclicity.
+- Agent definitions use an explicit `single` or `blueprint` type and version.
+- Validate Blueprint shape and acyclicity.
 
 Checkpoints:
 - Single-node agents execute through the same versioned prototype contract.
-- DAG prototype can be created, read, updated, and validated.
+- Blueprint prototype can be created, read, updated, and validated.
 
 Gate:
-- Invalid DAG with cycle is rejected.
+- Invalid Blueprint with cycle is rejected.
 - UI and API use the canonical agent prototype fields.
 
 ### Phase 4: AgentRun and NodeRun Runtime Graph
@@ -253,10 +253,10 @@ Gate:
 - Single-node execution produces the same user-visible result as before.
 - Run and node details are retrievable by API.
 
-### Phase 5: Serial and Parallel DAG Scheduling
+### Phase 5: Serial and Parallel Blueprint Scheduling
 
 Implementation:
-- Expand DAG snapshot to NodeRuns.
+- Expand Blueprint snapshot to NodeRuns.
 - Implement dependency resolution.
 - Implement serial execution.
 - Implement parallel execution with bounded concurrency.
@@ -268,8 +268,8 @@ Checkpoints:
 - Terminal node output becomes run output.
 
 Gate:
-- Serial DAG executes in dependency order.
-- Parallel DAG executes independent branches without sharing Codex session.
+- Serial Blueprint executes in dependency order.
+- Parallel Blueprint executes independent branches without sharing Codex session.
 - Failed required node fails run.
 
 ### Phase 6: Stateful Graph Orchestration Tool

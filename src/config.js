@@ -21,8 +21,7 @@ export const config = {
   codexModel: process.env.CODEX_MODEL || "",
   codexSandboxMode: process.env.CODEX_SANDBOX_MODE || "workspace-write",
   codexServiceTier: process.env.CODEX_SERVICE_TIER || "fast",
-  agentStorePath:
-    process.env.AGENT_STORE_PATH || path.join(appHomePath, "agents", "agent-store.json"),
+  metadataDbPath: process.env.HIPPO_DATABASE_PATH || path.join(appHomePath, "metadata", "hippo.sqlite3"),
   resourceRootPath:
     process.env.RESOURCE_ROOT_PATH || appHomePath,
 };

@@ -3,21 +3,44 @@
   "version": "1.0.0",
   "description": "Hippo agent workspace app with runtime adapters and topic-scoped RAG integration.",
   "type": "module",
-  "main": "src/server.js",
+  "main": "apps/desktop/main.cjs",
   "scripts": {
     "start": "node src/server.js",
-    "desktop": "electron apps/desktop/main.cjs",
+    "desktop": "npm run rebuild:electron && electron apps/desktop/main.cjs",
+    "rebuild:electron": "electron-rebuild -f -w better-sqlite3",
+    "rebuild:node": "npm rebuild better-sqlite3",
+    "dist": "electron-builder",
     "mcp": "node src/mcp-server.js",
     "test": "node --test tests/*.test.js",
     "install:chrome-extension": "node scripts/install-chrome-extension.mjs",
-    "check": "node --check src/config.js && node --check src/server.js && node --check src/execution-manager.js && node --check src/codex-app-server.js && node --check src/credential-store.js && node --check src/filename-utils.js && node --check src/agent-blueprint-schema.js && node --check src/skill-installer.js && node --check src/mcp-server.js && node --check src/mcp.js && node --check src/anythingllm-client.js && node --check src/agent-orchestrator.js && node --check src/resource-manager.js && node --check src/app-settings.js && node --check src/rag-provider.js && node --check src/runtime-adapter.js && node --check public/app.js && node --check apps/desktop/main.cjs && node --check apps/chrome-extension/sidepanel.js && node --check apps/chrome-extension/background.js && node --check scripts/install-chrome-extension.mjs && node --input-type=module -e \"import('./src/mcp.js').then(({ createMcpServer, createRagMcpServer }) => { createMcpServer(); createRagMcpServer({ workspaceId: 'check' }); })\""
+    "check": "node --check src/config.js && node --check src/server.js && node --check src/execution-manager.js && node --check src/codex-app-server.js && node --check src/context-store.js && node --check src/credential-store.js && node --check src/filename-utils.js && node --check src/agent-blueprint-schema.js && node --check src/skill-installer.js && node --check src/mcp-server.js && node --check src/mcp.js && node --check src/anythingllm-client.js && node --check src/agent-orchestrator.js && node --check src/resource-manager.js && node --check src/app-settings.js && node --check src/rag-provider.js && node --check src/runtime-adapter.js && node --check src/storage/sqlite-database.js && node --check src/storage/object-store.js && node --check src/storage/run-event-store.js && node --check src/storage/hippo-repository.js && node --check src/storage/sqlite-state-store.js && node --check public/app.js && node --check apps/desktop/main.cjs && node --check apps/chrome-extension/sidepanel.js && node --check apps/chrome-extension/background.js && node --check scripts/install-chrome-extension.mjs && node --input-type=module -e \"import('./src/mcp.js').then(({ createMcpServer, createRagMcpServer }) => { createMcpServer(); createRagMcpServer({ workspaceId: 'check' }); })\""
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "build": {
+    "appId": "local.hippo.agent",
+    "productName": "Hippo",
+    "electronDist": "node_modules/electron/dist",
+    "files": [
+      "apps/desktop/**/*",
+      "public/**/*",
+      "schemas/**/*",
+      "src/**/*",
+      ".agents/skills/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools"
+    }
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "ajv": "^8.20.0",
+    "better-sqlite3": "^12.11.1",
     "dompurify": "^3.4.12",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
@@ -26,6 +49,8 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "electron": "^32.3.3"
+    "@electron/rebuild": "^3.7.2",
+    "electron": "^32.3.3",
+    "electron-builder": "^25.1.8"
   }
 }
